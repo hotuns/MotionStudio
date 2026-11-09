@@ -1,0 +1,8787 @@
+//! Evaluator tests: press-mode / trigger behaviour, and the Virtual Menu
+//! state machine.
+//!
+//! These reach exactly the names they did when the evaluator was one file,
+//! with no import churn — see the glob below for how.
+
+// The two test mods below are children of THIS module, not of `eval` as they
+// were when the evaluator was one file — so their own `use super::*` reaches
+// here first. This glob chains it on to the facade, restoring the names they
+// were written against.
+use super::*;
+
+#[cfg(test)]
+mod trigger_tests {
+    use super::*;
+    use crate::graph::SinkTarget;
+
+    // Two virtual sinks feeding back to one physical pad must COMBINE (max), not
+    // first-wins — the "only one virtual passes ping after restart" bug.
+    #[test]
+    fn combine_feedback_takes_max_not_first() {
+        // Loud + quiet → loud, regardless of order.
+        assert_eq!(
+            combine_feedback_max(Signal::Float(0.2), Signal::Float(0.9)),
+            Signal::Float(0.9)
+        );
+        assert_eq!(
+            combine_feedback_max(Signal::Float(0.9), Signal::Float(0.2)),
+            Signal::Float(0.9)
+        );
+        // One source idle (0.0), the other active → active wins (the exact bug:
+        // an idle virtual must not mask an active one).
+        assert_eq!(
+            combine_feedback_max(Signal::Float(0.0), Signal::Float(0.7)),
+            Signal::Float(0.7)
+        );
+        // Bool OR.
+        assert_eq!(
+            combine_feedback_max(Signal::Bool(false), Signal::Bool(true)),
+            Signal::Bool(true)
+        );
+        // Float vs Bool coercion.
+        assert_eq!(
+            combine_feedback_max(Signal::Float(0.3), Signal::Bool(true)),
+            Signal::Float(1.0)
+        );
+    }
+
+    fn canonical_pins() -> Vec<String> {
+        automap::ALL_PINS.iter().map(|p| p.id.to_string()).collect()
+    }
+
+    fn empty_node(uid: usize, module_id: &str) -> NodeSnap {
+        NodeSnap {
+            node_uid: uid,
+            module_id: module_id.to_string(),
+            params: HashMap::new(),
+            n_outputs: 0,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    fn sink_node(uid: usize, device_id: &str, src_dev: &str, bridge: bool) -> NodeSnap {
+        let mut n = empty_node(uid, "device.sink");
+        n.sink_target = Some(SinkTarget {
+            device_id: device_id.to_string(),
+            // All canonical pins are valid sink destinations.
+            pin_ids: canonical_pins(),
+            multi_sources: vec![Vec::new(); canonical_pins().len()],
+            automap_source: Some((src_dev.to_string(), canonical_pins())),
+            automap_fallback_dev: Some("gilrs:switch_pro:0".to_string()),
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: bridge,
+            compiled: Default::default(),
+        });
+        n
+    }
+
+    // ── Macro Output routing ──────────────────────────────────────────────────
+
+    /// Macro node snap with `ports` as (id, type_str) pairs.
+    fn macro_node(uid: usize, ports: &[(&str, &str)]) -> NodeSnap {
+        let mut n = empty_node(uid, "module.macro");
+        n.n_outputs = ports.len();
+        n.output_pin_ids = ports.iter().map(|(id, _)| format!("macro:{id}")).collect();
+        n.params.insert("macro_ports".into(), Value::Array(ports.iter().map(|(id, ty)|
+            serde_json::json!({ "id": id, "name": id, "icon": "", "type": ty })
+        ).collect()));
+        n
+    }
+
+    // A digital Remapper mapping targeting a macro pin drives the macro node's
+    // Bool port (same tick — the macro node evaluates after the remapper), the
+    // unmapped port emits its typed off value, and the macro pin never leaks
+    // onto the AutoMap bus toward the sink.
+    #[test]
+    fn remapper_digital_mapping_drives_macro_port() {
+        let dev = "gilrs:switch_pro:0";
+        let src = source_node(1, dev, 0.0);
+        let mut remap = empty_node(2, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_south"], "out": ["macro:aa11bb22"] }
+        ]));
+        remap.input_sources = vec![Some((0, 0))];
+        remap.n_outputs = 1;
+        let mac = macro_node(3, &[("aa11bb22", "bool"), ("cc33dd44", "float")]);
+        let sink = sink_node(4, "virtual.xinput:0", "remap:2", true);
+        let graph = ProcessingGraph { nodes: vec![src, remap, mac, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let press = |on: bool| {
+            let mut m = HashMap::new();
+            m.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(on));
+            m
+        };
+
+        eval_graph_tick(&graph, &mut state, &press(true), 0.016, &mut out);
+        assert_eq!(out.outputs.get(&(3, 0)).copied().flatten(), Some(Signal::Bool(true)),
+            "mapped macro Bool port must assert while the chord is held");
+        assert_eq!(out.outputs.get(&(3, 1)).copied().flatten(), Some(Signal::Float(0.0)),
+            "unmapped Float port emits its typed off value");
+        assert!(out.sink_outputs.keys().all(|(_, p)| !p.starts_with("macro:")),
+            "macro pins must never reach a sink");
+
+        eval_graph_tick(&graph, &mut state, &press(false), 0.016, &mut out);
+        assert_eq!(out.outputs.get(&(3, 0)).copied().flatten(), Some(Signal::Bool(false)),
+            "released mapping must drop the port back to false");
+    }
+
+    // A Virtual Menu placed UPSTREAM of the Remapper that maps a button to its
+    // Select target is a feedback cycle: the Remapper is forced to evaluate
+    // AFTER the menu, so this tick's `collector_sigs` never carries the Select
+    // value when the menu reads it. The cross-tick macro carry-over
+    // (`NodeState::macro_prev`) delivers it one tick later, so `select_on =
+    // "press"` fires. Also exercises the Show target opening the menu the same
+    // way. Node order [src, menu, remap, sink] reproduces the cyclic fallback
+    // (menu before its producer).
+    #[test]
+    fn menu_select_from_downstream_remapper_via_carryover() {
+        let dev = "gilrs:switch_pro:0";
+        let src = source_node(1, dev, 0.0);
+
+        let mut menu = empty_node(2, "module.menu");
+        menu.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        menu.params.insert("menu_id".into(), Value::String("abcd1234".into()));
+        menu.params.insert("select_on".into(), Value::String("press".into()));
+        menu.params.insert("col_edges".into(), serde_json::json!([0.5]));
+        menu.params.insert("row_edges".into(), serde_json::json!([0.5]));
+        menu.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        menu.params.insert("zone_maps".into(), serde_json::json!([
+            { "f": 0, "z": 0, "in": ["menu_sel"], "out": ["btn_north"] }
+        ]));
+        menu.n_outputs = 3;
+        menu.output_pin_ids = vec![
+            "automap_pass".into(), "menu_open".into(), "menu_hover".into(),
+        ];
+
+        let mut remap = empty_node(3, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_start"], "out": ["menu:abcd1234_show"] },
+            { "in": ["btn_south"], "out": ["menu:abcd1234_sel"] },
+        ]));
+        remap.input_sources = vec![Some((0, 0))];
+        remap.n_outputs = 1;
+
+        // Sink pulls the menu's published bus (where the zone card writes btn_north).
+        let sink = sink_node(4, "virtual.xinput:0", "menumap:2", false);
+
+        let graph = ProcessingGraph { nodes: vec![src, menu, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // btn_start held (Show), stick points top-left (zone 0); btn_south varies.
+        let sigs = |south: bool| {
+            let mut m = HashMap::new();
+            m.insert((dev.to_string(), "btn_start".to_string()), Signal::Bool(true));
+            m.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(south));
+            m.insert((dev.to_string(), "left_stick".to_string()), Signal::Vec2(Vec2::new(-0.8, 0.8)));
+            m
+        };
+        let north = |o: &TickOutput| o.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), "btn_north".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        let menu_open = |o: &TickOutput| o.last_outputs.get(&2)
+            .and_then(|v| v.get(1)).copied().flatten().map(|s| s.as_bool()).unwrap_or(false);
+
+        // Warm up: the Show macro opens the menu one tick after it's published.
+        for _ in 0..4 {
+            eval_graph_tick(&graph, &mut state, &sigs(false), 0.016, &mut out);
+        }
+        assert!(menu_open(&out), "macro Show target must open the menu via the carry-over");
+        assert!(!north(&out), "no selection before Select is pressed");
+        let hover = out.last_outputs.get(&2).and_then(|v| v.get(2)).copied().flatten();
+        assert_eq!(hover, Some(Signal::Float(0.0)), "stick must hover zone 0 after warm-up");
+
+        // Press Select: the menu sees a STALE (false) value this tick — the
+        // Remapper only publishes it now, one node later …
+        eval_graph_tick(&graph, &mut state, &sigs(true), 0.016, &mut out);
+        assert!(!north(&out), "Select is one node downstream — not visible the same tick");
+        // … and reads it via the carry-over on the next tick, firing the card
+        // whose btn_north reaches the sink through the menu's published bus.
+        eval_graph_tick(&graph, &mut state, &sigs(true), 0.016, &mut out);
+        assert!(north(&out),
+            "press-mode Select from a downstream Remapper must fire the zone card via the carry-over");
+    }
+
+    // The Virtual Menu's SOURCE-BLOCK must suppress a navigation input even when a
+    // PARALLEL Combiner port carries a RAW copy that bypasses the menu — the exact
+    // leak the user hit (SORT picks the raw port over the menu's zero). Blocking at
+    // the source (dev_sigs) zeroes the raw port too, so nothing reaches the sink.
+    #[test]
+    fn menu_blocks_navigation_input_at_sink_despite_parallel_raw_port() {
+        let dev = "gilrs:switch_pro:0";
+        let src = source_node(1, dev, 0.0);
+
+        // Menu opened by a Remapper's Show macro; suppresses the left stick.
+        let mut menu = empty_node(2, "module.menu");
+        menu.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        menu.params.insert("menu_id".into(), Value::String("abcd1234".into()));
+        menu.n_outputs = 3;
+        menu.output_pin_ids = vec![
+            "automap_pass".into(), "menu_open".into(), "menu_hover".into(),
+        ];
+
+        let mut remap = empty_node(3, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_start"], "out": ["menu:abcd1234_show"] },
+        ]));
+        remap.input_sources = vec![Some((0, 0))];
+        remap.n_outputs = 1;
+
+        // Combiner: port 0 = menu bus (suppressed), port 1 = RAW device (leak path).
+        let mut comb = empty_node(4, "module.automap_combiner");
+        comb.params.insert("_automap_input_devs".into(), Value::Array(vec![
+            Value::String(String::new()), Value::String(dev.into()),
+        ]));
+        comb.params.insert("_automap_input_collectors".into(), Value::Array(vec![
+            Value::String("menumap:2".into()), Value::String(String::new()),
+        ]));
+        comb.input_sources = vec![Some((0, 0)), Some((1, 0))];
+
+        // sink_node sets automap_fallback_dev = the switch_pro pad — the physical
+        // source the menu keys its block by.
+        let sink = sink_node(5, "virtual.xinput:0", "combiner:4", false);
+
+        let graph = ProcessingGraph { nodes: vec![src, menu, remap, comb, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // btn_start opens the menu; the left stick is fully deflected.
+        let sigs = || {
+            let mut m = HashMap::new();
+            m.insert((dev.to_string(), "btn_start".to_string()), Signal::Bool(true));
+            m.insert((dev.to_string(), "left_stick".to_string()), Signal::Vec2(Vec2::new(0.9, 0.0)));
+            m.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.9));
+            m
+        };
+        for _ in 0..4 { eval_graph_tick(&graph, &mut state, &sigs(), 0.016, &mut out); }
+
+        assert!(out.last_outputs.get(&2).and_then(|v| v.get(1)).copied().flatten()
+            .map(|s| s.as_bool()).unwrap_or(false), "menu should be open after warm-up");
+
+        // Combiner SORT lets the raw port's 0.9 win, but the sink block zeroes it.
+        let lx = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick_x".to_string()))
+            .map(|s| s.as_float());
+        let lv = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick".to_string()))
+            .and_then(|s| if let Signal::Vec2(v) = s { Some(v.x) } else { None });
+        let v = lx.or(lv).unwrap_or(0.0);
+        assert!(v.abs() < 1e-4,
+            "menu must suppress the navigation stick at the game boundary even via a parallel raw port, got {v}");
+    }
+
+    // An analog-mode mapping targeting a Float macro port passes the live
+    // stick magnitude through — continuous, not a binary gate — and a Bool
+    // port fed by the same analog write thresholds at 0.5.
+    #[test]
+    fn remapper_analog_mapping_drives_float_macro() {
+        let dev = "gilrs:switch_pro:0";
+        let src = source_node(1, dev, 0.0);
+        let mut remap = empty_node(2, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["macro:f1f1f1f1"], "mode": "analog" }
+        ]));
+        remap.input_sources = vec![Some((0, 0))];
+        remap.n_outputs = 1;
+        let mac = macro_node(3, &[("f1f1f1f1", "float")]);
+        let graph = ProcessingGraph { nodes: vec![src, remap, mac], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let push = |y: f32| {
+            let mut m = HashMap::new();
+            m.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(y));
+            m
+        };
+
+        eval_graph_tick(&graph, &mut state, &push(0.5), 0.016, &mut out);
+        let v = out.outputs.get(&(3, 0)).copied().flatten().map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.5).abs() < 0.05, "half push should give ~0.5 on the Float port, got {v}");
+
+        eval_graph_tick(&graph, &mut state, &push(0.0), 0.016, &mut out);
+        let v = out.outputs.get(&(3, 0)).copied().flatten().map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!(v.abs() < 0.01, "neutral stick should release the port to 0, got {v}");
+    }
+
+    // A zone chosen onto a stick direction pushes that stick fully while
+    // touched: sinks read the axes, never the derived direction pin.
+    #[test]
+    fn touch_zones_card_pushes_a_stick_direction() {
+        let mut tz = empty_node(1, "module.touch_zones");
+        tz.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        tz.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        tz.params.insert("col_edges".into(), serde_json::json!([]));
+        tz.params.insert("row_edges".into(), serde_json::json!([]));
+        tz.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["right_stick_left"]},
+        ]));
+        let mut m: BusMap = BusMap::default();
+        m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+        m.insert(("pad".into(), "touch1_x".into()), Signal::Float(0.0));
+        m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+        let mut c: BusMap = BusMap::default();
+        eval_touch_zones_map_node(&tz, 1, &m, &mut c, &mut HashMap::new(), 0.016);
+        let get = |p: &str| c.get(&("touchmap:1".to_string(), p.to_string())).copied();
+        assert_eq!(get("right_stick_x"), Some(Signal::Float(-1.0)));
+        assert_eq!(get("right_stick"), Some(Signal::Vec2(Vec2::new(-1.0, 0.0))));
+    }
+
+    // A Touch Zones card targeting a macro pin publishes BOTH aspects: the
+    // shaped gate (Bool) and the zone-local deflection (Vec2). The macro node
+    // then coerces per port type: Vec2 passes through, Float takes the
+    // magnitude, Bool follows the gate.
+    #[test]
+    fn touch_zones_card_drives_macro_aspects() {
+        let mut tz = empty_node(1, "module.touch_zones");
+        tz.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        tz.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        tz.params.insert("col_edges".into(), serde_json::json!([]));
+        tz.params.insert("row_edges".into(), serde_json::json!([]));
+        tz.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["macro:abcd0123"]},
+        ]));
+        // Finger at pad center then pushed right: unit x 0.5→0.75 within the
+        // single full-pad zone → deflection x ≈ +0.5 from the zone center.
+        let finger = |px: f32| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(px));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+            m
+        };
+        let mut state = HashMap::new();
+        let mut c: BusMap = BusMap::default();
+        // Land at center (adaptive center latches there), then move right.
+        eval_touch_zones_map_node(&tz, 1, &finger(0.0), &mut c, &mut state, 0.016);
+        c.clear();
+        eval_touch_zones_map_node(&tz, 1, &finger(0.5), &mut c, &mut state, 0.016);
+
+        assert_eq!(c.get(&("macro".to_string(), "macro:abcd0123".to_string())).copied(),
+            Some(Signal::Bool(true)), "gate aspect must assert while touched");
+        let v2 = c.get(&("macro#v2".to_string(), "macro:abcd0123".to_string())).copied();
+        let Some(Signal::Vec2(v)) = v2 else { panic!("deflection aspect missing: {v2:?}") };
+        assert!(v.x > 0.4 && v.y.abs() < 0.05, "rightward deflection expected, got {v:?}");
+        assert!(c.iter().all(|((k, p), _)| k != "touchmap:1" || !p.starts_with("macro:")),
+            "macro pins must not be published on the touchmap bus key");
+
+        // Coercion: read the same namespace back through each port type.
+        let mut ns = NodeState::default();
+        let dev_sigs = BusMap::default();
+        let mac = macro_node(2, &[("abcd0123", "vec2")]);
+        let out = compute_node(&mac, &[], &mut ns, &dev_sigs, &c, 0.016);
+        assert!(matches!(out[0], Some(Signal::Vec2(v)) if v.x > 0.4),
+            "Vec2 port passes the deflection through, got {:?}", out[0]);
+        let mac = macro_node(2, &[("abcd0123", "float")]);
+        let out = compute_node(&mac, &[], &mut ns, &dev_sigs, &c, 0.016);
+        assert!(matches!(out[0], Some(Signal::Float(f)) if (f - 0.5).abs() < 0.05),
+            "Float port prefers the deflection magnitude over the binary gate, got {:?}", out[0]);
+        let mac = macro_node(2, &[("abcd0123", "bool")]);
+        let out = compute_node(&mac, &[], &mut ns, &dev_sigs, &c, 0.016);
+        assert_eq!(out[0], Some(Signal::Bool(true)), "Bool port follows the gate");
+    }
+
+    // Ports mode reads zones from the BSP tree, so a PER-ZONE split (a partial
+    // divider the flat grid can't express) emits X/Y/Active for the right leaf.
+    #[test]
+    fn ports_touch_zones_partial_split_emits_leaf() {
+        use flexinput_core::touchzones as tz;
+        let dev = "dev";
+        // Left half = one tall zone (leaf 0); right half split top/bottom
+        // (leaf 1 top, leaf 2 bottom) — not a pure grid.
+        let tree = serde_json::json!({
+            "axis": "v", "t": 0.5,
+            "a": { "id": 0 },
+            "b": { "axis": "h", "t": 0.5, "a": { "id": 1 }, "b": { "id": 2 } }
+        });
+        let mut n = empty_node(1, "module.touch_zones");
+        n.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        n.params.insert("zone_tree".into(), tree);
+        // Output pins: passthrough + leaf 2's X/Y/Active + leaf 0/1 Active.
+        let z = |id, comp| tz::zone_pin_id(0, id, comp);
+        n.output_pin_ids = vec![
+            tz::PASS_PIN_ID.to_string(),
+            z(2, tz::ZoneComp::Active), z(2, tz::ZoneComp::X), z(2, tz::ZoneComp::Y),
+            z(0, tz::ZoneComp::Active), z(1, tz::ZoneComp::Active),
+        ];
+        n.n_outputs = n.output_pin_ids.len();
+
+        // Finger at pad (0.5, -0.5) → unit (0.75, 0.75) → bottom-right = leaf 2.
+        let mut dev_sigs = BusMap::default();
+        dev_sigs.insert((dev.to_string(), "touch1_x".to_string()), Signal::Float(0.5));
+        dev_sigs.insert((dev.to_string(), "touch1_y".to_string()), Signal::Float(-0.5));
+        dev_sigs.insert((dev.to_string(), "touch1_active".to_string()), Signal::Bool(true));
+
+        let mut ns = NodeState::default();
+        let c = BusMap::default();
+        let out = compute_node(&n, &[], &mut ns, &dev_sigs, &c, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)), "leaf 2 active");
+        assert!(matches!(out[2], Some(Signal::Float(f)) if (f - 0.5).abs() < 1e-4),
+            "leaf 2 local x = 0.5, got {:?}", out[2]);
+        assert!(matches!(out[3], Some(Signal::Float(f)) if (f - 0.5).abs() < 1e-4),
+            "leaf 2 local y = 0.5, got {:?}", out[3]);
+        assert_eq!(out[4], Some(Signal::Bool(false)), "leaf 0 inactive");
+        assert_eq!(out[5], Some(Signal::Bool(false)), "leaf 1 inactive");
+
+        // Pure grid (no zone_tree): migrates to leaf ids == row-major, so the
+        // same finger lands in the right column of a 2-col grid = leaf 1.
+        let mut g = empty_node(1, "module.touch_zones");
+        g.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        g.params.insert("col_edges".into(), serde_json::json!([0.5]));
+        g.output_pin_ids = vec![
+            tz::PASS_PIN_ID.to_string(),
+            z(0, tz::ZoneComp::Active), z(1, tz::ZoneComp::Active),
+        ];
+        g.n_outputs = g.output_pin_ids.len();
+        let out = compute_node(&g, &[], &mut ns, &dev_sigs, &c, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(false)), "grid leaf 0 (left) inactive");
+        assert_eq!(out[2], Some(Signal::Bool(true)), "grid leaf 1 (right) active");
+    }
+
+    // 3DOF-Lean mappings targeting macro pins: analog mode passes the live
+    // lean magnitude; digital (down) mode asserts while the side is active.
+    #[test]
+    fn lean_mapping_drives_macro_port() {
+        let mk = |mode: &str| {
+            let mut n = empty_node(1, "processing.gyro_3dof");
+            n.params.insert("lean_left".into(), serde_json::json!([
+                { "out": ["macro:11aa22bb"], "mode": mode }
+            ]));
+            n
+        };
+        let outs = |lean: f32| vec![None, None, None, Some(Signal::Float(lean))];
+        let get = |c: &BusMap|
+            c.get(&("macro".to_string(), "macro:11aa22bb".to_string())).copied();
+
+        // Analog: leaning left at 0.8 → Float(0.8) on the macro namespace.
+        let snap = mk("analog");
+        let mut ns = NodeState::default();
+        let mut c = BusMap::default();
+        lean_dispatch_into_collector_sigs(&snap, 1, &outs(-0.8), &mut ns, &mut c, 0.016);
+        let v = get(&c).map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.8).abs() < 1e-4, "analog lean should pass magnitude, got {v}");
+        // Below threshold → no write (port reads as released).
+        c.clear();
+        lean_dispatch_into_collector_sigs(&snap, 1, &outs(-0.1), &mut ns, &mut c, 0.016);
+        assert_eq!(get(&c), None, "below-threshold lean must not assert the port");
+
+        // Down mode: asserts Bool while the side is active.
+        let snap = mk("down");
+        let mut ns = NodeState::default();
+        let mut c = BusMap::default();
+        lean_dispatch_into_collector_sigs(&snap, 1, &outs(-0.8), &mut ns, &mut c, 0.016);
+        assert_eq!(get(&c), Some(Signal::Bool(true)));
+    }
+
+    // ── Per-card response curve + manual activation threshold ────────────────
+
+    fn curve_remap_graph(mapping: serde_json::Value) -> ProcessingGraph {
+        let dev = "gilrs:switch_pro:0";
+        let src = source_node(1, dev, 0.0);
+        let mut remap = empty_node(2, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([mapping]));
+        remap.input_sources = vec![Some((0, 0))];
+        remap.n_outputs = 1;
+        let sink = sink_node(3, "virtual.xinput:0", "remap:2", true);
+        ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() }
+    }
+
+    fn stick_y(y: f32) -> BusMap {
+        let mut m = BusMap::default();
+        m.insert(("gilrs:switch_pro:0".to_string(), "left_stick_y".to_string()), Signal::Float(y));
+        m
+    }
+
+    fn sinkv(out: &TickOutput, pin: &str) -> Option<Signal> {
+        out.sink_outputs.get(&("virtual.xinput:0".to_string(), pin.to_string())).copied()
+    }
+
+    // An analog mapping's per-card curve reshapes the emitted magnitude —
+    // a halving curve turns a full stick push into ~0.5 trigger travel.
+    #[test]
+    fn remapper_analog_curve_shapes_output() {
+        let graph = curve_remap_graph(serde_json::json!({
+            "in": ["left_stick_up"], "out": ["right_trigger"], "mode": "analog",
+            "curve": [[0.0, 0.0], [1.0, 0.5]],
+        }));
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&stick_y(1.0)), 0.016, &mut out);
+        let v = sinkv(&out, "right_trigger").map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.5).abs() < 0.05, "halving curve should give ~0.5 at full push, got {v}");
+    }
+
+    // An analog trigger on an Analog card passes its TRAVEL, from the first
+    // bit of pull: it used to count as pressed only past half travel and then
+    // drive the target at full strength.
+    #[test]
+    fn remapper_analog_trigger_passes_its_travel() {
+        let graph = curve_remap_graph(serde_json::json!({
+            "in": ["left_trigger"], "out": ["left_stick_up"], "mode": "analog",
+        }));
+        let mut sigs = HashMap::new();
+        sigs.insert(("gilrs:switch_pro:0".to_string(), "left_trigger".to_string()), Signal::Float(0.3));
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.016, &mut out);
+        let Some(Signal::Vec2(v)) = sinkv(&out, "left_stick") else { panic!("no stick output") };
+        assert!((v.y - 0.3).abs() < 1e-4, "a 30% pull should push the stick 30%, got {}", v.y);
+    }
+
+    // A trackpad click on an Analog card passes its press from the first touch,
+    // on a pad that reports one; on a pad that doesn't, it drives full while
+    // clicked, as any button there does.
+    #[test]
+    fn remapper_analog_pad_click_passes_its_press() {
+        let graph = curve_remap_graph(serde_json::json!({
+            "in": ["btn_touchpad"], "out": ["right_trigger"], "mode": "analog",
+        }));
+        let run = |pins: &[(&str, Signal)]| {
+            let sigs: HashMap<(String, String), Signal> = pins.iter()
+                .map(|(p, s)| (("gilrs:switch_pro:0".to_string(), p.to_string()), *s))
+                .collect();
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.016, &mut out);
+            sinkv(&out, "right_trigger").map(|s| s.as_float()).unwrap_or(0.0)
+        };
+        let v = run(&[("btn_touchpad", Signal::Bool(false)), ("touch1_pressure", Signal::Float(0.4))]);
+        assert!((v - 0.4).abs() < 1e-4, "pressing toward the click: {v}");
+        assert_eq!(run(&[("btn_touchpad", Signal::Bool(true))]), 1.0, "no press reported: full while clicked");
+        assert_eq!(run(&[("btn_touchpad", Signal::Bool(false))]), 0.0);
+    }
+
+    // A trackpad click card with a threshold fires where the press reaches it,
+    // click or not; without one, at the click.
+    #[test]
+    fn remapper_pad_click_threshold_goes_by_its_press() {
+        let east = |card: serde_json::Value, press: f32, click: bool| {
+            let graph = curve_remap_graph(card);
+            let sigs: HashMap<(String, String), Signal> = [
+                ("btn_touchpad", Signal::Bool(click)), ("touch1_pressure", Signal::Float(press)),
+            ].into_iter().map(|(p, s)| (("gilrs:switch_pro:0".to_string(), p.to_string()), s)).collect();
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.016, &mut out);
+            sinkv(&out, "btn_east").is_some_and(|s| s.as_bool())
+        };
+        let with = serde_json::json!({ "in": ["btn_touchpad"], "out": ["btn_east"], "threshold": 0.5 });
+        assert!(!east(with.clone(), 0.4, false), "short of it");
+        assert!(east(with, 0.6, false), "past it, no click needed");
+        let without = serde_json::json!({ "in": ["btn_touchpad"], "out": ["btn_east"] });
+        assert!(!east(without.clone(), 0.9, false), "no threshold: the click");
+        assert!(east(without, 0.9, true));
+    }
+
+    // A device's trackpads read through their deadzone and offset: the left
+    // pad's frame moved right, off its grip side, the right pad's left; a pad
+    // not touched is left as it is.
+    #[test]
+    fn trackpads_read_through_their_deadzone_and_offset() {
+        let dev = "sdl:generic:sc";
+        let mut src = source_node(1, dev, 0.0);
+        src.params.insert("tpad_l_offset".into(), Value::from(0.1));
+        src.params.insert("tpad_l_deadzone".into(), Value::from(0.2));
+        src.params.insert("tpad_r_offset".into(), Value::from(0.2));
+        src.params.insert("tpad_r_deadzone".into(), Value::from(0.2));
+        let graph = ProcessingGraph { nodes: vec![src], ..Default::default() };
+        let mut sigs = BusMap::default();
+        for (field, x, on) in [("touch1", 0.1, true), ("touch2", -0.2, true)] {
+            sigs.set_pin(dev, &format!("{field}_x"), Signal::Float(x));
+            sigs.set_pin(dev, &format!("{field}_y"), Signal::Float(0.4));
+            sigs.set_pin(dev, &format!("{field}_active"), Signal::Bool(on));
+        }
+        filter_trackpads(&graph, &mut sigs);
+        let x = |field: &str| sigs.get_pin(dev, &format!("{field}_x")).map(|s| s.as_float()).unwrap_or(9.0);
+        assert!(x("touch1").abs() < 1e-5 && x("touch2").abs() < 1e-5, "each frame's middle: {} {}", x("touch1"), x("touch2"));
+        let y = sigs.get_pin(dev, "touch1_y").map(|s| s.as_float()).unwrap_or(9.0);
+        assert!((y - 0.5).abs() < 1e-5, "up and down through the deadzone alone: {y}");
+        sigs.set_pin(dev, "touch1_active", Signal::Bool(false));
+        sigs.set_pin(dev, "touch1_x", Signal::Float(0.3));
+        filter_trackpads(&graph, &mut sigs);
+        assert_eq!(sigs.get_pin(dev, "touch1_x"), Some(&Signal::Float(0.3)), "untouched: as it was");
+    }
+
+    // Manual threshold on an analog→digital mapping: PLAIN HOLD above the
+    // line (steady across ticks — no tap train), release the moment the
+    // shaped value dips below.
+    #[test]
+    fn remapper_analog_threshold_holds_digital() {
+        let graph = curve_remap_graph(serde_json::json!({
+            "in": ["left_stick_up"], "out": ["btn_east"], "mode": "analog",
+            "threshold": 0.6,
+        }));
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let east = |out: &TickOutput| sinkv(out, "btn_east").map(|s| s.as_bool()).unwrap_or(false);
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&stick_y(0.4)), 0.016, &mut out);
+        assert!(!east(&out), "below threshold must stay released");
+        // Above threshold: held EVERY tick — the legacy pulse train would
+        // toggle off within this window.
+        for tick in 0..20 {
+            eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&stick_y(0.8)), 0.016, &mut out);
+            assert!(east(&out), "threshold hold must be steady (tick {tick})");
+        }
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&stick_y(0.4)), 0.016, &mut out);
+        assert!(!east(&out), "dipping below the line must release");
+    }
+
+    // Manual threshold on a DIGITAL-mode mapping with a cardinal input
+    // overrides the built-in cardinal derivation (~0.5): the mapping only
+    // fires past the card's own line.
+    #[test]
+    fn remapper_digital_threshold_overrides_cardinal() {
+        let graph = curve_remap_graph(serde_json::json!({
+            "in": ["left_stick_up"], "out": ["btn_east"],
+            "threshold": 0.8,
+        }));
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let east = |out: &TickOutput| sinkv(out, "btn_east").map(|s| s.as_bool()).unwrap_or(false);
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&stick_y(0.6)), 0.016, &mut out);
+        assert!(!east(&out), "0.6 push is past the built-in derivation but below the card threshold");
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&stick_y(0.9)), 0.016, &mut out);
+        assert!(east(&out), "0.9 push crosses the card threshold");
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&stick_y(0.6)), 0.016, &mut out);
+        assert!(!east(&out), "falling back below the threshold releases");
+    }
+
+    // Lean cards: a per-card threshold replaces the node lean_threshold for
+    // that card, and a curve reshapes the analog magnitude the card emits.
+    #[test]
+    fn lean_card_threshold_and_curve() {
+        // Threshold 0.7 on a down-mode card: node threshold (0.3) alone
+        // would fire at 0.5 lean — the card must not.
+        let mut n = empty_node(1, "processing.gyro_3dof");
+        n.params.insert("lean_left".into(), serde_json::json!([
+            { "out": ["btn_south"], "mode": "down", "threshold": 0.7 }
+        ]));
+        let outs = |lean: f32| vec![None, None, None, Some(Signal::Float(lean))];
+        let get = |c: &BusMap, pin: &str|
+            c.get(&("lean:1".to_string(), pin.to_string())).copied();
+        let mut ns = NodeState::default();
+        let mut c = BusMap::default();
+        lean_dispatch_into_collector_sigs(&n, 1, &outs(-0.5), &mut ns, &mut c, 0.016);
+        assert_eq!(get(&c, "btn_south"), Some(Signal::Bool(false)),
+            "below the card threshold the mapping must not fire");
+        c.clear();
+        lean_dispatch_into_collector_sigs(&n, 1, &outs(-0.8), &mut ns, &mut c, 0.016);
+        assert_eq!(get(&c, "btn_south"), Some(Signal::Bool(true)));
+
+        // Halving curve on an analog card: full lean → ~0.5 on the Float out.
+        let mut n = empty_node(1, "processing.gyro_3dof");
+        n.params.insert("lean_right".into(), serde_json::json!([
+            { "out": ["right_trigger"], "mode": "analog",
+              "curve": [[0.0, 0.0], [1.0, 0.5]] }
+        ]));
+        let mut ns = NodeState::default();
+        let mut c = BusMap::default();
+        lean_dispatch_into_collector_sigs(&n, 1, &outs(1.0), &mut ns, &mut c, 0.016);
+        let v = get(&c, "right_trigger").map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.5).abs() < 0.01, "curve must shape the analog lean magnitude, got {v}");
+    }
+
+    // Multiple writers to one macro port merge by larger magnitude, in either
+    // arrival order — an asserted mapping beats an idle/weaker one.
+    #[test]
+    fn macro_merge_larger_magnitude_wins() {
+        let mut c: BusMap = BusMap::default();
+        merge_macro_scalar(&mut c, "macro:x", Signal::Float(0.3));
+        merge_macro_scalar(&mut c, "macro:x", Signal::Bool(true)); // mag 1.0
+        merge_macro_scalar(&mut c, "macro:x", Signal::Float(0.6));
+        assert_eq!(c.get(&("macro".to_string(), "macro:x".to_string())).copied(),
+            Some(Signal::Bool(true)), "largest-magnitude write must win");
+    }
+
+    // Remapper in analog mode mapping a stick cardinal → right_trigger should
+    // produce a CONTINUOUS value tracking how far the stick is pushed, not a
+    // binary 0/1. Regression guard for the "stick→trigger outputs binary" bug.
+    #[test]
+    fn remapper_analog_stick_to_trigger_is_continuous() {
+        let remap_uid = 1usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String("gilrs:switch_pro:0".into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["right_trigger"], "mode": "analog" }
+        ]));
+
+        // Zero-deadzone source so this test measures continuity, not the
+        // deadzone curve (deadzone is covered by the dedicated tests above).
+        let src = source_node(3, "gilrs:switch_pro:0", 0.0);
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), true);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Stick pushed halfway up (y = +0.5).
+        let mut dev = HashMap::new();
+        dev.insert(("gilrs:switch_pro:0".to_string(), "left_stick_y".to_string()), Signal::Float(0.5));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let v = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.5).abs() < 0.05, "half stick push should give ~0.5 trigger, got {v}");
+
+        // Full push → full trigger.
+        dev.insert(("gilrs:switch_pro:0".to_string(), "left_stick_y".to_string()), Signal::Float(1.0));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let v = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 1.0).abs() < 0.05, "full stick push should give ~1.0 trigger, got {v}");
+
+        // Neutral stick → trigger releases to 0.
+        dev.insert(("gilrs:switch_pro:0".to_string(), "left_stick_y".to_string()), Signal::Float(0.0));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let v = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(0.0);
+        assert!(v.abs() < 0.05, "neutral stick should release trigger to 0, got {v}");
+    }
+
+    // A Remapper captures its output by chord-learning, so on a Switch Pro the
+    // user maps to the DIGITAL ZR button (`btn_rt_dig`), not `right_trigger`.
+    // In analog mode that digital-trigger target must still produce continuous
+    // analog travel on the virtual pad — not a binary press.
+    #[test]
+    fn remapper_analog_to_digital_trigger_button_is_continuous() {
+        let remap_uid = 1usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String("gilrs:switch_pro:0".into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["btn_rt_dig"], "mode": "analog" }
+        ]));
+        let src = source_node(3, "gilrs:switch_pro:0", 0.0);
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), true);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        let mut dev = HashMap::new();
+        dev.insert(("gilrs:switch_pro:0".to_string(), "left_stick_y".to_string()), Signal::Float(0.5));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let v = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.5).abs() < 0.05, "analog map to digital ZR should give ~0.5 analog RT, got {v}");
+    }
+
+    // Two analog mappings sharing an input but with different outputs must BOTH
+    // fire: left_stick_up→right_trigger AND left_stick_up→left_stick_up should
+    // drive the trigger AND keep the stick output (not replace one another).
+    #[test]
+    fn analog_same_input_different_outputs_both_fire() {
+        let remap_uid = 1usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String("gilrs:switch_pro:0".into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["right_trigger"],  "mode": "analog" },
+            { "in": ["left_stick_up"], "out": ["left_stick_up"],  "mode": "analog" }
+        ]));
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), true);
+        let graph = ProcessingGraph { nodes: vec![remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        let mut dev = HashMap::new();
+        dev.insert(("gilrs:switch_pro:0".to_string(), "left_stick_y".to_string()), Signal::Float(1.0));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+
+        let rt = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((rt - 1.0).abs() < 0.05, "trigger mapping should still fire, got RT={rt}");
+        // The stick output must be preserved (left_stick_y stays at +1).
+        let ly = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick_y".to_string()))
+            .map(|s| s.as_float());
+        let lstick = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick".to_string()))
+            .and_then(|s| if let Signal::Vec2(v) = s { Some(v.y) } else { None });
+        let y = ly.or(lstick).unwrap_or(-1.0);
+        assert!((y - 1.0).abs() < 0.05, "stick output should be preserved, got left_stick_y={y}");
+    }
+
+    // Swapping the sticks with two analog cards (all four LS cardinals → RS, and
+    // the reverse) must hold with only ONE stick moving. A card over opposite
+    // cardinals can never have them all deflected at once, so suppression used
+    // to require all-held and never consumed the source stick: pushing LS alone
+    // drove the virtual RS AND leaked raw onto the virtual LS. With both sticks
+    // moving the other card's axis writes overwrote the leak, hiding it.
+    #[test]
+    fn analog_stick_swap_holds_with_one_stick() {
+        let remap_uid = 1usize;
+        let dev = "gilrs:switch_pro:0";
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in":  ["right_stick_up", "right_stick_right", "right_stick_down", "right_stick_left"],
+              "out": ["left_stick_up", "left_stick_right", "left_stick_down", "left_stick_left"],
+              "mode": "analog" },
+            { "in":  ["left_stick_up", "left_stick_right", "left_stick_down", "left_stick_left"],
+              "out": ["right_stick_up", "right_stick_right", "right_stick_down", "right_stick_left"],
+              "mode": "analog" }
+        ]));
+        let src = source_node(3, dev, 0.0);
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), true);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        let tick = |ls: Vec2, rs: Vec2, state: &mut HashMap<usize, NodeState>, out: &mut TickOutput| {
+            let mut d = HashMap::new();
+            for (vec2, x, y, v) in [
+                ("left_stick", "left_stick_x", "left_stick_y", ls),
+                ("right_stick", "right_stick_x", "right_stick_y", rs),
+            ] {
+                d.insert((dev.to_string(), vec2.to_string()), Signal::Vec2(v));
+                d.insert((dev.to_string(), x.to_string()), Signal::Float(v.x));
+                d.insert((dev.to_string(), y.to_string()), Signal::Float(v.y));
+            }
+            eval_graph_tick(&graph, state, &d, 0.016, out);
+        };
+        let stick = |out: &TickOutput, pin: &str| -> Vec2 {
+            match out.sink_outputs.get(&("virtual.xinput:0".to_string(), pin.to_string())) {
+                Some(Signal::Vec2(v)) => *v,
+                other => panic!("{pin} missing at sink: {other:?}"),
+            }
+        };
+        let near = |a: Vec2, b: Vec2| (a - b).length() < 0.05;
+
+        // LS alone → drives RS only; virtual LS stays centered.
+        tick(Vec2::new(0.8, 0.0), Vec2::ZERO, &mut state, &mut out);
+        assert!(near(stick(&out, "right_stick"), Vec2::new(0.8, 0.0)),
+            "LS input must drive RS, got {:?}", stick(&out, "right_stick"));
+        assert!(near(stick(&out, "left_stick"), Vec2::ZERO),
+            "LS input must not leak onto LS, got {:?}", stick(&out, "left_stick"));
+
+        // RS alone → drives LS only.
+        tick(Vec2::ZERO, Vec2::new(0.0, -0.6), &mut state, &mut out);
+        assert!(near(stick(&out, "left_stick"), Vec2::new(0.0, -0.6)),
+            "RS input must drive LS, got {:?}", stick(&out, "left_stick"));
+        assert!(near(stick(&out, "right_stick"), Vec2::ZERO),
+            "RS input must not leak onto RS, got {:?}", stick(&out, "right_stick"));
+
+        // Both → fully swapped.
+        tick(Vec2::new(-0.5, 0.5), Vec2::new(0.7, 0.0), &mut state, &mut out);
+        assert!(near(stick(&out, "left_stick"), Vec2::new(0.7, 0.0)),
+            "both moving: LS must carry RS input, got {:?}", stick(&out, "left_stick"));
+        assert!(near(stick(&out, "right_stick"), Vec2::new(-0.5, 0.5)),
+            "both moving: RS must carry LS input, got {:?}", stick(&out, "right_stick"));
+    }
+
+    // ── Order-aware cards: "in order" chords + Sequence mode ─────────────────
+
+    /// One Remapper node driven directly, 10 ms per tick. Every face/shoulder
+    /// button and stick axis reads released/centered unless a tick sets it.
+    struct RemapRig {
+        snap: NodeSnap,
+        state: HashMap<usize, NodeState>,
+    }
+
+    const RIG_DEV: &str = "gilrs:switch_pro:0";
+    const RIG_DT: f32 = 0.01;
+
+    impl RemapRig {
+        fn new(mappings: Value) -> Self {
+            let mut snap = empty_node(1, "module.remapper");
+            snap.params.insert("_automap_device_id".into(), Value::String(RIG_DEV.into()));
+            snap.params.insert("mappings".into(), mappings);
+            let mut rig = RemapRig { snap, state: HashMap::new() };
+            rig.tick(&[]); // cards start clean on their first tick
+            rig
+        }
+
+        fn tick_sigs(&mut self, sigs: &[(&str, Signal)]) -> BusMap {
+            let mut dev = BusMap::default();
+            for b in ["btn_south", "btn_east", "btn_west", "btn_north", "btn_lb", "btn_rb"] {
+                dev.insert((RIG_DEV.to_string(), b.to_string()), Signal::Bool(false));
+            }
+            for a in ["left_stick_x", "left_stick_y"] {
+                dev.insert((RIG_DEV.to_string(), a.to_string()), Signal::Float(0.0));
+            }
+            for (pin, sig) in sigs {
+                dev.insert((RIG_DEV.to_string(), pin.to_string()), *sig);
+            }
+            let mut c = BusMap::default();
+            eval_remapper_node(&self.snap, 1, &dev, &mut c, &mut self.state, RIG_DT);
+            c
+        }
+
+        fn tick(&mut self, down: &[&str]) -> BusMap {
+            let sigs: Vec<(&str, Signal)> = down.iter().map(|p| (*p, Signal::Bool(true))).collect();
+            self.tick_sigs(&sigs)
+        }
+    }
+
+    fn on(c: &BusMap, pin: &str) -> bool {
+        c.get(&("remap:1".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false)
+    }
+
+    // A menu's Next on a button and Previous on a chord with it — one button
+    // cycling both ways: the chord shadows the plain card, so it steps back
+    // only (both at once would cancel in the menu), chord in order or not.
+    #[test]
+    fn menu_next_on_a_button_previous_on_its_chord() {
+        let mac = |c: &BusMap, pin: &str| c.get(&(flexinput_core::macros::SIGS_NS.to_string(), pin.to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        for in_order in [true, false] {
+            let mut rig = RemapRig::new(serde_json::json!([
+                { "in": ["btn_rb"], "out": ["menu:m_next"] },
+                { "in": ["btn_lb", "btn_rb"], "out": ["menu:m_prev"], "in_order": in_order },
+            ]));
+            rig.tick(&["btn_lb"]);
+            let c = rig.tick(&["btn_lb", "btn_rb"]);
+            assert!(mac(&c, "menu:m_prev") && !mac(&c, "menu:m_next"),
+                "LB + RB is Previous alone (in_order {in_order})");
+            let c = rig.tick(&["btn_lb"]);
+            assert!(!mac(&c, "menu:m_prev") && !mac(&c, "menu:m_next"));
+            rig.tick(&[]);
+            let c = rig.tick(&["btn_rb"]);
+            assert!(mac(&c, "menu:m_next") && !mac(&c, "menu:m_prev"),
+                "RB alone is Next (in_order {in_order})");
+        }
+    }
+
+    // ── Set Neutral Forward ──────────────────────────────────────────────────
+
+    fn neutral_req(c: &BusMap, dev: &str) -> bool {
+        c.get(&(format!("{ORIENT_NEUTRAL_PREFIX}{dev}"), flexinput_core::imu::ORIENT_NEUTRAL_PIN.to_string()))
+            .is_some_and(|s| s.as_bool())
+    }
+
+    #[test]
+    fn a_card_sending_set_neutral_files_it_for_its_pads() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south"], "out": [flexinput_core::imu::ORIENT_NEUTRAL_PIN] }
+        ]));
+        assert!(!neutral_req(&rig.tick(&[]), RIG_DEV), "nothing while the button is up");
+        assert!(neutral_req(&rig.tick(&["btn_south"]), RIG_DEV), "the pad feeding the card");
+        // Behind a Combiner: every port's pad, both Joy-Con 2 halves.
+        rig.snap.params.insert("_upstream_device_ids".into(), serde_json::json!(["jc2:l", "jc2:r"]));
+        let c = rig.tick(&["btn_south"]);
+        assert!(neutral_req(&c, "jc2:l") && neutral_req(&c, "jc2:r"), "{c:?}");
+    }
+
+    // ── Calibrate Gyro ───────────────────────────────────────────────────────
+
+    fn gyro_cal_req(c: &BusMap, dev: &str) -> bool {
+        c.get(&(format!("{GYRO_CAL_PREFIX}{dev}"), flexinput_core::imu::GYRO_CAL_PIN.to_string()))
+            .is_some_and(|s| s.as_bool())
+    }
+
+    #[test]
+    fn a_card_sending_calibrate_gyro_files_it_for_its_pads() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south"], "out": [flexinput_core::imu::GYRO_CAL_PIN] }
+        ]));
+        assert!(!gyro_cal_req(&rig.tick(&[]), RIG_DEV), "nothing while the button is up");
+        let c = rig.tick(&["btn_south"]);
+        assert!(gyro_cal_req(&c, RIG_DEV), "the pad feeding the card");
+        assert!(!neutral_req(&c, RIG_DEV), "and only the action it sends");
+        rig.snap.params.insert("_upstream_device_ids".into(), serde_json::json!(["jc2:l", "jc2:r"]));
+        let c = rig.tick(&["btn_south"]);
+        assert!(gyro_cal_req(&c, "jc2:l") && gyro_cal_req(&c, "jc2:r"), "{c:?}");
+    }
+
+    #[test]
+    fn calibrate_gyro_reaches_the_ui_once_per_press() {
+        let set = |d: &[&str]| d.iter().map(|s| s.to_string()).collect::<HashSet<String>>();
+        let mut carry = NodeState::default();
+        assert_eq!(gyro_cal_edges(&mut carry, set(&["jc2:l", "jc2:r"])).len(), 2, "the press");
+        assert!(gyro_cal_edges(&mut carry, set(&["jc2:l", "jc2:r"])).is_empty(), "held");
+        assert!(gyro_cal_edges(&mut carry, set(&[])).is_empty(), "let go");
+        assert_eq!(gyro_cal_edges(&mut carry, set(&["jc2:l"])), vec!["jc2:l".to_string()], "pressed again");
+    }
+
+    #[test]
+    fn set_neutral_turns_the_pads_orientation_to_forward_and_keeps_it() {
+        let dev = "jc2:l";
+        let pose = |yaw: f32| {
+            let q = glam::Quat::from_rotation_z(yaw) * glam::Quat::from_rotation_y(-0.25);
+            Signal::Vec4(glam::Vec4::new(q.x, q.y, q.z, q.w))
+        };
+        let heading = |s: &Signal| match s {
+            Signal::Vec4(v) => {
+                let f = glam::Quat::from_xyzw(v.x, v.y, v.z, v.w) * glam::Vec3::X;
+                f.y.atan2(f.x)
+            }
+            _ => panic!(),
+        };
+        let key = (dev.to_string(), "orientation".to_string());
+        let mut carry = NodeState::default();
+        carry.orient_neutral_req.insert(dev.to_string());
+        let mut sigs = BusMap::from_iter([(key.clone(), pose(0.8))]);
+        apply_orient_neutral(&mut carry, &mut sigs);
+        assert!(heading(&sigs[&key]).abs() < 1e-4, "facing forward: {}", heading(&sigs[&key]));
+        assert!(sigs[&(dev.to_string(), ORIENT_NEUTRAL_DEV_PIN.to_string())].as_bool(), "and modules hear it");
+        // Released: the new forward holds, and turning reads from it.
+        carry.orient_neutral_req.clear();
+        let mut sigs = BusMap::from_iter([(key.clone(), pose(1.1))]);
+        apply_orient_neutral(&mut carry, &mut sigs);
+        assert!((heading(&sigs[&key]) - 0.3).abs() < 1e-4, "{}", heading(&sigs[&key]));
+        assert!(!sigs.contains_key(&(dev.to_string(), ORIENT_NEUTRAL_DEV_PIN.to_string())));
+    }
+
+    // A then B and B then A are different cards.
+    #[test]
+    fn in_order_chord_distinguishes_order() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "in_order": true },
+            { "in": ["btn_east", "btn_south"], "out": ["btn_rb"], "in_order": true }
+        ]));
+        rig.tick(&["btn_south"]);
+        let c = rig.tick(&["btn_south", "btn_east"]);
+        assert!(on(&c, "btn_lb") && !on(&c, "btn_rb"), "A then B must fire only the A-then-B card");
+        rig.tick(&[]);
+        rig.tick(&["btn_east"]);
+        let c = rig.tick(&["btn_east", "btn_south"]);
+        assert!(on(&c, "btn_rb") && !on(&c, "btn_lb"), "B then A must fire only the B-then-A card");
+    }
+
+    // Normal press mode doesn't wait on the time gap: the chord's first input is
+    // live at once, consumed when the chord completes, and back as soon as the
+    // chord lets go of it while it's still held. Pressing the last input again
+    // re-fires.
+    #[test]
+    fn in_order_chord_start_is_live_then_consumed() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "in_order": true }
+        ]));
+        assert!(on(&rig.tick(&["btn_south"]), "btn_south"), "the first input isn't delayed");
+        let c = rig.tick(&["btn_south", "btn_east"]);
+        assert!(on(&c, "btn_lb"));
+        assert!(!on(&c, "btn_south") && !on(&c, "btn_east"), "matched inputs are consumed");
+        assert!(c.contains_key(&("remap:1".to_string(), format!("{CONSUMED_PREFIX}btn_south"))),
+            "a consumed input is marked, so a Combiner won't take it from a raw port");
+        let c = rig.tick(&["btn_south"]);
+        assert!(!on(&c, "btn_lb") && on(&c, "btn_south"), "backing out brings the still-held start back at once");
+        let c = rig.tick(&["btn_south", "btn_east"]);
+        assert!(on(&c, "btn_lb") && !on(&c, "btn_south"), "re-pressing the last input re-fires and consumes the start");
+    }
+
+    // Hold in normal press mode: once the chord fires, its output stays on while
+    // the last input is held, even after the earlier inputs are let go — and an
+    // output that is one of those inputs follows it. LB > X → LB + Y: lift LB
+    // and X keeps holding Y. LB > RB > X → LB + RB + Y works the same way.
+    #[test]
+    fn in_order_chord_hold_latches_output_on_trigger() {
+        let card = |hold: bool| serde_json::json!([
+            { "in": ["btn_lb", "btn_west"], "out": ["btn_lb", "btn_north"], "in_order": true, "sustain": hold }
+        ]);
+        let mut rig = RemapRig::new(card(true));
+        rig.tick(&["btn_lb"]);
+        let c = rig.tick(&["btn_lb", "btn_west"]);
+        assert!(on(&c, "btn_lb") && on(&c, "btn_north") && !on(&c, "btn_west"), "LB > X gives LB + Y");
+        for _ in 0..3 {
+            let c = rig.tick(&["btn_west"]);
+            assert!(on(&c, "btn_north") && !on(&c, "btn_lb") && !on(&c, "btn_west"),
+                "LB lifted: X keeps holding Y, LB drops");
+        }
+        let c = rig.tick(&[]);
+        assert!(!on(&c, "btn_north") && !on(&c, "btn_west"), "X released: Y released");
+
+        let mut rig = RemapRig::new(card(false));
+        rig.tick(&["btn_lb"]);
+        rig.tick(&["btn_lb", "btn_west"]);
+        let c = rig.tick(&["btn_west"]);
+        assert!(!on(&c, "btn_north") && !on(&c, "btn_west"), "without Hold, lifting LB ends it; X stays consumed");
+
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_lb", "btn_rb", "btn_west"], "out": ["btn_lb", "btn_rb", "btn_north"],
+              "in_order": true, "sustain": true }
+        ]));
+        rig.tick(&["btn_lb"]);
+        rig.tick(&["btn_lb", "btn_rb"]);
+        let c = rig.tick(&["btn_lb", "btn_rb", "btn_west"]);
+        assert!(on(&c, "btn_lb") && on(&c, "btn_rb") && on(&c, "btn_north"), "LB > RB > X gives LB + RB + Y");
+        let c = rig.tick(&["btn_rb", "btn_west"]);
+        assert!(!on(&c, "btn_lb") && on(&c, "btn_rb") && on(&c, "btn_north"), "LB lifted: RB + Y");
+        let c = rig.tick(&["btn_west"]);
+        assert!(!on(&c, "btn_lb") && !on(&c, "btn_rb") && on(&c, "btn_north"), "RB lifted too: X holds Y");
+        assert!(!on(&rig.tick(&[]), "btn_north"), "X released: Y released");
+    }
+
+    // An "in order" chord as a mode shift, e.g. [LB > Y] → [LB + X]: LB + Y
+    // gives LB + X; letting go of Y leaves LB held; Y then LB is just Y + LB;
+    // and letting go of LB first doesn't send a stray Y.
+    #[test]
+    fn in_order_chord_works_as_mode_shift() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_lb", "btn_north"], "out": ["btn_lb", "btn_west"], "in_order": true }
+        ]));
+        rig.tick(&["btn_lb"]);
+        let c = rig.tick(&["btn_lb", "btn_north"]);
+        assert!(on(&c, "btn_lb") && on(&c, "btn_west") && !on(&c, "btn_north"), "LB > Y gives LB + X");
+        let c = rig.tick(&["btn_lb"]);
+        assert!(on(&c, "btn_lb") && !on(&c, "btn_west"), "releasing Y keeps LB held, drops X");
+        let c = rig.tick(&["btn_lb", "btn_north"]);
+        assert!(on(&c, "btn_lb") && on(&c, "btn_west"), "Y again: LB + X again");
+        rig.tick(&[]);
+
+        rig.tick(&["btn_north"]);
+        let c = rig.tick(&["btn_north", "btn_lb"]);
+        assert!(on(&c, "btn_north") && on(&c, "btn_lb") && !on(&c, "btn_west"), "Y then LB is Y + LB");
+        rig.tick(&[]);
+
+        rig.tick(&["btn_lb"]);
+        rig.tick(&["btn_lb", "btn_north"]);
+        for _ in 0..3 {
+            let c = rig.tick(&["btn_north"]);
+            assert!(!on(&c, "btn_north") && !on(&c, "btn_west") && !on(&c, "btn_lb"),
+                "releasing LB first: Y stays consumed until released");
+        }
+        rig.tick(&[]);
+        assert!(on(&rig.tick(&["btn_north"]), "btn_north"), "a fresh Y press is plain Y");
+    }
+
+    // A longer chord backs out the same way: every earlier input still held
+    // comes back, the input that completed the chord doesn't.
+    #[test]
+    fn in_order_three_input_chord_backing_out() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east", "btn_west"], "out": ["btn_rb"], "in_order": true }
+        ]));
+        rig.tick(&["btn_south"]);
+        rig.tick(&["btn_south", "btn_east"]);
+        assert!(on(&rig.tick(&["btn_south", "btn_east", "btn_west"]), "btn_rb"));
+        let c = rig.tick(&["btn_south", "btn_west"]);
+        assert!(!on(&c, "btn_rb"));
+        assert!(on(&c, "btn_south"), "the chord's first input comes back");
+        assert!(!on(&c, "btn_west"), "the input that completed it stays consumed");
+    }
+
+    /// Run `steps` of held inputs; returns each tick's published map.
+    fn rig_steps(rig: &mut RemapRig, steps: &[&[&str]]) -> Vec<BusMap> {
+        steps.iter().map(|down| rig.tick(down)).collect()
+    }
+
+    // Short + Turbo on an "in order" chord times the whole chord from its first input:
+    // completed and let go inside the gap fires. Its inputs are held back while
+    // it decides and the still-held modifier comes back once it's done; with
+    // Hold the modifier stays held throughout. Too slow: the inputs just come
+    // through, and a lone tap of the modifier plays back late.
+    #[test]
+    fn in_order_short_chord_times_the_whole_chord() {
+        let card = |hold: bool| serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "mode": "short", "window_ms": 100.0,
+              "in_order": true, "sustain": hold, "turbo": true }
+        ]);
+        let quick: [&[&str]; 5] = [
+            &["btn_south"], &["btn_south", "btn_east"], &["btn_south", "btn_east"], &["btn_south"], &["btn_south"],
+        ];
+        for hold in [false, true] {
+            let mut rig = RemapRig::new(card(hold));
+            let c = rig_steps(&mut rig, &quick);
+            let south: Vec<bool> = c.iter().map(|c| on(c, "btn_south")).collect();
+            assert!(c.iter().any(|c| on(c, "btn_lb")), "completed and let go inside the gap fires (hold {hold})");
+            assert!(!c.iter().any(|c| on(c, "btn_east")), "the trigger never reaches the game (hold {hold})");
+            if hold {
+                assert!(south.iter().all(|v| *v), "with Hold the modifier stays held throughout: {south:?}");
+            } else {
+                assert!(!south[..4].contains(&true), "held back while it decides: {south:?}");
+                let later: Vec<bool> = (0..3).map(|_| on(&rig.tick(&["btn_south"]), "btn_south")).collect();
+                assert!(later.iter().all(|v| *v), "the still-held modifier comes back after: {later:?}");
+            }
+        }
+
+        let mut rig = RemapRig::new(card(false));
+        let seen: Vec<bool> = (0..15).map(|_| on(&rig.tick(&["btn_south"]), "btn_south")).collect();
+        assert!(!seen[..9].contains(&true) && seen[12..].iter().all(|v| *v), "hidden up to the gap, then live: {seen:?}");
+        let c = rig.tick(&["btn_south", "btn_east"]);
+        assert!(!on(&c, "btn_lb") && on(&c, "btn_east"), "completing it after the gap is just the inputs");
+
+        let mut rig = RemapRig::new(card(false));
+        for _ in 0..4 { rig.tick(&["btn_south"]); }
+        let replay: Vec<bool> = (0..8).map(|_| on(&rig.tick(&[]), "btn_south")).collect();
+        assert!(replay[0] && !replay[7], "a lone tap of the modifier plays back late: {replay:?}");
+    }
+
+    // Double + Turbo on an "in order" chord: complete it twice inside the gap,
+    // counted from its first input; on during the second completion.
+    #[test]
+    fn in_order_double_chord_within_gap() {
+        for hold in [false, true] {
+            let mut rig = RemapRig::new(serde_json::json!([
+                { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "mode": "double", "window_ms": 150.0,
+                  "in_order": true, "sustain": hold, "turbo": true }
+            ]));
+            let c = rig_steps(&mut rig, &[
+                &["btn_south"], &["btn_south", "btn_east"], &["btn_south"],
+                &["btn_south", "btn_east"], &["btn_south", "btn_east"], &["btn_south"],
+            ]);
+            let lb: Vec<bool> = c.iter().map(|c| on(c, "btn_lb")).collect();
+            let south: Vec<bool> = c.iter().map(|c| on(c, "btn_south")).collect();
+            assert!(lb[3] && lb[4] && !lb[5] && !lb[..3].contains(&true), "on during the second completion: {lb:?} (hold {hold})");
+            assert!(!c.iter().any(|c| on(c, "btn_east")), "the trigger never reaches the game (hold {hold})");
+            if hold {
+                assert!(south.iter().all(|v| *v), "with Hold the modifier stays held throughout: {south:?}");
+            } else {
+                assert!(!south[..5].contains(&true) && south[5], "held back, then back once it's done: {south:?}");
+            }
+        }
+    }
+
+    // Short / Double on an "in order" chord without Turbo: the time gap times the
+    // last input only, so the modifier can be held as long as you like (a mode
+    // shift). The modifier stays live while the trigger decides.
+    #[test]
+    fn in_order_tap_chord_gap_times_last_input() {
+        let both: &[&str] = &["btn_south", "btn_east"];
+        let modifier: &[&str] = &["btn_south"];
+
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "mode": "short", "window_ms": 50.0, "in_order": true }
+        ]));
+        let long_hold: Vec<bool> = (0..20).map(|_| on(&rig.tick(modifier), "btn_south")).collect();
+        assert!(long_hold.iter().all(|v| *v), "the modifier isn't delayed: {long_hold:?}");
+        let c = rig_steps(&mut rig, &[both, both, modifier, modifier]);
+        assert!(c.iter().any(|c| on(c, "btn_lb")), "a quick tap of the last input fires, however long the modifier was held");
+        assert!(!c.iter().any(|c| on(c, "btn_east")), "the tapped trigger is consumed");
+        assert!(on(&c[0], "btn_south") && on(&c[1], "btn_south"), "the modifier stays live while the trigger decides");
+        rig_steps(&mut rig, &[modifier; 3]);
+        let c = rig_steps(&mut rig, &[both; 10]);
+        assert!(!c.iter().any(|c| on(c, "btn_lb")) && on(c.last().unwrap(), "btn_east"),
+            "the last input held past the gap comes through instead");
+
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "mode": "double", "window_ms": 100.0, "in_order": true }
+        ]));
+        rig_steps(&mut rig, &[modifier; 20]);
+        let c = rig_steps(&mut rig, &[both, modifier, both, both, modifier]);
+        let lb: Vec<bool> = c.iter().map(|c| on(c, "btn_lb")).collect();
+        assert!(!lb[0] && !lb[1] && lb[2] && lb[3] && !lb[4], "a double tap of the last input fires: {lb:?}");
+        assert!(!c.iter().any(|c| on(c, "btn_east")), "the tapped trigger is consumed");
+        assert!(on(&c[0], "btn_south") && on(&c[1], "btn_south") && on(&c[4], "btn_south"),
+            "the modifier is live while the trigger decides, and back after");
+    }
+
+    // Long on an "in order" chord: the modifier stays live while Long decides
+    // (only the trigger waits); once it fires both are consumed, and letting go
+    // of the trigger gives the modifier back. With Hold, lifting the modifier
+    // once it's fired keeps the output on while the trigger is held.
+    #[test]
+    fn in_order_long_chord_only_trigger_waits() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "mode": "long", "window_ms": 50.0,
+              "sustain": true, "in_order": true }
+        ]));
+        assert!(on(&rig.tick(&["btn_south"]), "btn_south"));
+        let c = rig.tick(&["btn_south", "btn_east"]);
+        assert!(on(&c, "btn_south") && !on(&c, "btn_east") && !on(&c, "btn_lb"), "deciding: modifier live, trigger waits");
+        let both: &[&str] = &["btn_south", "btn_east"];
+        let c = rig_steps(&mut rig, &[both; 8]);
+        let last = c.last().unwrap();
+        assert!(on(last, "btn_lb") && !on(last, "btn_south") && !on(last, "btn_east"), "fired: both consumed");
+        let c = rig.tick(&["btn_south"]);
+        assert!(on(&c, "btn_south") && !on(&c, "btn_lb"), "letting go of the trigger gives the modifier back");
+
+        rig_steps(&mut rig, &[&[], &["btn_south"]]);
+        rig_steps(&mut rig, &[both; 8]);
+        let trigger: &[&str] = &["btn_east"];
+        let c = rig_steps(&mut rig, &[trigger; 3]);
+        assert!(c.iter().all(|c| on(c, "btn_lb")), "Hold: modifier lifted after firing, the trigger keeps it on");
+        assert!(!on(&rig.tick(&[]), "btn_lb"));
+    }
+
+    // Holding B then pressing A is B-then-A: an A-then-B card must not hide A,
+    // so an order-agnostic A+B card matches at once. And a matched ordered card
+    // outranks an order-agnostic one over the same inputs.
+    #[test]
+    fn in_order_outranks_plain_chord_over_same_inputs() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_west"] },
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "in_order": true }
+        ]));
+        rig.tick(&["btn_south"]);
+        let c = rig.tick(&["btn_south", "btn_east"]);
+        assert!(on(&c, "btn_lb") && !on(&c, "btn_west"), "in-order match must suppress the plain chord");
+        rig.tick(&[]);
+        rig.tick(&["btn_east"]);
+        let c = rig.tick(&["btn_east", "btn_south"]);
+        assert!(on(&c, "btn_west") && !on(&c, "btn_lb"), "wrong order falls back to the plain chord at once");
+    }
+
+    // Sequence: steps in order within the gap, earlier ones already released;
+    // on while the last step is held. Wrong order or an overrun gap: nothing.
+    #[test]
+    fn sequence_fires_in_order_within_gap() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "mode": "sequence" }
+        ]));
+        let c = rig.tick(&["btn_south"]);
+        assert!(on(&c, "btn_south"), "without hold-back the first step passes through");
+        rig.tick(&[]);
+        let c = rig.tick(&["btn_east"]);
+        assert!(on(&c, "btn_lb"), "second step within the gap must fire");
+        assert!(!on(&c, "btn_east"), "the final step is consumed");
+        assert!(on(&rig.tick(&["btn_east"]), "btn_lb"), "stays on while the last step is held");
+        assert!(!on(&rig.tick(&[]), "btn_lb"));
+
+        rig.tick(&["btn_east"]);
+        rig.tick(&[]);
+        assert!(!on(&rig.tick(&["btn_south"]), "btn_lb"), "wrong order must not fire");
+        rig.tick(&[]);
+
+        rig.tick(&["btn_south"]);
+        for _ in 0..25 { rig.tick(&[]); }
+        assert!(!on(&rig.tick(&["btn_east"]), "btn_lb"), "a step after the gap must not fire");
+    }
+
+    // A repeated step restarts from the right place: A, A, A, B matches A, A, B.
+    #[test]
+    fn sequence_repeated_step_restarts_correctly() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_south", "btn_east"], "out": ["btn_lb"], "mode": "sequence" }
+        ]));
+        for _ in 0..3 {
+            rig.tick(&["btn_south"]);
+            rig.tick(&[]);
+        }
+        assert!(on(&rig.tick(&["btn_east"]), "btn_lb"));
+    }
+
+    // Stick directions work as steps: flick left, then right.
+    #[test]
+    fn sequence_of_stick_directions() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["left_stick_left", "left_stick_right"], "out": ["btn_lb"], "mode": "sequence" }
+        ]));
+        rig.tick_sigs(&[("left_stick_x", Signal::Float(-0.9))]);
+        rig.tick_sigs(&[("left_stick_x", Signal::Float(0.0))]);
+        let c = rig.tick_sigs(&[("left_stick_x", Signal::Float(0.9))]);
+        assert!(on(&c, "btn_lb"), "left then right must fire");
+    }
+
+    // Sequence + hold-back: earlier steps stay hidden while it waits. Completed,
+    // they're consumed for good; overrun, the tap replays late.
+    #[test]
+    fn sequence_hold_back_consumes_or_replays() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south", "btn_east"], "out": ["btn_lb"], "mode": "sequence", "in_order": true }
+        ]));
+        let mut seen = Vec::new();
+        for _ in 0..3 { seen.push(on(&rig.tick(&["btn_south"]), "btn_south")); }
+        for _ in 0..5 { seen.push(on(&rig.tick(&[]), "btn_south")); }
+        let c = rig.tick(&["btn_east"]);
+        assert!(on(&c, "btn_lb"));
+        for _ in 0..30 { seen.push(on(&rig.tick(&[]), "btn_south")); }
+        assert!(!seen.contains(&true), "a completed sequence's start never reaches the output: {seen:?}");
+
+        let mut seen = Vec::new();
+        for _ in 0..3 { seen.push(on(&rig.tick(&["btn_south"]), "btn_south")); }
+        for _ in 0..40 { seen.push(on(&rig.tick(&[]), "btn_south")); }
+        let first = seen.iter().position(|v| *v);
+        assert!(matches!(first, Some(i) if i >= 18), "hidden until the gap runs out: {seen:?}");
+        assert!(!seen[42], "the replayed tap ends: {seen:?}");
+    }
+
+    // ── Timed press modes hold back instead of swallowing ────────────────────
+
+    /// Tick `n` times with `down` held; returns `watch`'s state each tick and
+    /// whether `out` was ever on.
+    fn rig_run(rig: &mut RemapRig, n: usize, down: &[&str], watch: &str, out: &str) -> (Vec<bool>, bool) {
+        let mut seen = Vec::new();
+        let mut fired = false;
+        for _ in 0..n {
+            let c = rig.tick(down);
+            seen.push(on(&c, watch));
+            fired |= on(&c, out);
+        }
+        (seen, fired)
+    }
+
+    // Short press: a tap fires the card and never reaches the output; a press
+    // held past the gap isn't swallowed — it comes through, late by the gap.
+    #[test]
+    fn short_press_held_past_gap_goes_live() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_lb"], "mode": "short", "window_ms": 50.0 }
+        ]));
+        let (mut seen, mut fired) = rig_run(&mut rig, 3, &["btn_south"], "btn_south", "btn_lb");
+        let (after, fired_after) = rig_run(&mut rig, 10, &[], "btn_south", "btn_lb");
+        seen.extend(after);
+        fired |= fired_after;
+        assert!(fired, "a tap inside the gap fires the card");
+        assert!(!seen.contains(&true), "a tap that fired never reaches the output: {seen:?}");
+
+        let (seen, fired) = rig_run(&mut rig, 15, &["btn_south"], "btn_south", "btn_lb");
+        assert!(!fired, "a press past the gap doesn't fire");
+        assert!(!seen[..4].contains(&true), "hidden while the card decides: {seen:?}");
+        assert!(seen[8..].iter().all(|v| *v), "live once the gap runs out: {seen:?}");
+    }
+
+    fn rig_stick_y(c: &BusMap) -> f32 {
+        c.get(&("remap:1".to_string(), "left_stick_y".to_string())).map(|s| s.as_float()).unwrap_or(f32::NAN)
+    }
+
+    fn push_y(rig: &mut RemapRig, v: f32) -> BusMap {
+        rig.tick_sigs(&[("left_stick_y", Signal::Float(v))])
+    }
+
+    // A stick direction on a Short card with a threshold, timed from where the
+    // stick leaves zero: reaching the threshold fast caps the stick where it
+    // crossed while the card decides (no drop to zero), then lets the full
+    // deflection through once the gap since the move began runs out; a quick
+    // flick fires.
+    #[test]
+    fn short_press_stick_direction_is_capped_not_blocked() {
+        let card = serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["btn_lb"], "mode": "short", "window_ms": 55.0, "threshold": 0.9 }
+        ]);
+        let mut rig = RemapRig::new(card.clone());
+        assert!((rig_stick_y(&push_y(&mut rig, 0.5)) - 0.5).abs() < 1e-4, "below the threshold: untouched");
+        assert!((rig_stick_y(&push_y(&mut rig, 0.92)) - 0.92).abs() < 1e-4, "crossing: capped where it is");
+        for _ in 0..3 {
+            let v = rig_stick_y(&push_y(&mut rig, 1.0));
+            assert!((v - 0.92).abs() < 1e-4, "while deciding: held at the crossing, not zeroed (got {v})");
+        }
+        let late: Vec<f32> = (0..3).map(|_| rig_stick_y(&push_y(&mut rig, 1.0))).collect();
+        assert!(late.iter().all(|v| (v - 1.0).abs() < 1e-4),
+            "the gap counts from the move's start, so it runs out soon after: {late:?}");
+
+        let mut rig = RemapRig::new(card);
+        push_y(&mut rig, 0.5);
+        let mut fired = false;
+        for v in [0.95, 0.95, 0.3, 0.0, 0.0] {
+            fired |= on(&push_y(&mut rig, v), "btn_lb");
+        }
+        assert!(fired, "a quick flick past the threshold fires the card");
+    }
+
+    // A slow push that only reaches the threshold after the time gap (counted
+    // from where the stick left zero) is just stick movement: never capped,
+    // never fires.
+    #[test]
+    fn short_press_slow_stick_push_passes_straight_through() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["btn_lb"], "mode": "short", "window_ms": 50.0, "threshold": 0.9 }
+        ]));
+        let mut fired = false;
+        for step in 1..=12 {
+            let v = (step as f32 * 0.08).min(1.0);
+            let c = push_y(&mut rig, v);
+            assert!((rig_stick_y(&c) - v).abs() < 1e-4, "slow push must pass untouched at {v} (got {})", rig_stick_y(&c));
+            fired |= on(&c, "btn_lb");
+        }
+        for _ in 0..3 { fired |= on(&push_y(&mut rig, 0.0), "btn_lb"); }
+        assert!(!fired, "a slow push doesn't fire a Short card");
+    }
+
+    // Sequence over one analog input: reach the threshold within the gap from
+    // the move's start, and the output stays on as long as the input stays past
+    // it. A dip under the threshold ends it until the stick returns to zero; a
+    // slow push never fires.
+    #[test]
+    fn sequence_single_stick_direction_fast_move_then_hold() {
+        let card = |in_order: bool| serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["btn_lb"], "mode": "sequence", "window_ms": 50.0,
+              "threshold": 0.9, "in_order": in_order }
+        ]);
+        let mut rig = RemapRig::new(card(false));
+        assert!(!on(&push_y(&mut rig, 0.5), "btn_lb"));
+        assert!(on(&push_y(&mut rig, 0.95), "btn_lb"), "reached the threshold in time: on");
+        for _ in 0..20 {
+            assert!(on(&push_y(&mut rig, 1.0), "btn_lb"), "held past the threshold: stays on");
+        }
+        assert!(!on(&push_y(&mut rig, 0.5), "btn_lb"), "dropping under the threshold: off");
+        assert!(!on(&push_y(&mut rig, 0.95), "btn_lb"), "back past it without returning to zero: still spent");
+        push_y(&mut rig, 0.0);
+        push_y(&mut rig, 0.6);
+        assert!(on(&push_y(&mut rig, 1.0), "btn_lb"), "a fresh fast move fires again");
+
+        let mut rig = RemapRig::new(card(false));
+        let mut fired = false;
+        for step in 1..=12 {
+            fired |= on(&push_y(&mut rig, (step as f32 * 0.08).min(1.0)), "btn_lb");
+        }
+        assert!(!fired, "a slow push never fires");
+
+        // With "in order": the move toward the threshold is held back fully.
+        let mut rig = RemapRig::new(card(true));
+        let c = push_y(&mut rig, 0.5);
+        assert!(rig_stick_y(&c).abs() < 1e-4, "on its way to the threshold: hidden (got {})", rig_stick_y(&c));
+        let c = push_y(&mut rig, 0.95);
+        assert!(on(&c, "btn_lb") && rig_stick_y(&c).abs() < 1e-4, "fired: consumed");
+        let mut rig = RemapRig::new(card(true));
+        let ys: Vec<f32> = (0..10).map(|_| rig_stick_y(&push_y(&mut rig, 0.4))).collect();
+        assert!(ys[0].abs() < 1e-4 && (ys[9] - 0.4).abs() < 1e-4, "too slow: comes back once the gap runs out: {ys:?}");
+    }
+
+    // Long press: a hold fires and consumes; a tap isn't swallowed — it plays
+    // back late at its own length.
+    #[test]
+    fn long_press_tap_is_replayed() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_lb"], "mode": "long", "window_ms": 100.0, "sustain": true }
+        ]));
+        let (held, _) = rig_run(&mut rig, 3, &["btn_south"], "btn_south", "btn_lb");
+        let (after, fired) = rig_run(&mut rig, 10, &[], "btn_south", "btn_lb");
+        assert!(!held.contains(&true), "hidden while the card decides: {held:?}");
+        assert!(!fired, "a tap doesn't fire a Long card");
+        let len = after.iter().filter(|v| **v).count();
+        assert!(after[0] && (3..=5).contains(&len), "the ~30 ms tap replays on release: {after:?}");
+
+        let (seen, fired) = rig_run(&mut rig, 20, &["btn_south"], "btn_south", "btn_lb");
+        let (after, _) = rig_run(&mut rig, 5, &[], "btn_south", "btn_lb");
+        assert!(fired, "a hold past the gap fires");
+        assert!(!seen.contains(&true) && !after.contains(&true), "a press that fired never shows: {seen:?} {after:?}");
+    }
+
+    // Double tap: a double fires and consumes both taps; a single tap plays back
+    // once the gap for the second one runs out.
+    #[test]
+    fn double_tap_single_tap_is_replayed() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_lb"], "mode": "double", "window_ms": 100.0 }
+        ]));
+        let (mut seen, _) = rig_run(&mut rig, 2, &["btn_south"], "btn_south", "btn_lb");
+        let (after, fired) = rig_run(&mut rig, 20, &[], "btn_south", "btn_lb");
+        seen.extend(after);
+        assert!(!fired, "a single tap doesn't fire a Double card");
+        let first = seen.iter().position(|v| *v);
+        assert!(matches!(first, Some(i) if i >= 9), "the tap waits out the gap, then replays: {seen:?}");
+
+        let mut seen = Vec::new();
+        let mut fired = false;
+        for down in [true, true, false, false, true, true, false, false] {
+            let c = rig.tick(if down { &["btn_south"] } else { &[] });
+            seen.push(on(&c, "btn_south"));
+            fired |= on(&c, "btn_lb");
+        }
+        let (after, _) = rig_run(&mut rig, 15, &[], "btn_south", "btn_lb");
+        assert!(fired, "a double tap fires");
+        assert!(!seen.contains(&true) && !after.contains(&true), "both taps are consumed: {seen:?} {after:?}");
+    }
+
+    // Tap-or-hold on one button: the tap card and the hold card each take their
+    // own press, and the button itself never leaks through either.
+    #[test]
+    fn short_and_long_share_a_button() {
+        let mut rig = RemapRig::new(serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_lb"], "mode": "short", "window_ms": 100.0 },
+            { "in": ["btn_south"], "out": ["btn_rb"], "mode": "long", "window_ms": 100.0, "sustain": true }
+        ]));
+        let run = |rig: &mut RemapRig, ticks: usize| {
+            let (mut seen, mut lb, mut rb) = (false, false, false);
+            for t in 0..ticks + 15 {
+                let c = rig.tick(if t < ticks { &["btn_south"] } else { &[] });
+                seen |= on(&c, "btn_south");
+                lb |= on(&c, "btn_lb");
+                rb |= on(&c, "btn_rb");
+            }
+            (seen, lb, rb)
+        };
+        assert_eq!(run(&mut rig, 3), (false, true, false), "tap: (button leaked, tap card, hold card)");
+        assert_eq!(run(&mut rig, 20), (false, false, true), "hold: (button leaked, tap card, hold card)");
+    }
+
+    // A Remapper's mapped OUTPUT pin must survive a downstream Combiner whose
+    // higher-priority port carries the raw device bus. Regression for the
+    // "General purpose preset" button→button bug: a real controller reports
+    // every button each tick (false when up), so the raw-bus Collector on port 0
+    // explicitly carries `btn_rb = false`. With the old SORT (`first port wins`)
+    // that false value clobbered the Remapper's `btn_rb = true` on port 1 — so a
+    // single mapped button produced nothing, yet pressing both swapped buttons
+    // lit both (those pins ARE consumed and take the hierarchy branch).
+    //
+    // Topology:  device → Collector (port 0) ┐
+    //            device → Remapper  (port 1) ├→ Combiner → sink
+    #[test]
+    fn remapped_output_survives_combiner_raw_bus_priority() {
+        let dev = "gilrs:switch_pro:0";
+        let src = source_node(1, dev, 0.0);
+
+        let mut collect = empty_node(2, "module.automap_collect");
+        collect.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        collect.input_sources = vec![Some((0, 0))];
+        collect.n_outputs = 1;
+
+        let mut remap = empty_node(3, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_east"] },
+            { "in": ["btn_east"],  "out": ["btn_rb"]   },
+            { "in": ["btn_rb"],    "out": ["btn_east"] }
+        ]));
+        remap.input_sources = vec![Some((0, 0))];
+        remap.n_outputs = 1;
+
+        let mut combiner = empty_node(4, "module.automap_combiner");
+        combiner.params.insert("_automap_input_devs".into(), Value::Array(vec![
+            Value::String(String::new()), Value::String(String::new()),
+        ]));
+        combiner.params.insert("_automap_input_collectors".into(), Value::Array(vec![
+            Value::String("collector:2".into()), Value::String("remap:3".into()),
+        ]));
+        combiner.input_sources = vec![Some((2, 0)), Some((3, 0))];
+        combiner.n_outputs = 1;
+
+        let sink = sink_node(20, "virtual.xinput:0", "combiner:4", true);
+        let graph = ProcessingGraph { nodes: vec![src, collect, remap, combiner, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let getb = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+        // A real controller reports EVERY button each tick (false when up).
+        let press = |pins: &[&str]| {
+            let mut m = HashMap::new();
+            for p in ["btn_south", "btn_east", "btn_rb", "btn_west", "btn_north", "btn_lb"] {
+                m.insert((dev.to_string(), p.to_string()), Signal::Bool(pins.contains(&p)));
+            }
+            m
+        };
+        let tick = |graph: &ProcessingGraph, state: &mut HashMap<usize, NodeState>,
+                    out: &mut TickOutput, pins: &[&str]| {
+            // Settle (release) between presses so press-mode edges are clean.
+            eval_graph_tick(graph, state, &press(&[]), 0.016, out);
+            eval_graph_tick(graph, state, &press(pins), 0.016, out);
+        };
+
+        // south → east
+        tick(&graph, &mut state, &mut out, &["btn_south"]);
+        assert!(getb(&out, "btn_east"), "south→east must fire btn_east");
+        assert!(!getb(&out, "btn_south"), "consumed btn_south must be suppressed");
+
+        // east → rb
+        tick(&graph, &mut state, &mut out, &["btn_east"]);
+        assert!(getb(&out, "btn_rb"), "east→rb must fire btn_rb");
+        assert!(!getb(&out, "btn_east"), "consumed btn_east must be suppressed");
+
+        // rb → east
+        tick(&graph, &mut state, &mut out, &["btn_rb"]);
+        assert!(getb(&out, "btn_east"), "rb→east must fire btn_east");
+        assert!(!getb(&out, "btn_rb"), "consumed btn_rb must be suppressed");
+
+        // Pressing the swapped pair leaves both asserted (east↔rb swap).
+        tick(&graph, &mut state, &mut out, &["btn_east", "btn_rb"]);
+        assert!(getb(&out, "btn_east") && getb(&out, "btn_rb"),
+            "east+rb swap should leave both asserted");
+    }
+
+    // Touchpad zone outputs synthesize finger touch points on the virtual pad,
+    // and two simultaneous zone mappings stack onto the 2 hardware touch points.
+    #[test]
+    fn remapper_touch_zones_synthesize_and_stack() {
+        let dev = "gilrs:switch_pro:0";
+        let remap_uid = 1usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_south"], "out": ["touch_left"]  },
+            { "in": ["btn_east"],  "out": ["touch_right"] }
+        ]));
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let getf = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_float());
+        let getb = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+
+        // South only → one finger at the left zone.
+        let mut dev_sigs = HashMap::new();
+        dev_sigs.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(true));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(getb(&out, "touch1_active"), "south→touch_left must activate a touch point");
+        assert!((getf(&out, "touch1_x").unwrap_or(0.0) - (-0.66)).abs() < 0.05,
+            "left zone x≈-0.66, got {:?}", getf(&out, "touch1_x"));
+        assert!(!getb(&out, "touch2_active"), "only one finger for a single zone mapping");
+
+        // South + East → two stacked fingers (left + right).
+        dev_sigs.insert((dev.to_string(), "btn_east".to_string()), Signal::Bool(true));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(getb(&out, "touch1_active") && getb(&out, "touch2_active"),
+            "two zone mappings must stack onto 2 touch points");
+        assert!((getf(&out, "touch2_x").unwrap_or(0.0) - 0.66).abs() < 0.05,
+            "right zone x≈+0.66, got {:?}", getf(&out, "touch2_x"));
+
+        // Release → both points report inactive (no latch).
+        eval_graph_tick(&graph, &mut state, &HashMap::new(), 0.016, &mut out);
+        assert!(!getb(&out, "touch1_active") && !getb(&out, "touch2_active"),
+            "released zone mappings must release the touch points");
+    }
+
+    // "Hold zone": a tz_touch gesture that STARTS in a hold zone keeps firing that
+    // zone's mapping even after the finger slides into a neighbour, and the
+    // neighbour must NOT fire. Without the flag, crossing switches zones.
+    #[test]
+    fn touch_zones_hold_keeps_origin_zone_on_crossing() {
+        let mk = |hold: bool| {
+            let mut n = empty_node(1, "module.touch_zones");
+            n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+            n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+            n.params.insert("col_edges".into(), serde_json::json!([0.5])); // 2 columns
+            n.params.insert("row_edges".into(), serde_json::json!([]));
+            n.params.insert("zone_maps".into(), serde_json::json!([
+                {"f":0,"z":0,"in":["tz_touch"],"out":["btn_south"]},
+                {"f":0,"z":1,"in":["tz_touch"],"out":["btn_east"]},
+            ]));
+            if hold { n.params.insert("hold_zones".into(), serde_json::json!([[0,0]])); }
+            n
+        };
+        // px in [-1,1] → unit x in [0,1]: -0.5→0.25 (zone 0), +0.5→0.75 (zone 1).
+        let finger = |px: f32| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(px));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+            m
+        };
+        let getb = |c: &BusMap, pin: &str|
+            c.get(&("touchmap:1".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+
+        // WITH hold on zone 0.
+        {
+            let snap = mk(true);
+            let mut state = HashMap::new();
+            let mut c = BusMap::default();
+            eval_touch_zones_map_node(&snap, 1, &finger(-0.5), &mut c, &mut state, 0.016);
+            c.clear();
+            eval_touch_zones_map_node(&snap, 1, &finger(-0.5), &mut c, &mut state, 0.016);
+            assert!(getb(&c, "btn_south") && !getb(&c, "btn_east"), "zone0 fires btn_south");
+            c.clear();
+            eval_touch_zones_map_node(&snap, 1, &finger(0.5), &mut c, &mut state, 0.016);
+            assert!(getb(&c, "btn_south"), "HOLD: origin zone still fires after crossing");
+            assert!(!getb(&c, "btn_east"), "HOLD: crossed-into zone must NOT fire");
+        }
+        // WITHOUT hold — crossing switches zones.
+        {
+            let snap = mk(false);
+            let mut state = HashMap::new();
+            let mut c = BusMap::default();
+            eval_touch_zones_map_node(&snap, 1, &finger(-0.5), &mut c, &mut state, 0.016);
+            c.clear();
+            eval_touch_zones_map_node(&snap, 1, &finger(-0.5), &mut c, &mut state, 0.016);
+            c.clear();
+            eval_touch_zones_map_node(&snap, 1, &finger(0.5), &mut c, &mut state, 0.016);
+            assert!(!getb(&c, "btn_south") && getb(&c, "btn_east"),
+                "no hold: crossing switches to the new zone");
+        }
+    }
+
+    // A zone's Analog card onto a trigger takes the finger's press there, the
+    // pad's own trigger still counting; with no finger in it, the trigger passes.
+    #[test]
+    fn touch_zones_analog_trigger_follows_the_press() {
+        let mut snap = empty_node(1, "module.touch_zones");
+        snap.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        snap.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        snap.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_click"],"out":["right_trigger"],"mode":"analog"},
+        ]));
+        let run = |active: bool, press: f32, own: f32| {
+            let mut m = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(active));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(0.0));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+            m.insert(("pad".into(), "touch1_pressure".into()), Signal::Float(press));
+            m.insert(("pad".into(), "right_trigger".into()), Signal::Float(own));
+            let mut c = BusMap::default();
+            eval_touch_zones_map_node(&snap, 1, &m, &mut c, &mut HashMap::new(), 0.016);
+            c.get(&("touchmap:1".to_string(), "right_trigger".to_string())).map(|s| s.as_float())
+        };
+        assert_eq!(run(true, 0.6, 0.0), Some(0.6), "pressing short of the click");
+        assert_eq!(run(true, 0.2, 0.5), Some(0.5), "the pad's own trigger past it");
+        assert_eq!(run(false, 0.0, 0.3), None, "no finger: passes through");
+    }
+
+    // A touch card with a threshold, on a pad that reports its press, fires
+    // once the finger in its zone presses that hard, and an Analog card's
+    // trigger starts from it.
+    #[test]
+    fn touch_zones_threshold_goes_by_the_press() {
+        let snap = |card: serde_json::Value| {
+            let mut n = empty_node(1, "module.touch_zones");
+            n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+            n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+            n.params.insert("zone_maps".into(), serde_json::json!([card]));
+            n
+        };
+        let run = |snap: &NodeSnap, press: f32, pin: &str| {
+            let mut m = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(0.0));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+            m.insert(("pad".into(), "touch1_pressure".into()), Signal::Float(press));
+            let mut c = BusMap::default();
+            eval_touch_zones_map_node(snap, 1, &m, &mut c, &mut HashMap::new(), 0.016);
+            c.get(&("touchmap:1".to_string(), pin.to_string())).copied()
+        };
+        let button = snap(serde_json::json!({"f":0,"z":0,"in":["tz_click"],"out":["btn_south"],"threshold":0.5}));
+        assert_eq!(run(&button, 0.4, "btn_south"), Some(Signal::Bool(false)), "short of it");
+        assert_eq!(run(&button, 0.6, "btn_south"), Some(Signal::Bool(true)), "no click needed");
+        let trigger = snap(serde_json::json!(
+            {"f":0,"z":0,"in":["tz_click"],"out":["right_trigger"],"mode":"analog","threshold":0.3}));
+        assert_eq!(run(&trigger, 0.2, "right_trigger"), None, "under the threshold: passes through");
+        assert_eq!(run(&trigger, 0.7, "right_trigger"), Some(Signal::Float(0.7)));
+    }
+
+    // Hold with an ANALOG origin zone: the analog output holds AND a button
+    // mapped in the crossed-into zone must NOT fire (the held finger belongs
+    // wholly to its origin; other zones ignore it).
+    #[test]
+    fn touch_zones_hold_analog_origin_suppresses_crossed_button() {
+        let mut n = empty_node(1, "module.touch_zones");
+        n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        n.params.insert("col_edges".into(), serde_json::json!([0.5]));
+        n.params.insert("row_edges".into(), serde_json::json!([]));
+        n.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["left_stick"]},
+            {"f":0,"z":1,"in":["tz_touch"],"out":["btn_east"]},
+        ]));
+        n.params.insert("hold_zones".into(), serde_json::json!([[0,0]]));
+        let finger = |px: f32| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(px));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+            m
+        };
+        let mut state = HashMap::new();
+        let mut c = BusMap::default();
+        // Land in zone 0 (analog origin), establish the start zone.
+        eval_touch_zones_map_node(&n, 1, &finger(-0.5), &mut c, &mut state, 0.016);
+        c.clear();
+        eval_touch_zones_map_node(&n, 1, &finger(-0.5), &mut c, &mut state, 0.016);
+        // Cross into zone 1 (button). left_stick keeps outputting; btn_east silent.
+        c.clear();
+        eval_touch_zones_map_node(&n, 1, &finger(0.5), &mut c, &mut state, 0.016);
+        assert!(c.contains_key(&("touchmap:1".to_string(), "left_stick".to_string())),
+            "HOLD: analog origin keeps driving left_stick after crossing");
+        let btn_east = c.get(&("touchmap:1".to_string(), "btn_east".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        assert!(!btn_east, "HOLD: crossed-into button zone must NOT fire");
+    }
+
+    // A zone mapped to the analog scroll pins publishes a Float rate that tracks
+    // the finger's deflection (+Y up, +X right) — the variable-speed scroll dest.
+    #[test]
+    fn touch_zones_analog_scroll_rate_tracks_deflection() {
+        let mut n = empty_node(1, "module.touch_zones");
+        n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        n.params.insert("col_edges".into(), serde_json::json!([])); // single zone
+        n.params.insert("row_edges".into(), serde_json::json!([]));
+        n.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["scroll_y","scroll_x"],"mode":"analog"},
+        ]));
+        let finger = |px: f32, py: f32| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(px));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(py));
+            m
+        };
+        let getf = |c: &BusMap, pin: &str|
+            c.get(&("touchmap:1".to_string(), pin.to_string())).map(|s| s.as_float()).unwrap_or(0.0);
+        let mut state = HashMap::new();
+        let mut c = BusMap::default();
+        // Land at centre to establish the adaptive centre, then deflect up-right
+        // (raw pad +Y is up; pad_point_to_unit flips it into y-down unit space).
+        eval_touch_zones_map_node(&n, 1, &finger(0.0, 0.0), &mut c, &mut state, 0.016);
+        c.clear();
+        eval_touch_zones_map_node(&n, 1, &finger(0.8, 0.8), &mut c, &mut state, 0.016);
+        assert!(getf(&c, "scroll_y") > 0.0, "upward deflection → scroll up (scroll_y > 0)");
+        assert!(getf(&c, "scroll_x") > 0.0, "rightward deflection → scroll right (scroll_x > 0)");
+    }
+
+    // Touchpad mode routes a "mouse" card to the VELOCITY pin ("mouse") via the
+    // leaky-integrator trackball — a SUSTAINED signal (not a per-tick displacement,
+    // which the last-tick-wins sink publish would discard). Positive while the finger
+    // slides right, and it decays back toward zero once the finger holds still.
+    #[test]
+    fn touch_zones_touchpad_mode_emits_velocity() {
+        let mut n = empty_node(1, "module.touch_zones");
+        n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        n.params.insert("col_edges".into(), serde_json::json!([]));
+        n.params.insert("row_edges".into(), serde_json::json!([]));
+        n.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["mouse"],"mode":"analog","tp_mode":"touchpad"},
+        ]));
+        let finger = |px: f32| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(px));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+            m
+        };
+        let getv = |c: &BusMap, pin: &str| match
+            c.get(&("touchmap:1".to_string(), pin.to_string())) {
+                Some(Signal::Vec2(v)) => Some((v.x, v.y)), _ => None };
+        let mut state = HashMap::new();
+        // Touchdown (delta seeds 0), then slide right → positive x velocity.
+        let mut c = BusMap::default();
+        eval_touch_zones_map_node(&n, 1, &finger(0.0), &mut c, &mut state, 0.016);
+        c.clear();
+        eval_touch_zones_map_node(&n, 1, &finger(0.2), &mut c, &mut state, 0.016);
+        let (mx, _) = getv(&c, "mouse").expect("touchpad → 'mouse' velocity published");
+        assert!(mx > 0.1, "moving right → positive x velocity (got {mx})");
+        // Hold still for several ticks → the trackball decays back toward ~0 (cursor
+        // coasts to a stop rather than latching a constant velocity).
+        for _ in 0..40 {
+            c.clear();
+            eval_touch_zones_map_node(&n, 1, &finger(0.2), &mut c, &mut state, 0.016);
+        }
+        let (sx, sy) = getv(&c, "mouse").unwrap_or((0.0, 0.0));
+        assert!(sx.abs() < 1e-2 && sy.abs() < 1e-2, "still finger → velocity decays to ~0 (got {sx},{sy})");
+    }
+
+    // A zone can carry BOTH an analog (tz_touch) card and a click (tz_click) card;
+    // clicking must still fire the click mapping while the analog output runs.
+    #[test]
+    fn touch_zones_analog_zone_click_still_fires() {
+        let mut n = empty_node(1, "module.touch_zones");
+        n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        n.params.insert("col_edges".into(), serde_json::json!([])); // single zone
+        n.params.insert("row_edges".into(), serde_json::json!([]));
+        n.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["mouse"],"mode":"analog"},
+            {"f":0,"z":0,"in":["tz_click"],"out":["btn_east"],"mode":"down"},
+        ]));
+        let input = |click: bool| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(0.3));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.3));
+            m.insert(("pad".into(), "btn_touchpad".into()), Signal::Bool(click));
+            m
+        };
+        let getb = |c: &BusMap, pin: &str|
+            c.get(&("touchmap:1".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+        let mut state = HashMap::new();
+        let mut c = BusMap::default();
+        eval_touch_zones_map_node(&n, 1, &input(false), &mut c, &mut state, 0.016);
+        c.clear();
+        eval_touch_zones_map_node(&n, 1, &input(true), &mut c, &mut state, 0.016);
+        assert!(getb(&c, "btn_east"), "click on an analog zone must still fire the click mapping");
+        assert!(c.contains_key(&("touchmap:1".to_string(), "mouse".to_string())),
+            "analog output still runs alongside the click");
+    }
+
+    // Split mode on a two-pad SDL device (Steam Controller 2 / Steam Deck): Pad B
+    // is the right pad — contact on touch2, click on Misc2 — and the left pad's
+    // click (btn_touchpad) must not press Pad B.
+    #[test]
+    fn touch_zones_pad_b_click_reads_misc2() {
+        let mut n = empty_node(1, "module.touch_zones");
+        n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        n.params.insert("field_mode".into(), Value::String("split".into()));
+        n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        n.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":1,"z":0,"in":["tz_click"],"out":["btn_east"],"mode":"down"},
+        ]));
+        let input = |left_click: bool, misc2: bool| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch2_active".into()), Signal::Bool(true));
+            m.insert(("pad".into(), "touch2_x".into()), Signal::Float(0.3));
+            m.insert(("pad".into(), "touch2_y".into()), Signal::Float(0.3));
+            m.insert(("pad".into(), "btn_touchpad".into()), Signal::Bool(left_click));
+            m.insert(("pad".into(), "btn_misc2".into()), Signal::Bool(misc2));
+            m
+        };
+        let getb = |c: &BusMap, pin: &str|
+            c.get(&("touchmap:1".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+        let mut state = HashMap::new();
+        let mut c = BusMap::default();
+        eval_touch_zones_map_node(&n, 1, &input(true, false), &mut c, &mut state, 0.016);
+        assert!(!getb(&c, "btn_east"), "the left pad's click is Pad A's, not Pad B's");
+        c.clear();
+        eval_touch_zones_map_node(&n, 1, &input(false, true), &mut c, &mut state, 0.016);
+        assert!(getb(&c, "btn_east"), "the right pad's click (Misc2) fires Pad B's click mapping");
+    }
+
+    // Analog swipe drives a finger coordinate continuously (absolute position).
+    #[test]
+    fn remapper_swipe_tracks_analog_input() {
+        let dev = "gilrs:switch_pro:0";
+        let remap_uid = 1usize;
+        let src = source_node(3, dev, 0.0);
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_right"], "out": ["touch_swipe_x"], "mode": "analog" }
+        ]));
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let getf = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_float());
+        let getb = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+
+        // Half deflection → finger at ~+0.5.
+        let mut dev_sigs = HashMap::new();
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.5));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(getb(&out, "touch1_active"), "deflected swipe must activate the finger");
+        assert!((getf(&out, "touch1_x").unwrap_or(0.0) - 0.5).abs() < 0.05,
+            "swipe finger x should track deflection ~0.5, got {:?}", getf(&out, "touch1_x"));
+
+        // Neutral stick → finger released.
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.0));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(!getb(&out, "touch1_active"), "neutral swipe must release the finger");
+    }
+
+    // Combo: a BUTTON gates the finger, the LS axes drive both swipe axes (routed
+    // by orientation). Buttons must NOT contribute a value (regression for the
+    // "stuck at full" bug). Both directions of an axis cover both halves.
+    #[test]
+    fn remapper_swipe_button_gate_with_two_axis_inputs() {
+        let dev = "gilrs:switch_pro:0";
+        let remap_uid = 1usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        // Button gate + LS in all 4 directions → swipe X + swipe Y.
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_lb", "left_stick_left", "left_stick_right",
+                     "left_stick_up", "left_stick_down"],
+              "out": ["touch_swipe_x", "touch_swipe_y"], "mode": "analog" }
+        ]));
+        // Zero-deadzone source so the test measures the mapping, not the curve.
+        let src = source_node(3, dev, 0.0);
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let getf = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_float()).unwrap_or(0.0);
+        let getb = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+
+        // Stick deflected but button UP → no finger (button gates).
+        let mut dev_sigs = HashMap::new();
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.6));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(!getb(&out, "touch1_active"), "button not held → no finger");
+
+        // Button held, stick centered → finger DOWN at center (button gates,
+        // analog at rest → NOT stuck at full).
+        dev_sigs.insert((dev.to_string(), "btn_lb".to_string()), Signal::Bool(true));
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.0));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(getb(&out, "touch1_active"), "button held → finger active even centered");
+        assert!(getf(&out, "touch1_x").abs() < 0.05 && getf(&out, "touch1_y").abs() < 0.05,
+            "centered stick → finger at center, got ({},{})", getf(&out,"touch1_x"), getf(&out,"touch1_y"));
+
+        // Button held + stick right → X tracks; right uses the positive half.
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.6));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!((getf(&out, "touch1_x") - 0.6).abs() < 0.05,
+            "stick right → swipe x ~+0.6, got {}", getf(&out, "touch1_x"));
+
+        // Button held + stick left → negative half of the SAME axis.
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(-0.8));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!((getf(&out, "touch1_x") - (-0.8)).abs() < 0.05,
+            "stick left → swipe x ~-0.8, got {}", getf(&out, "touch1_x"));
+
+        // Vertical axis drives swipe Y independently (stick up = +Y).
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.0));
+        dev_sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(0.5));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!((getf(&out, "touch1_y") - 0.5).abs() < 0.05,
+            "stick up → swipe y ~+0.5, got {}", getf(&out, "touch1_y"));
+    }
+
+    // A touch combo that mixes opposite cardinals of one axis (left+right) can
+    // never be "all held at once", so the generic suppression test would never
+    // consume its gate button — the button would leak through to pass-through.
+    // The touch-combo activation rule must drive suppression: while the combo is
+    // active, the gate button (and the driving stick) are consumed.
+    #[test]
+    fn remapper_touch_combo_suppresses_gate_button_with_multi_axis() {
+        let dev = "gilrs:switch_pro:0";
+        let remap_uid = 1usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        // Gate button + LS in all 4 directions → swipe X + swipe Y.
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_lb", "left_stick_left", "left_stick_right",
+                     "left_stick_up", "left_stick_down"],
+              "out": ["touch_swipe_x", "touch_swipe_y"], "mode": "analog" }
+        ]));
+        let src = source_node(3, dev, 0.0);
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let getf = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_float()).unwrap_or(0.0);
+        let getb = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+
+        // Button up: combo inactive → button passes through normally.
+        let mut dev_sigs = HashMap::new();
+        dev_sigs.insert((dev.to_string(), "btn_lb".to_string()), Signal::Bool(false));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(!getb(&out, "btn_lb"), "button up → nothing to pass through");
+
+        // Button held + stick deflected (one direction, combo active): the finger
+        // is down AND the gate button is suppressed from pass-through, even though
+        // the opposite cardinal of the same axis is also in the combo.
+        dev_sigs.insert((dev.to_string(), "btn_lb".to_string()), Signal::Bool(true));
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.6));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(getb(&out, "touch1_active"), "combo active → finger down");
+        assert!((getf(&out, "touch1_x") - 0.6).abs() < 0.05, "stick drives swipe x");
+        assert!(!getb(&out, "btn_lb"),
+            "active touch combo must suppress its gate button (was leaking with multi-axis)");
+
+        // Button held, stick centered: finger down at center, button still consumed.
+        dev_sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.0));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(getb(&out, "touch1_active"), "button held → finger active even centered");
+        assert!(!getb(&out, "btn_lb"), "gate button stays suppressed while combo held");
+
+        // Button released → combo inactive → finger up, button no longer consumed.
+        dev_sigs.insert((dev.to_string(), "btn_lb".to_string()), Signal::Bool(false));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(!getb(&out, "touch1_active"), "button released → finger up");
+    }
+
+    // The DualSense mic button is a canonical pin: a normal button→btn_mute map
+    // reaches the sink with no special handling.
+    #[test]
+    fn remapper_mic_button_reaches_sink() {
+        let dev = "gilrs:switch_pro:0";
+        let remap_uid = 1usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_mute"] }
+        ]));
+        let sink = sink_node(2, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let mut dev_sigs = HashMap::new();
+        dev_sigs.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(true));
+        eval_graph_tick(&graph, &mut state, &dev_sigs, 0.016, &mut out);
+        assert!(out.sink_outputs.get(&("virtual.xinput:0".to_string(), "btn_mute".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false), "btn_south→btn_mute must reach the sink");
+    }
+
+    // The implicit digital→analog bridge must RELEASE: pressing then releasing
+    // the Switch digital ZR should drive the virtual analog RT to 1.0 then back
+    // to 0.0 (regression guard for the "stuck at full press" bug).
+    #[test]
+    fn digital_bridge_presses_and_releases() {
+        // Direct device → sink (no remapper); src_dev is the physical device.
+        let sink = sink_node(1, "virtual.xinput:0", "gilrs:switch_pro:0", true);
+        let graph = ProcessingGraph { nodes: vec![sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // ZR pressed.
+        let mut dev = HashMap::new();
+        dev.insert(("gilrs:switch_pro:0".to_string(), "btn_rt_dig".to_string()), Signal::Bool(true));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let v = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 1.0).abs() < 0.01, "pressed ZR should give full RT, got {v}");
+
+        // ZR released → must go back to 0, not latch.
+        dev.insert(("gilrs:switch_pro:0".to_string(), "btn_rt_dig".to_string()), Signal::Bool(false));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let v = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!(v.abs() < 0.01, "released ZR should release RT to 0, got {v}");
+    }
+
+    // With the bridge DISABLED (analog-capable pad, toggle off), the digital
+    // button must NOT leak into the analog trigger.
+    #[test]
+    fn digital_bridge_disabled_does_not_leak() {
+        let sink = sink_node(1, "virtual.xinput:0", "gilrs:xinput:0", false);
+        let graph = ProcessingGraph { nodes: vec![sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        let mut dev = HashMap::new();
+        dev.insert(("gilrs:xinput:0".to_string(), "btn_rt_dig".to_string()), Signal::Bool(true));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let leaked = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()));
+        assert!(leaked.is_none(), "bridge off: digital button must not drive analog trigger, got {leaked:?}");
+    }
+
+    // "Digital triggers" opt-in on an analog-capable pad: the calibrated analog
+    // trigger must SNAP to full/zero at the Calibration threshold (not pass
+    // through continuously), and the digital LT/RT buttons must be re-derived
+    // from that SAME threshold rather than the pad's early-firing L2/R2 flag.
+    #[test]
+    fn digital_triggers_snap_analog_and_rederive_button() {
+        let dev_id = "gilrs:dualsense:0";
+        let mut src = empty_node(1, "device.source");
+        src.device_id = Some(dev_id.to_string());
+        src.params.insert("digital_triggers".into(), Value::Bool(true));
+        src.params.insert("ltrig_digital_threshold".into(), Value::from(0.5));
+        let graph = ProcessingGraph { nodes: vec![src], ..Default::default() };
+
+        // Below threshold: analog snaps to 0, digital button ignores the pad's
+        // early-fired flag and stays off.
+        let mut dev = HashMap::new();
+        dev.insert((dev_id.to_string(), "left_trigger".to_string()), Signal::Float(0.3));
+        dev.insert((dev_id.to_string(), "btn_lt_dig".to_string()),  Signal::Bool(true));
+        let out = preprocess_dev_sigs(&graph, &dev);
+        assert_eq!(out.get(&(dev_id.to_string(), "left_trigger".to_string())).map(|s| s.as_float()),
+            Some(0.0), "below threshold must snap analog trigger to 0");
+        assert_eq!(out.get(&(dev_id.to_string(), "btn_lt_dig".to_string())).map(|s| s.as_bool()),
+            Some(false), "digital button must follow the calibration threshold, not the pad flag");
+
+        // Above threshold: analog snaps to full (staying Float), button on.
+        dev.insert((dev_id.to_string(), "left_trigger".to_string()), Signal::Float(0.7));
+        dev.insert((dev_id.to_string(), "btn_lt_dig".to_string()),  Signal::Bool(false));
+        let out = preprocess_dev_sigs(&graph, &dev);
+        assert_eq!(out.get(&(dev_id.to_string(), "left_trigger".to_string())).copied(),
+            Some(Signal::Float(1.0)), "above threshold must snap analog trigger to full Float(1.0)");
+        assert_eq!(out.get(&(dev_id.to_string(), "btn_lt_dig".to_string())).map(|s| s.as_bool()),
+            Some(true), "above threshold must fire the digital button");
+    }
+
+    // A snapped digital trigger goes down at its threshold from rest, comes up
+    // once under the band around it for the debounce, and short of rest goes
+    // down again only past the band's top; tick to tick, 10 ms apart.
+    #[test]
+    fn a_digital_trigger_lets_go_past_its_hysteresis_and_debounce() {
+        let dev_id = "gilrs:dualsense:hyst";
+        let run = |threshold: f32, steps: &[(f32, bool, &str)]| {
+            let mut src = empty_node(1, "device.source");
+            src.device_id = Some(dev_id.to_string());
+            src.params.insert("digital_triggers".into(), Value::Bool(true));
+            src.params.insert("ltrig_digital_threshold".into(), Value::from(threshold));
+            src.params.insert("trig_hysteresis".into(), Value::from(0.1));
+            let graph = ProcessingGraph { nodes: vec![src], ..Default::default() };
+            let mut state = HashMap::new();
+            let mut out = TickOutput::default();
+            for &(v, want, why) in steps {
+                let mut dev = BusMap::default();
+                dev.insert((dev_id.to_string(), "left_trigger".to_string()), Signal::Float(v));
+                eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&dev), 0.01, &mut out);
+                let down = out.dev_base.get_pin(dev_id, "btn_lt_dig").is_some_and(|s| s.as_bool());
+                assert_eq!(down, want, "threshold {threshold}, {v}: {why}");
+            }
+        };
+        // A 10% band: 0.45 to 0.55.
+        run(0.5, &[
+            (0.5, false, "on the threshold"),
+            (0.51, true, "just past it, from rest"),
+            (0.46, true, "held inside the band"),
+            (0.44, true, "under it, not for the debounce yet"),
+            (0.44, false, "let go once under it for the debounce"),
+            (0.52, false, "short of rest, the threshold doesn't press again"),
+            (0.56, true, "the band's top does"),
+        ]);
+        // At rest, with the band from rest to 0.1: no band under the point, so
+        // any movement presses once it has lasted the debounce, and a dip to
+        // rest shorter than that is jitter.
+        run(0.0, &[
+            (0.0, false, "at rest"),
+            (0.01, false, "off rest, not for the debounce yet"),
+            (0.0, false, "a blip is jitter"),
+            (0.01, false, "off rest again"),
+            (0.01, true, "for the debounce presses"),
+            (0.0, true, "a dip to rest"),
+            (0.01, true, "is jitter"),
+            (0.0, true, "back at rest"),
+            (0.0, false, "for the debounce lets go"),
+        ]);
+    }
+
+    // "Ignore capacitive touch in Learn" is Learn's alone: a stick cap or grip
+    // mapped to something keeps firing with the toggle on.
+    #[test]
+    fn hiding_capacitive_touch_from_learn_leaves_routing_alone() {
+        use flexinput_core::automap::{capacitive_misc_mask, CAPACITIVE_MASK_PIN};
+        let dev_id = "sdl:generic:i0";
+        let mut src = empty_node(1, "device.source");
+        src.device_id = Some(dev_id.to_string());
+        src.params.insert("suppress_touch_misc".into(), Value::Bool(true));
+        let graph = ProcessingGraph { nodes: vec![src], ..Default::default() };
+
+        let k = |pin: &str| (dev_id.to_string(), pin.to_string());
+        let mut dev = HashMap::new();
+        let mask = capacitive_misc_mask(0x28DE, 0x1302); // Steam Controller (Triton)
+        dev.insert(k(CAPACITIVE_MASK_PIN), Signal::Float(mask as f32));
+        for n in 1..=6 {
+            dev.insert(k(&format!("btn_misc{n}")), Signal::Bool(true));
+        }
+
+        let out = preprocess_dev_sigs(&graph, &dev);
+        for n in 1..=6 {
+            assert_eq!(out.get(&k(&format!("btn_misc{n}"))).map(|s| s.as_bool()), Some(true), "Misc {n}");
+        }
+    }
+
+    // With "Digital triggers" OFF the analog trigger passes through unchanged —
+    // no thresholding, full continuous travel.
+    #[test]
+    fn digital_triggers_off_passes_analog_through() {
+        let dev_id = "gilrs:dualsense:0";
+        let mut src = empty_node(1, "device.source");
+        src.device_id = Some(dev_id.to_string());
+        // digital_triggers absent → defaults to off.
+        let graph = ProcessingGraph { nodes: vec![src], ..Default::default() };
+
+        let mut dev = HashMap::new();
+        dev.insert((dev_id.to_string(), "left_trigger".to_string()), Signal::Float(0.3));
+        let out = preprocess_dev_sigs(&graph, &dev);
+        let v = out.get(&(dev_id.to_string(), "left_trigger".to_string())).map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.3).abs() < 1e-4, "digital triggers off must pass analog through, got {v}");
+    }
+
+    /// Build a `device.source` node carrying a `deadzone` param so
+    /// `preprocess_dev_sigs` picks it up for the named device.
+    fn source_node(uid: usize, device_id: &str, deadzone: f32) -> NodeSnap {
+        let mut n = empty_node(uid, "device.source");
+        n.device_id = Some(device_id.to_string());
+        n.params.insert("deadzone".into(), Value::from(deadzone as f64));
+        n
+    }
+
+    // A direct AutoMap wire (device.source → sink) must apply the source
+    // node's stick deadzone. A small stick value inside the deadzone must
+    // collapse to 0 at the sink; a value past it must pass through (rescaled).
+    #[test]
+    fn automap_stick_respects_source_deadzone() {
+        let src = source_node(1, "gilrs:xinput:0", 0.2);
+        let sink = sink_node(2, "virtual.xinput:0", "gilrs:xinput:0", false);
+        let graph = ProcessingGraph { nodes: vec![src, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Stick nudged to 0.1 — inside the 0.2 deadzone → sink must read 0.
+        let mut dev = HashMap::new();
+        dev.insert(("gilrs:xinput:0".to_string(), "left_stick_x".to_string()), Signal::Float(0.1));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let x = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick_x".to_string()))
+            .map(|s| s.as_float());
+        let lstick_x = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick".to_string()))
+            .and_then(|s| if let Signal::Vec2(v) = s { Some(v.x) } else { None });
+        let v = x.or(lstick_x).unwrap_or(0.0);
+        assert!(v.abs() < 1e-4, "stick inside deadzone must collapse to 0 at sink, got {v}");
+
+        // Stick pushed to 0.6 — past the deadzone → passes through (rescaled).
+        dev.insert(("gilrs:xinput:0".to_string(), "left_stick_x".to_string()), Signal::Float(0.6));
+        eval_graph_tick(&graph, &mut state, &dev, 0.016, &mut out);
+        let x = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick_x".to_string()))
+            .map(|s| s.as_float());
+        let lstick_x = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick".to_string()))
+            .and_then(|s| if let Signal::Vec2(v) = s { Some(v.x) } else { None });
+        let v = x.or(lstick_x).unwrap_or(0.0);
+        assert!(v > 0.01, "stick past deadzone must reach sink, got {v}");
+    }
+
+    // `deadzone_r` gives the right stick its own deadzone; the left keeps
+    // `deadzone`.
+    #[test]
+    fn the_right_stick_can_have_its_own_deadzone() {
+        let mut src = source_node(1, "gilrs:xinput:0", 0.05);
+        src.params.insert("deadzone_r".into(), Value::from(0.3));
+        let graph = ProcessingGraph { nodes: vec![src], ..Default::default() };
+        let mut dev = HashMap::new();
+        dev.insert(("gilrs:xinput:0".to_string(), "left_stick_x".to_string()), Signal::Float(0.2));
+        dev.insert(("gilrs:xinput:0".to_string(), "right_stick_x".to_string()), Signal::Float(0.2));
+        let out = preprocess_dev_sigs(&graph, &dev);
+        let read = |pin: &str| out[&("gilrs:xinput:0".to_string(), pin.to_string())].as_float();
+        assert!(read("left_stick_x") > 0.1, "0.2 is past the left stick's 0.05");
+        assert_eq!(read("right_stick_x"), 0.0, "0.2 is inside the right stick's 0.3");
+    }
+
+    // The UI→engine source-block (config overlay, M3.3): a `(device, pin)` the
+    // UI injects into `state[MACRO_CARRY_UID].source_block` before a tick is
+    // zeroed in that tick's `dev_sigs` view, so a sink reading the device pin
+    // gets nothing — the same tick-start apply the Virtual Menu's block uses,
+    // reached without any node in the graph. Mirrors how
+    // `spawn_processing_thread` re-injects the block before EVERY tick.
+    #[test]
+    fn ui_source_block_zeroes_device_pin_at_sink() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0); // no deadzone — raw passthrough
+        let sink = sink_node(2, "virtual.xinput:0", dev, false);
+        let graph = ProcessingGraph { nodes: vec![src, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        let dev_sigs = || {
+            let mut m = HashMap::new();
+            m.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.9));
+            m
+        };
+        let sink_x = |out: &TickOutput| -> f32 {
+            out.sink_outputs
+                .get(&("virtual.xinput:0".to_string(), "left_stick_x".to_string()))
+                .map(|s| s.as_float())
+                .or_else(|| out.sink_outputs
+                    .get(&("virtual.xinput:0".to_string(), "left_stick".to_string()))
+                    .and_then(|s| if let Signal::Vec2(v) = s { Some(v.x) } else { None }))
+                .unwrap_or(0.0)
+        };
+        // Inject the block for the stick pins the way the proc thread does.
+        let block = |state: &mut HashMap<usize, crate::state::NodeState>| {
+            let carry = state.entry(MACRO_CARRY_UID).or_default();
+            for pin in ["left_stick", "left_stick_x", "left_stick_y"] {
+                carry.source_block.insert((dev.to_string(), pin.to_string()));
+            }
+        };
+
+        // Baseline: no block → the stick reaches the sink.
+        eval_graph_tick(&graph, &mut state, &dev_sigs(), 0.016, &mut out);
+        assert!(sink_x(&out) > 0.5,
+            "without a block the stick must reach the sink, got {}", sink_x(&out));
+
+        // Blocked tick → the sink reads zero.
+        block(&mut state);
+        eval_graph_tick(&graph, &mut state, &dev_sigs(), 0.016, &mut out);
+        assert!(sink_x(&out).abs() < 1e-4,
+            "an injected UI source-block must zero the device pin at the sink, got {}", sink_x(&out));
+
+        // The block is one-tick (tick-end clears `source_block`): without a
+        // re-inject the stick passes again — exactly why the proc thread
+        // re-injects before every tick of a catch-up burst.
+        eval_graph_tick(&graph, &mut state, &dev_sigs(), 0.016, &mut out);
+        assert!(sink_x(&out) > 0.5,
+            "block must not latch on its own — proc thread re-injects each tick, got {}", sink_x(&out));
+
+        // Re-inject → blocked again.
+        block(&mut state);
+        eval_graph_tick(&graph, &mut state, &dev_sigs(), 0.016, &mut out);
+        assert!(sink_x(&out).abs() < 1e-4,
+            "a re-injected block must zero the pin again, got {}", sink_x(&out));
+    }
+
+    /// A pad auto-mapped straight onto the keymouse sink, with "Route gamepad
+    /// touchpad" on or off: a one-finger slide moves the pointer only when on,
+    /// and a two-finger slide scrolls through the scroll_move pins.
+    #[test]
+    fn route_touchpad_drives_the_keymouse_sink() {
+        let key = |pin: &str| ("virtual.keymouse:0".to_string(), pin.to_string());
+        let graph_with = |route: bool| {
+            let mut sink = empty_node(3, "device.sink");
+            sink.params.insert("route_touchpad".into(), Value::Bool(route));
+            sink.sink_target = Some(SinkTarget {
+                device_id: "virtual.keymouse:0".to_string(),
+                pin_ids: canonical_pins(),
+                multi_sources: vec![Vec::new(); canonical_pins().len()],
+                automap_source: Some(("pad".to_string(), canonical_pins())),
+                automap_fallback_dev: None,
+                feedback_sources: Vec::new(),
+                is_self_sink: false,
+                digital_trigger_bridge: false,
+                compiled: Default::default(),
+            });
+            ProcessingGraph { nodes: vec![sink], ..Default::default() }
+        };
+        let touch = |fingers: &[(f32, f32)]| {
+            let mut s = HashMap::new();
+            for (i, n) in ["1", "2"].iter().enumerate() {
+                let f = fingers.get(i);
+                s.insert(("pad".to_string(), format!("touch{n}_active")), Signal::Bool(f.is_some()));
+                if let Some(&(x, y)) = f {
+                    s.insert(("pad".to_string(), format!("touch{n}_x")), Signal::Float(x));
+                    s.insert(("pad".to_string(), format!("touch{n}_y")), Signal::Float(y));
+                }
+            }
+            s
+        };
+        // Slide over two ticks; the second tick carries the motion.
+        let slide = |route: bool, fingers: [&[(f32, f32)]; 2]| {
+            let graph = graph_with(route);
+            let mut state = HashMap::new();
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut state, &touch(fingers[0]), 0.001, &mut out);
+            eval_graph_tick(&graph, &mut state, &touch(fingers[1]), 0.001, &mut out);
+            out
+        };
+
+        let out = slide(true, [&[(0.0, 0.0)], &[(0.1, 0.0)]]);
+        let moved = match out.sink_outputs.get(&key("mouse_move")) {
+            Some(Signal::Vec2(v)) => v.x,
+            _ => 0.0,
+        };
+        assert!(moved > 0.0, "a one-finger slide right moves the pointer right");
+        assert_eq!(out.sink_outputs.get(&key("mouse_left")), Some(&Signal::Bool(false)));
+
+        let out = slide(false, [&[(0.0, 0.0)], &[(0.1, 0.0)]]);
+        assert!(!out.sink_outputs.contains_key(&key("mouse_move")), "off by default: the touchpad does nothing");
+
+        let out = slide(true, [&[(0.0, 0.0), (0.4, 0.0)], &[(0.0, 0.1), (0.4, 0.1)]]);
+        let scrolled = out.sink_outputs.get(&key("scroll_move_y")).map(|s| s.as_float()).unwrap_or(0.0);
+        assert!(scrolled < 0.0, "two fingers up scroll down (content follows the fingers), got {scrolled}");
+        assert!(!out.sink_outputs.contains_key(&key("mouse_move")));
+    }
+
+    /// A Joy-Con 2's optical sensor through a Remapper (so it has to survive
+    /// the bus — the pins were once missing from `ALL_PINS`) onto the keymouse
+    /// sink: with "Joy-Con 2 mouse sensor" on it drives `mouse` (already +Y up),
+    /// scaled by Mouse speed as a wire would be and by Sensor ×; off, nothing.
+    /// The contact button reaches the bus too.
+    #[test]
+    fn route_optical_mouse_drives_the_keymouse_sink() {
+        let dev = "jc2:right:aabbccddeeff";
+        let run = |route: bool| {
+            let mut remap = empty_node(2, "module.remapper");
+            remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+            remap.params.insert("mappings".into(), serde_json::json!([]));
+            let mut sink = keymouse_sink_from_remap(3, 2);
+            sink.params.insert("route_optical_mouse".into(), Value::Bool(route));
+            sink.params.insert("optical_mouse_speed".into(), Value::from(2.0));
+            sink.params.insert("mouse_sensitivity".into(), Value::from(100.0));
+            let graph = ProcessingGraph { nodes: vec![remap, sink], ..Default::default() };
+            let mut sigs = HashMap::new();
+            sigs.insert((dev.to_string(), "optical_x".to_string()), Signal::Float(0.03));
+            sigs.insert((dev.to_string(), "optical_y".to_string()), Signal::Float(-0.01));
+            sigs.insert((dev.to_string(), "optical_contact".to_string()), Signal::Bool(true));
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.001, &mut out);
+            out
+        };
+        let pin = |out: &TickOutput, p: &str| {
+            out.sink_outputs.get(&("virtual.keymouse:0".to_string(), p.to_string())).copied()
+        };
+        let on = run(true);
+        match pin(&on, "mouse") {
+            Some(Signal::Vec2(v)) => assert!((v - Vec2::new(6.0, -2.0)).length() < 1e-4, "{v}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(pin(&on, "optical_contact"), Some(Signal::Bool(true)), "contact survives the bus");
+        assert_eq!(pin(&run(false), "mouse"), None, "off by default: the sensor does nothing");
+    }
+
+    /// device.source → Remapper (analog stick-cardinal → key) → keymouse sink.
+    /// Reproduces the user-reported case: WASD via analog-mode stick mapping.
+    fn keymouse_sink_from_remap(uid: usize, remap_uid: usize) -> NodeSnap {
+        let mut n = empty_node(uid, "device.sink");
+        n.sink_target = Some(SinkTarget {
+            device_id: "virtual.keymouse:0".to_string(),
+            pin_ids: canonical_pins(),
+            multi_sources: vec![Vec::new(); canonical_pins().len()],
+            automap_source: Some((format!("remap:{remap_uid}"), canonical_pins())),
+            automap_fallback_dev: None,
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        n
+    }
+
+    // End-to-end: a zone mapped touch→mouse_left must drive the keymouse sink's
+    // mouse_left pin (regression guard for "touch/click → mouse button does
+    // nothing"). Exercises the full graph tick: tz node → touchmap bus → sink.
+    #[test]
+    fn touch_zone_button_reaches_keymouse_sink() {
+        let dev = "pad";
+        let tz_uid = 2usize;
+        let mut tz = empty_node(tz_uid, "module.touch_zones");
+        tz.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        tz.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        tz.params.insert("col_edges".into(), serde_json::json!([]));
+        tz.params.insert("row_edges".into(), serde_json::json!([]));
+        tz.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["mouse_left"],"mode":"down"},
+        ]));
+        let mut sink = empty_node(3, "device.sink");
+        sink.sink_target = Some(SinkTarget {
+            device_id: "virtual.keymouse:0".to_string(),
+            pin_ids: canonical_pins(),
+            multi_sources: vec![Vec::new(); canonical_pins().len()],
+            automap_source: Some((format!("touchmap:{tz_uid}"), canonical_pins())),
+            automap_fallback_dev: None,
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        let graph = ProcessingGraph { nodes: vec![tz, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "touch1_active".to_string()), Signal::Bool(true));
+        sigs.insert((dev.to_string(), "touch1_x".to_string()), Signal::Float(0.0));
+        sigs.insert((dev.to_string(), "touch1_y".to_string()), Signal::Float(0.0));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+        let lmb = out.sink_outputs.get(&("virtual.keymouse:0".to_string(), "mouse_left".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        assert!(lmb, "touch→mouse_left must reach the keymouse sink");
+    }
+
+    // End-to-end: touchpad-mode mouse must reach the sink as a SUSTAINED velocity on
+    // the "mouse" pin (NOT a per-tick mouse_move displacement — the engine publishes
+    // only the last sub-tick's sink_outputs, so a displacement banked on earlier ticks
+    // is discarded and the cursor never moves). The same trackball value also drives
+    // right_stick, so both are present as the finger slides.
+    #[test]
+    fn touch_zone_touchpad_reaches_keymouse_sink() {
+        let dev = "pad";
+        let tz_uid = 2usize;
+        let mut tz = empty_node(tz_uid, "module.touch_zones");
+        tz.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        tz.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        tz.params.insert("col_edges".into(), serde_json::json!([]));
+        tz.params.insert("row_edges".into(), serde_json::json!([]));
+        tz.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["mouse","right_stick"],"mode":"analog","tp_mode":"touchpad"},
+        ]));
+        let mut sink = empty_node(3, "device.sink");
+        sink.sink_target = Some(SinkTarget {
+            device_id: "virtual.keymouse:0".to_string(),
+            pin_ids: canonical_pins(),
+            multi_sources: vec![Vec::new(); canonical_pins().len()],
+            automap_source: Some((format!("touchmap:{tz_uid}"), canonical_pins())),
+            automap_fallback_dev: None,
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        let graph = ProcessingGraph { nodes: vec![tz, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let finger = |px: f32| {
+            let mut m = HashMap::new();
+            m.insert((dev.to_string(), "touch1_active".to_string()), Signal::Bool(true));
+            m.insert((dev.to_string(), "touch1_x".to_string()), Signal::Float(px));
+            m.insert((dev.to_string(), "touch1_y".to_string()), Signal::Float(0.0));
+            m
+        };
+        eval_graph_tick(&graph, &mut state, &finger(0.0), 0.016, &mut out);
+        eval_graph_tick(&graph, &mut state, &finger(0.3), 0.016, &mut out);
+        // The rightward slide drives the "mouse" velocity pin (+X), sustained via the
+        // trackball, so it survives the last-tick-wins publish.
+        let mv = out.sink_outputs.get(&("virtual.keymouse:0".to_string(), "mouse".to_string()))
+            .and_then(|s| if let Signal::Vec2(v) = s { Some(v.x) } else { None });
+        assert!(mv.is_some_and(|x| x > 0.1),
+            "touchpad mouse must reach the sink as a rightward velocity on the \"mouse\" pin (got {mv:?})");
+        assert!(out.sink_outputs.contains_key(&("virtual.keymouse:0".to_string(), "right_stick".to_string())),
+            "touchpad stick must reach the sink on right_stick");
+    }
+
+    #[test]
+    fn analog_stick_to_key_respects_source_deadzone() {
+        let dev = "gilrs:xinput:0";
+        let remap_uid = 2usize;
+        let src = source_node(1, dev, 0.3); // 0.3 deadzone on the device.
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["key_w"], "mode": "analog" }
+        ]));
+        let sink = keymouse_sink_from_remap(3, remap_uid);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Stick pushed UP to 0.15 — INSIDE the 0.3 deadzone. key_w must NOT fire.
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(0.15));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+        let w = out.sink_outputs.get(&("virtual.keymouse:0".to_string(), "key_w".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        assert!(!w, "stick inside deadzone must NOT fire key_w, but it did");
+
+        // Stick pushed UP to 0.8 — past the deadzone. key_w must fire.
+        sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(0.8));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+        let w = out.sink_outputs.get(&("virtual.keymouse:0".to_string(), "key_w".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        assert!(w, "stick past deadzone must fire key_w, but it didn't");
+    }
+
+    /// A key binding firing must not take LMB away: stick → W and RT → LMB in
+    /// one Remapper, both reaching the keymouse sink at once.
+    #[test]
+    fn key_binding_does_not_block_lmb() {
+        let dev = "gilrs:xinput:0";
+        let remap_uid = 2usize;
+        let src = source_node(1, dev, 0.1);
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["key_w"], "mode": "analog" },
+            { "in": ["btn_rt_dig"], "out": ["mouse_left"] }
+        ]));
+        let sink = keymouse_sink_from_remap(3, remap_uid);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let get = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.keymouse:0".to_string(), pin.to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "btn_rt_dig".to_string()), Signal::Bool(true));
+        for _ in 0..3 { eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out); }
+        assert!(get(&out, "mouse_left"), "RT alone presses LMB");
+
+        sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(0.8));
+        for _ in 0..3 { eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out); }
+        assert!(get(&out, "key_w"), "the stick holds W");
+        assert!(get(&out, "mouse_left"), "and LMB stays pressed while W is held");
+    }
+
+    /// A key an upstream module drives (here a first Remapper; in the report an
+    /// Area Mapper) must pass through a second Remapper that doesn't map it.
+    /// `key_w` isn't a canonical pin, and the Remapper only carried canonical
+    /// and MIDI pins on, so an Area Mapper in front of a Remapper lost its WASD.
+    #[test]
+    fn remapper_passes_upstream_keys_through() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.1);
+        let mut first = empty_node(2, "module.remapper");
+        first.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        first.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_south"], "out": ["key_w"] },
+            { "in": ["btn_east"], "out": ["key_e"] }
+        ]));
+        let mut second = empty_node(3, "module.remapper");
+        second.params.insert("_automap_collector_id".into(), Value::String("remap:2".into()));
+        second.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        second.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_rt_dig"], "out": ["mouse_left"] },
+            { "in": ["key_e"], "out": ["key_q"] }
+        ]));
+        let sink = keymouse_sink_from_remap(4, 3);
+        let graph = ProcessingGraph { nodes: vec![src, first, second, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let get = |out: &TickOutput, pin: &str| out.sink_outputs
+            .get(&("virtual.keymouse:0".to_string(), pin.to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(true));
+        sigs.insert((dev.to_string(), "btn_rt_dig".to_string()), Signal::Bool(true));
+        for _ in 0..3 { eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out); }
+        assert!(get(&out, "key_w"), "the first Remapper's W reaches the sink");
+        assert!(get(&out, "mouse_left"), "alongside the second's own mapping");
+
+        sigs.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(false));
+        for _ in 0..3 { eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out); }
+        assert!(!get(&out, "key_w"), "and lets go of it");
+
+        // An upstream key the second Remapper maps is consumed like any input.
+        sigs.insert((dev.to_string(), "btn_east".to_string()), Signal::Bool(true));
+        for _ in 0..3 { eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out); }
+        assert!(get(&out, "key_q"), "E is remapped to Q");
+        assert!(!get(&out, "key_e"), "and E itself is consumed");
+    }
+
+    /// Even when no device.source node carries the deadzone (the device feeds
+    /// AutoMap consumers like the Remapper without its source node present in
+    /// the graph), stick pins must still get the default deadzone rather than
+    /// passing through raw. Regression guard for the "analog stick→key ignores
+    /// deadzone" report.
+    #[test]
+    fn analog_stick_to_key_default_deadzone_without_source_node() {
+        let dev = "gilrs:xinput:0";
+        let remap_uid = 2usize;
+        // No source_node: only remapper + sink. The default deadzone must
+        // still apply (DEFAULT_STICK_DEADZONE), not 0.
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["key_w"], "mode": "analog" }
+        ]));
+        let sink = keymouse_sink_from_remap(3, remap_uid);
+        let graph = ProcessingGraph { nodes: vec![remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // 0.05 is below the default deadzone → key_w must NOT fire.
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(0.05));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+        let w = out.sink_outputs.get(&("virtual.keymouse:0".to_string(), "key_w".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        assert!(!w, "small stick (below default deadzone) must NOT fire key_w");
+    }
+
+    /// Run the graph for `ticks` frames at `dt`, holding `stick_y`, and return
+    /// (on_count, edge_count) for the keymouse `out_pin`. Edges count rising
+    /// transitions so we can tell a tap train apart from a steady gate.
+    fn count_pulses(
+        dev: &str, remap_uid: usize, out_pin: &str, mode_extra: serde_json::Value,
+        stick_y: f32, ticks: usize, dt: f32,
+    ) -> (usize, usize) {
+        let src = source_node(1, dev, 0.0); // zero deadzone: measure modulation only.
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        let mut mapping = serde_json::json!(
+            { "in": ["left_stick_up"], "out": [out_pin], "mode": "analog" }
+        );
+        if let Some(obj) = mapping.as_object_mut() {
+            if let Some(extra) = mode_extra.as_object() {
+                for (k, v) in extra { obj.insert(k.clone(), v.clone()); }
+            }
+        }
+        remap.params.insert("mappings".into(), serde_json::Value::Array(vec![mapping]));
+        let sink = keymouse_sink_from_remap(3, remap_uid);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(stick_y));
+
+        let mut on = 0usize;
+        let mut edges = 0usize;
+        let mut prev = false;
+        for _ in 0..ticks {
+            eval_graph_tick(&graph, &mut state, &sigs, dt, &mut out);
+            let w = out.sink_outputs.get(&("virtual.keymouse:0".to_string(), out_pin.to_string()))
+                .map(|s| s.as_bool()).unwrap_or(false);
+            if w { on += 1; }
+            if w && !prev { edges += 1; }
+            prev = w;
+        }
+        (on, edges)
+    }
+
+    // Plain analog → digital must produce a TAP TRAIN, and a harder push must
+    // tap MORE often than a light push (frequency tracks amplitude).
+    #[test]
+    fn analog_digital_tap_train_frequency_tracks_amplitude() {
+        let extra = serde_json::json!({ "window_ms": 30.0 });
+        // 1 second at 1ms ticks for clean frequency counting.
+        let (_, edges_light) = count_pulses("gilrs:xinput:0", 2, "key_w", extra.clone(), 0.3, 1000, 0.001);
+        let (_, edges_hard)  = count_pulses("gilrs:xinput:0", 2, "key_w", extra, 1.0, 1000, 0.001);
+        assert!(edges_light >= 2, "light push should still tap a few times, got {edges_light}");
+        assert!(edges_hard > edges_light,
+            "harder push must tap more often: hard={edges_hard} light={edges_light}");
+    }
+
+    // Hold mode → PWM: duty cycle (ON fraction) must track amplitude. A
+    // light push has a low duty; full deflection is (near) always on.
+    #[test]
+    fn analog_digital_hold_pwm_duty_tracks_amplitude() {
+        let extra = serde_json::json!({ "window_ms": 40.0, "sustain": true });
+        let (on_light, _) = count_pulses("gilrs:xinput:0", 2, "key_w", extra.clone(), 0.25, 1000, 0.001);
+        let (on_full, _)  = count_pulses("gilrs:xinput:0", 2, "key_w", extra, 1.0, 1000, 0.001);
+        let duty_light = on_light as f32 / 1000.0;
+        let duty_full  = on_full as f32 / 1000.0;
+        assert!(duty_light > 0.05 && duty_light < 0.6,
+            "light Hold duty should be low-ish, got {duty_light}");
+        assert!(duty_full > 0.9, "full deflection Hold should be near-always-on, got {duty_full}");
+    }
+
+    // Turbo (no Hold) doubles the max frequency, so at full deflection it
+    // taps more often than plain analog at the same window_ms.
+    #[test]
+    fn analog_digital_turbo_doubles_frequency() {
+        let plain = serde_json::json!({ "window_ms": 30.0 });
+        let turbo = serde_json::json!({ "window_ms": 30.0, "turbo": true });
+        let (_, edges_plain) = count_pulses("gilrs:xinput:0", 2, "key_w", plain, 1.0, 1000, 0.001);
+        let (_, edges_turbo) = count_pulses("gilrs:xinput:0", 2, "key_w", turbo, 1.0, 1000, 0.001);
+        assert!(edges_turbo > edges_plain,
+            "turbo must tap faster at full deflection: turbo={edges_turbo} plain={edges_plain}");
+    }
+
+    // Unit-level coverage of the shared analog→digital modulator.
+    #[test]
+    fn analog_digital_pulse_unit() {
+        let dt = 0.001;
+        let run = |mag: f32, window_ms: f32, sustain: bool, turbo: bool| -> (usize, usize) {
+            let mut slots = [0.0f32; PRESS_SLOTS_PER_MAPPING];
+            let mut on = 0usize;
+            let mut edges = 0usize;
+            let mut prev = false;
+            for _ in 0..1000 {
+                let v = analog_digital_pulse(mag, window_ms, sustain, turbo, &mut slots, dt);
+                if v { on += 1; }
+                if v && !prev { edges += 1; }
+                prev = v;
+            }
+            (on, edges)
+        };
+
+        // Zero magnitude → never on.
+        assert_eq!(run(0.0, 30.0, false, false).0, 0, "mag 0 must be silent");
+
+        // Plain tap train: more deflection → more taps.
+        let (_, e_light) = run(0.3, 30.0, false, false);
+        let (_, e_hard)  = run(1.0, 30.0, false, false);
+        assert!(e_hard > e_light, "freq must rise with mag: {e_hard} > {e_light}");
+
+        // Regression: at the REALISTIC default window_ms (200ms) the plain
+        // tap train must be ~50% duty (a clean tap), NOT a near-held key.
+        // The old tap_on=window_ms made this ~90% duty → felt held.
+        let (on_default, edges_default) = run(1.0, 200.0, false, false);
+        let duty = on_default as f32 / 1000.0;
+        assert!(duty > 0.35 && duty < 0.65,
+            "plain tap at default window must be ~50% duty, got {duty} (held-key regression)");
+        assert!(edges_default >= 4, "must actually tap multiple times in 1s, got {edges_default}");
+
+        // Hold PWM: duty tracks magnitude; full → always on.
+        let (on_q, _)    = run(0.25, 40.0, true, false);
+        let (on_full, _) = run(1.0, 40.0, true, false);
+        assert!(on_q > 0 && (on_q as f32 / 1000.0) < 0.6, "quarter duty should be low, got {on_q}/1000");
+        assert!(on_full as f32 / 1000.0 > 0.9, "full Hold should be near always-on, got {on_full}/1000");
+
+        // Turbo doubles frequency at full deflection.
+        let (_, e_plain) = run(1.0, 30.0, false, false);
+        let (_, e_turbo) = run(1.0, 30.0, false, true);
+        assert!(e_turbo > e_plain, "turbo faster: {e_turbo} > {e_plain}");
+    }
+
+    // on_press / on_release now honor `window_ms` as the emitted trigger
+    // duration (floored at the 10ms minimum pulse).
+    #[test]
+    fn on_press_release_trigger_duration_tracks_window_ms() {
+        let dt = 0.001; // 1 ms/tick
+
+        // Drive a press: hold for `hold_ticks`, then release; count how many
+        // ticks the output stays ON after the relevant edge.
+        let run_on_press = |window_ms: f32| -> usize {
+            let mut slots = [0.0f32; PRESS_SLOTS_PER_MAPPING];
+            let mut on = 0usize;
+            // rising edge at tick 0; hold a few ticks then release.
+            for t in 0..1000 {
+                let raw = t < 5; // pressed for 5 ms
+                if apply_press_mode(raw, PressMode::OnPress, window_ms, false, &mut slots, dt) {
+                    on += 1;
+                }
+            }
+            on
+        };
+
+        // ~50 ms window → ~50 on-ticks (within tolerance for the dt countdown).
+        let n50 = run_on_press(50.0);
+        assert!((45..=55).contains(&n50), "50ms on_press should stay ~50 ticks, got {n50}");
+        // ~200 ms window → ~200 on-ticks.
+        let n200 = run_on_press(200.0);
+        assert!((190..=210).contains(&n200), "200ms on_press should stay ~200 ticks, got {n200}");
+        // Longer window → strictly longer trigger.
+        assert!(n200 > n50, "larger window_ms must lengthen the trigger");
+
+        // Floor: a 0 ms window still emits at least the 10ms minimum pulse.
+        let n0 = run_on_press(0.0);
+        assert!(n0 >= 9 && n0 <= 12, "0ms window floors to ~10ms pulse, got {n0}");
+
+        // on_release fires on the falling edge with the same duration rule.
+        let run_on_release = |window_ms: f32| -> usize {
+            let mut slots = [0.0f32; PRESS_SLOTS_PER_MAPPING];
+            let mut on = 0usize;
+            for t in 0..1000 {
+                let raw = t < 5; // release happens at tick 5
+                if apply_press_mode(raw, PressMode::OnRelease, window_ms, false, &mut slots, dt) {
+                    on += 1;
+                }
+            }
+            on
+        };
+        let r100 = run_on_release(100.0);
+        assert!((95..=105).contains(&r100), "100ms on_release should stay ~100 ticks, got {r100}");
+    }
+
+    // Processing wired BEFORE a Collector (explicit input port) must be what
+    // the downstream Remapper sees — not the raw device sample. Here a
+    // `module.constant` stands in for a Response Curve that re-maps the stick
+    // amplitude: the device pushes left_stick_y small (raw), but the constant
+    // feeds left_stick_y = 0.9 into the collector port. The Remapper's analog
+    // stick→key mapping must therefore see ~0.9, firing key_w.
+    #[test]
+    fn processing_through_collector_drives_remapper_amplitude() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+
+        // Constant node → emulates Response Curve output (Float 0.9).
+        let mut konst = empty_node(2, "module.constant");
+        konst.n_outputs = 1;
+        konst.params.insert("value".into(), Value::from(0.9_f64));
+
+        // Collector: AutoMap bus (input 0, from device) + explicit port for
+        // left_stick_y (input 1, from the constant). _collect_pin_ids[0] names
+        // that port's pin.
+        let mut collect = empty_node(3, "module.automap_collect");
+        collect.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        collect.params.insert("_collect_pin_ids".into(),
+            Value::Array(vec![Value::String("left_stick_y".into())]));
+        // input_sources: [0]=bus (device.source idx 0 out 0), [1]=constant out 0.
+        collect.input_sources = vec![Some((0, 0)), Some((1, 0))];
+
+        // Remapper reads the collector, maps left_stick_up (analog) → key_w.
+        let remap_uid = 4usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_collector_id".into(),
+            Value::String("collector:3".into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["key_w"], "mode": "analog", "window_ms": 30.0 }
+        ]));
+        let sink = keymouse_sink_from_remap(5, remap_uid);
+
+        let graph = ProcessingGraph { nodes: vec![src, konst, collect, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Device stick is near-neutral (0.05) — raw would not fire. The
+        // collector override (0.9) should drive the Remapper instead.
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(0.05));
+
+        // Run several ticks; key_w should tap at least once (proves the
+        // processed 0.9 amplitude reached the Remapper, not the raw 0.05).
+        let mut fired = false;
+        for _ in 0..200 {
+            eval_graph_tick(&graph, &mut state, &sigs, 0.001, &mut out);
+            if out.sink_outputs.get(&("virtual.keymouse:0".to_string(), "key_w".to_string()))
+                .map(|s| s.as_bool()).unwrap_or(false)
+            {
+                fired = true; break;
+            }
+        }
+        assert!(fired, "processed amplitude through Collector must drive the Remapper (key_w never fired)");
+    }
+
+    // Combiner hierarchy: a pin a Remapper CONSUMED (mapped away) must not leak
+    // through a lower-priority raw-device port under a non-ADD policy, but ADD
+    // explicitly opts back into mixing.
+    fn combiner_node(
+        uid: usize, remap_uid: usize, raw_dev: &str, policy: &str,
+    ) -> NodeSnap {
+        let mut n = empty_node(uid, "module.automap_combiner");
+        // Port 0 = Remapper collector; Port 1 = raw device.
+        n.params.insert("_automap_input_devs".into(), Value::Array(vec![
+            Value::String(String::new()),
+            Value::String(raw_dev.into()),
+        ]));
+        n.params.insert("_automap_input_collectors".into(), Value::Array(vec![
+            Value::String(format!("remap:{remap_uid}")),
+            Value::String(String::new()),
+        ]));
+        let mut policy_obj = serde_json::Map::new();
+        policy_obj.insert("btn_south".into(), Value::String(policy.into()));
+        n.params.insert("combiner_pin_policy".into(), Value::Object(policy_obj));
+        n.input_sources = vec![Some((0, 0)), Some((1, 0))]; // shape only
+        n
+    }
+
+    fn run_combiner_leak(policy: &str) -> bool {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+        // Remapper consumes btn_south (maps it to btn_west), so btn_south is
+        // claimed and should be suppressed downstream.
+        let remap_uid = 2usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_west"], "mode": "down" }
+        ]));
+        let combiner = combiner_node(3, remap_uid, dev, policy);
+        // Sink auto-maps FROM the combiner.
+        let sink = sink_node(4, "virtual.xinput:0", "combiner:3", false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, combiner, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Physical btn_south held.
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(true));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+        // Did btn_south leak to the sink?
+        out.sink_outputs.get(&("virtual.xinput:0".to_string(), "btn_south".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false)
+    }
+
+    #[test]
+    fn combiner_suppresses_consumed_pin_unless_add() {
+        // SORT (default) and OR must NOT leak the consumed btn_south.
+        assert!(!run_combiner_leak("SORT"), "SORT must suppress consumed btn_south");
+        assert!(!run_combiner_leak("OR"),   "OR must suppress consumed btn_south");
+        // ADD explicitly mixes → the raw-port btn_south is allowed through.
+        assert!(run_combiner_leak("ADD"), "ADD must let the raw btn_south mix through");
+    }
+
+    // Per-PORT default policy: setting the raw port's default to ADD opts that
+    // port back into mixing for ALL its pins (no per-pin override needed), so a
+    // consumed pin leaks through exactly as an explicit per-pin ADD would.
+    #[test]
+    fn combiner_per_port_default_add_opts_into_mixing() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+        let remap_uid = 2usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_south"], "out": ["btn_west"], "mode": "down" }
+        ]));
+        // Combiner with NO per-pin policy, but port 1 (raw) default = ADD.
+        let mut combiner = empty_node(3, "module.automap_combiner");
+        combiner.params.insert("_automap_input_devs".into(), Value::Array(vec![
+            Value::String(String::new()), Value::String(dev.into()),
+        ]));
+        combiner.params.insert("_automap_input_collectors".into(), Value::Array(vec![
+            Value::String(format!("remap:{remap_uid}")), Value::String(String::new()),
+        ]));
+        let mut port_def = serde_json::Map::new();
+        port_def.insert("1".into(), Value::String("ADD".into()));
+        combiner.params.insert("combiner_port_default".into(), Value::Object(port_def));
+        combiner.input_sources = vec![Some((0, 0)), Some((1, 0))];
+
+        let sink = sink_node(4, "virtual.xinput:0", "combiner:3", false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, combiner, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "btn_south".to_string()), Signal::Bool(true));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+
+        let leaked = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "btn_south".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        assert!(leaked, "port-default ADD must opt the raw port into mixing (btn_south should pass)");
+    }
+
+    /// Two Joy-Cons into one Combiner: the Motion section comes whole from the
+    /// top port. Per-pin SORT used to hand each axis to whichever port was
+    /// non-zero, so a resting L (gyro deadzoned to exact zeros) let the R's
+    /// gyro through axis by axis. A port default doesn't reach motion either.
+    #[test]
+    fn combiner_takes_motion_whole_from_the_top_port() {
+        let (l, r) = ("jc2:joycon2_l:aa", "jc2:joycon2_r:bb");
+        let mut combiner = empty_node(3, "module.automap_combiner");
+        combiner.params.insert("_automap_input_devs".into(), serde_json::json!([l, r]));
+        combiner.params.insert("_automap_input_collectors".into(), serde_json::json!(["", ""]));
+        combiner.params.insert("combiner_port_default".into(), serde_json::json!({"0": "ADD"}));
+        let sink = sink_node(4, "virtual.xinput:0", "combiner:3", false);
+        let graph = ProcessingGraph { nodes: vec![combiner, sink], ..Default::default() };
+        let mut sigs = HashMap::new();
+        for (pin, lv, rv) in [("gyro_x", 0.0, 0.3), ("gyro_y", 0.1, 0.4), ("gyro_z", 0.0, 0.5),
+                              ("accel_z", 0.12, -0.12)] {
+            sigs.insert((l.to_string(), pin.to_string()), Signal::Float(lv));
+            sigs.insert((r.to_string(), pin.to_string()), Signal::Float(rv));
+        }
+        sigs.insert((r.to_string(), "left_stick_x".to_string()), Signal::Float(0.5));
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.001, &mut out);
+        let get = |p: &str| out.sink_outputs.get(&("virtual.xinput:0".to_string(), p.to_string()))
+            .map(|s| s.as_float());
+        assert_eq!(get("gyro_x"), Some(0.0), "the top pad's resting zero, not the other pad's 0.3");
+        assert_eq!(get("gyro_y"), Some(0.1));
+        assert_eq!(get("gyro_z"), Some(0.0));
+        assert_eq!(get("accel_z"), Some(0.12), "port 0's ADD default doesn't sum motion");
+        assert!(get("left_stick_x").is_some_and(|v| v > 0.0), "everything else still combines");
+    }
+
+    // D-pad PER-SIDE suppression: mapping only `dpad_left` away must suppress
+    // the left direction across ALL three representations (Bool, dpad_x
+    // negative side, dpad Vec2 x-negative) — but leave `dpad_right`, the
+    // positive X side, and the entire Y axis / up-down untouched.
+    #[test]
+    fn dpad_left_mapped_away_suppresses_only_left_side() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+        let remap_uid = 2usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["dpad_left"], "out": ["btn_south"], "mode": "down" }
+        ]));
+        let sink = sink_node(3, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Physical D-pad: LEFT held (claimed) AND DOWN held (NOT claimed).
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "dpad_left".to_string()), Signal::Bool(true));
+        sigs.insert((dev.to_string(), "dpad_down".to_string()), Signal::Bool(true));
+        sigs.insert((dev.to_string(), "dpad_x".to_string()),    Signal::Float(-1.0));
+        sigs.insert((dev.to_string(), "dpad_y".to_string()),    Signal::Float(-1.0));
+        sigs.insert((dev.to_string(), "dpad".to_string()),      Signal::Vec2(Vec2::new(-1.0, -1.0)));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+
+        let get_b = |p: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), p.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+        let get_f = |p: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), p.to_string())).map(|s| s.as_float()).unwrap_or(0.0);
+        let dpad_vec = || out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), "dpad".to_string()))
+            .and_then(|s| if let Signal::Vec2(v) = s { Some(*v) } else { None }).unwrap_or(Vec2::ZERO);
+
+        // Mapped target fires.
+        assert!(get_b("btn_south"), "dpad_left→btn_south must fire");
+
+        // The sink resolves Vec2-vs-axis conflicts by keeping ONE form, so read
+        // the effective X/Y as (axis pin) OR (Vec2 component) — whichever the
+        // sink kept.
+        let eff_x = if out.sink_outputs.contains_key(&("virtual.xinput:0".to_string(), "dpad_x".to_string())) {
+            get_f("dpad_x") } else { dpad_vec().x };
+        let eff_y = if out.sink_outputs.contains_key(&("virtual.xinput:0".to_string(), "dpad_y".to_string())) {
+            get_f("dpad_y") } else { dpad_vec().y };
+
+        // LEFT is fully suppressed across all representations.
+        assert!(!get_b("dpad_left"), "dpad_left Bool must be suppressed");
+        assert!(eff_x >= -1e-4, "dpad left (x-negative) must be clamped, got {eff_x}");
+
+        // DOWN (not claimed) must SURVIVE.
+        assert!(get_b("dpad_down"), "unmapped dpad_down Bool must pass through");
+        assert!((eff_y - (-1.0)).abs() < 1e-4, "dpad_y (down) must be untouched, got {eff_y}");
+    }
+
+    // D-pad OUTPUT synthesis: a mapping that drives a direction Bool must also
+    // move the axis + Vec2 forms. Sinks derive all four hat bits from the `dpad`
+    // Vec2 when they have one, so a Bool-only write was cancelled by the
+    // still-zero pass-through Vec2 landing after it — `btn_capture → dpad_down`
+    // lit up on the bus but never reached the virtual pad.
+    #[test]
+    fn dpad_direction_output_also_drives_axis_and_vec2() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+        let remap_uid = 2usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["btn_capture"], "out": ["dpad_down"], "mode": "down" }
+        ]));
+        let sink = sink_node(3, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = Default::default();
+
+        // Physical D-pad fully at rest; the screenshot button is held.
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "btn_capture".to_string()), Signal::Bool(true));
+        sigs.insert((dev.to_string(), "dpad_x".to_string()), Signal::Float(0.0));
+        sigs.insert((dev.to_string(), "dpad_y".to_string()), Signal::Float(0.0));
+        sigs.insert((dev.to_string(), "dpad".to_string()),   Signal::Vec2(Vec2::ZERO));
+        eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+
+        let get_b = |p: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), p.to_string())).map(|s| s.as_bool()).unwrap_or(false);
+        let get_f = |p: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), p.to_string())).map(|s| s.as_float()).unwrap_or(0.0);
+        let dpad_vec = || out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), "dpad".to_string()))
+            .and_then(|s| if let Signal::Vec2(v) = s { Some(*v) } else { None }).unwrap_or(Vec2::ZERO);
+
+        assert!(get_b("dpad_down"), "mapped dpad_down Bool must assert");
+        // Whichever form the sink kept must agree with the Bool.
+        let eff_y = if out.sink_outputs.contains_key(&("virtual.xinput:0".to_string(), "dpad_y".to_string())) {
+            get_f("dpad_y") } else { dpad_vec().y };
+        assert!((eff_y - (-1.0)).abs() < 1e-4,
+            "dpad_down output must drive the y axis to -1, got {eff_y}");
+        // Untouched directions stay at rest — synthesis must not invent an X.
+        let eff_x = if out.sink_outputs.contains_key(&("virtual.xinput:0".to_string(), "dpad_x".to_string())) {
+            get_f("dpad_x") } else { dpad_vec().x };
+        assert!(eff_x.abs() < 1e-4, "unmapped x axis must stay 0, got {eff_x}");
+        assert!(!get_b("dpad_up"), "dpad_up must stay released");
+    }
+
+    // Vec2-authoritative: when the device provides a strong `left_stick` Vec2
+    // but near-zero axis floats, a Collector forwards both, and the Remapper
+    // must derive its axes (and cardinals) from the Vec2 — so an analog
+    // stick→key mapping fires. Guards the "processed whole-stick Vec2 before a
+    // Collector doesn't reach the Remapper" gap.
+    #[test]
+    fn processed_vec2_on_collector_drives_remapper_axes() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+
+        // Collector: pure AutoMap bus pass-through from the device (no explicit
+        // ports). Phase-1 forwards left_stick Vec2 AND the axis floats.
+        let mut collect = empty_node(3, "module.automap_collect");
+        collect.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        collect.input_sources = vec![Some((0, 0))];
+
+        let remap_uid = 4usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_collector_id".into(), Value::String("collector:3".into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["left_stick_up"], "out": ["key_w"], "mode": "analog", "window_ms": 30.0 }
+        ]));
+        let sink = keymouse_sink_from_remap(5, remap_uid);
+        let graph = ProcessingGraph { nodes: vec![src, collect, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Axes near-zero, but the left_stick VEC2 pushed up (y=0.9).
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "left_stick_x".to_string()), Signal::Float(0.0));
+        sigs.insert((dev.to_string(), "left_stick_y".to_string()), Signal::Float(0.0));
+        sigs.insert((dev.to_string(), "left_stick".to_string()), Signal::Vec2(Vec2::new(0.0, 0.9)));
+
+        let mut fired = false;
+        for _ in 0..200 {
+            eval_graph_tick(&graph, &mut state, &sigs, 0.001, &mut out);
+            if out.sink_outputs.get(&("virtual.keymouse:0".to_string(), "key_w".to_string()))
+                .map(|s| s.as_bool()).unwrap_or(false) { fired = true; break; }
+        }
+        assert!(fired, "processed left_stick Vec2 must drive the axes the Remapper reads (key_w never fired)");
+    }
+
+    // A consumed input must stay suppressed for as long as it is HELD, even in
+    // a press mode whose output gate is momentary (on-press fires a ~10ms pulse
+    // then closes). Regression for "on-press mapping fires its output then leaks
+    // the raw input while still held".
+    #[test]
+    fn consumed_input_suppressed_while_held_in_on_press_mode() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+        let remap_uid = 2usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["dpad_left"], "out": ["btn_west"], "mode": "on_press" }
+        ]));
+        let sink = sink_node(3, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        // Hold D-pad LEFT across many frames (well past the on-press pulse).
+        let mut sigs = HashMap::new();
+        sigs.insert((dev.to_string(), "dpad_left".to_string()), Signal::Bool(true));
+        sigs.insert((dev.to_string(), "dpad_x".to_string()),    Signal::Float(-1.0));
+        sigs.insert((dev.to_string(), "dpad".to_string()),      Signal::Vec2(Vec2::new(-1.0, 0.0)));
+
+        let mut leaked_after_pulse = false;
+        for frame in 0..60 {
+            eval_graph_tick(&graph, &mut state, &sigs, 0.016, &mut out);
+            // After the first few frames (pulse over), dpad_left must NOT leak.
+            if frame >= 10 {
+                let dl = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "dpad_left".to_string()))
+                    .map(|s| s.as_bool()).unwrap_or(false);
+                let dx = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "dpad_x".to_string()))
+                    .map(|s| s.as_float()).unwrap_or(0.0);
+                let dvx = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "dpad".to_string()))
+                    .and_then(|s| if let Signal::Vec2(v) = s { Some(v.x) } else { None }).unwrap_or(0.0);
+                // effective left value via whichever representation the sink kept
+                let eff = if dl { -1.0 } else { dx.min(dvx) };
+                if eff < -1e-4 { leaked_after_pulse = true; }
+            }
+        }
+        assert!(!leaked_after_pulse, "held dpad_left leaked through after the on-press pulse ended");
+    }
+
+    // The self-map exception: a mapping that routes an input back to ITSELF must
+    // NOT suppress it (deliberate pass-through), even alongside another mapping.
+    #[test]
+    fn self_mapped_input_is_not_suppressed() {
+        let dev = "gilrs:xinput:0";
+        let src = source_node(1, dev, 0.0);
+        let remap_uid = 2usize;
+        let mut remap = empty_node(remap_uid, "module.remapper");
+        remap.params.insert("_automap_device_id".into(), Value::String(dev.into()));
+        remap.params.insert("mappings".into(), serde_json::json!([
+            { "in": ["dpad_left"], "out": ["btn_west"],  "mode": "on_press" },
+            { "in": ["dpad_left"], "out": ["dpad_left"],  "mode": "down" }
+        ]));
+        let sink = sink_node(3, "virtual.xinput:0", &format!("remap:{remap_uid}"), false);
+        let graph = ProcessingGraph { nodes: vec![src, remap, sink], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        let mut sigs = BusMap::default();
+        sigs.insert((dev.to_string(), "dpad_left".to_string()), Signal::Bool(true));
+        for _ in 0..20 { eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&sigs), 0.016, &mut out); }
+
+        let dl = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "dpad_left".to_string()))
+            .map(|s| s.as_bool()).unwrap_or(false);
+        assert!(dl, "self-mapped dpad_left must pass through (not be suppressed)");
+    }
+
+    // ── Feedback layers: game vs Audio Stream Haptics / Feedback Control ─────
+
+    const FB_PAD: &str = "gilrs:switch_pro:0";
+    const FB_DS: &str = "gilrs:dualsense:0";
+    const FB_VIRT: &str = "virtual.xinput:0";
+    /// A Switch Pro renders all rumble on its HD pins.
+    const FB_HD_PINS: &[&str] = &[
+        "hd_l_amp", "hd_l_freq", "hd_r_amp", "hd_r_freq",
+        "hd2_l_amp", "hd2_l_freq", "hd2_r_amp", "hd2_r_freq",
+    ];
+    /// A DualSense has classic motors AND HD pins, plus a light bar: a game's
+    /// classic rumble lands on `rumble_strong` while a module drives `hd_l_amp`.
+    const FB_DS_PINS: &[&str] = &[
+        "rumble_strong", "rumble_weak",
+        "hd_l_amp", "hd_l_freq", "hd_r_amp", "hd_r_freq",
+        "hd2_l_amp", "hd2_l_freq", "hd2_r_amp", "hd2_r_freq",
+        "lightbar_r", "lightbar_g", "lightbar_b",
+    ];
+
+    /// A physical pad node whose haptic inputs are a sink target, the way the
+    /// graph builder wires it. `game_from`: the virtual pad fed from it, whose
+    /// feedback the main loop forwards (None = the pad shows only what modules
+    /// and network peers write).
+    fn fb_pad(uid: usize, dev: &str, pins: &[&str], game_from: Option<&str>) -> NodeSnap {
+        let mut pad = source_node(uid, dev, 0.0);
+        let pins: Vec<String> = pins.iter().map(|p| p.to_string()).collect();
+        pad.sink_target = Some(SinkTarget {
+            device_id: dev.to_string(),
+            multi_sources: vec![Vec::new(); pins.len()],
+            pin_ids: pins,
+            automap_source: None,
+            automap_fallback_dev: None,
+            feedback_sources: game_from.into_iter().map(|v| crate::graph::FeedbackSource {
+                device_id: v.to_string(),
+                rumble_floor: 0.0, rumble_max: 1.0, rumble_exp: 1.0,
+            }).collect(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        pad
+    }
+
+    /// Audio Stream Haptics node reading graph node 0's bus, with captured audio
+    /// `audio` on both sides.
+    fn asth_node(uid: usize, upstream_dev: &str, dest: &str, modulator: f32, audio: f32) -> NodeSnap {
+        flexinput_devices::loopback_manager::set_params_for_test(uid,
+            flexinput_devices::loopback_haptic::LoopbackParams {
+                l_amp: audio, l_freq: 0.3, r_amp: audio, r_freq: 0.3,
+            });
+        let mut asth = empty_node(uid, "module.audio_stream_haptics");
+        asth.params.insert("_automap_device_id".into(), Value::String(upstream_dev.into()));
+        asth.params.insert("_asth_dest_dev".into(), Value::String(dest.into()));
+        asth.params.insert("asth_modulator".into(), Value::from(modulator as f64));
+        asth.input_sources = vec![Some((0, 0))];
+        asth.n_outputs = 7;
+        asth
+    }
+
+    fn game_rumble(level: f32) -> BusMap {
+        let mut sigs = BusMap::default();
+        sigs.insert((FB_VIRT.to_string(), "rumble_strong".to_string()), Signal::Float(level));
+        sigs.insert((FB_VIRT.to_string(), "rumble_weak".to_string()), Signal::Float(level));
+        sigs
+    }
+
+    fn fb_tick(nodes: Vec<NodeSnap>, sigs: &BusMap) -> TickOutput {
+        let graph = ProcessingGraph { nodes, ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(sigs), 0.016, &mut out);
+        out
+    }
+
+    fn pad_value(out: &TickOutput, dev: &str, pin: &str) -> f32 {
+        out.sink_outputs.get(&(dev.to_string(), pin.to_string())).map(|s| s.as_float()).unwrap_or(0.0)
+    }
+
+    /// Switch Pro → Audio Stream Haptics → virtual pad. `game_to_pad: false`
+    /// drops the pad's feedback sources, so the pad shows ONLY what the module
+    /// writes (isolates the module's reading of the game from the game reaching
+    /// the pad directly).
+    fn asth_pad_amp(uid: usize, modulator: f32, audio: f32, game: f32, game_to_pad: bool) -> f32 {
+        let pad = fb_pad(1, FB_PAD, FB_HD_PINS, game_to_pad.then_some(FB_VIRT));
+        let asth = asth_node(uid, FB_PAD, FB_PAD, modulator, audio);
+        let sink = sink_node(3, FB_VIRT, &format!("collector:{uid}"), false);
+        let out = fb_tick(vec![pad, asth, sink], &game_rumble(game));
+        pad_value(&out, FB_PAD, "hd_l_amp")
+    }
+
+    /// What an Audio Stream Haptics node with `params` writes to a Switch Pro, on
+    /// full audio: `[hd_l_amp, hd_r_amp, hd2_l_amp, hd2_r_amp]`.
+    fn asth_split_out(uid: usize, params: &[(&str, Value)]) -> [f32; 4] {
+        let pad = fb_pad(1, FB_PAD, FB_HD_PINS, None);
+        let mut asth = asth_node(uid, FB_PAD, FB_PAD, 1.0, 1.0);
+        for (k, v) in params {
+            asth.params.insert(k.to_string(), v.clone());
+        }
+        let out = fb_tick(vec![pad, asth], &BusMap::default());
+        ["hd_l_amp", "hd_r_amp", "hd2_l_amp", "hd2_r_amp"].map(|p| pad_value(&out, FB_PAD, p))
+    }
+
+    // Split L/R: each side plays one band as its own tone — with no high band in
+    // the audio, the left plays the low band at full and the right is quiet —
+    // and Swap trades the sides.
+    #[test]
+    fn asth_split_puts_one_band_on_each_side() {
+        let on = Value::Bool(true);
+        let plain = asth_split_out(9150, &[]);
+        assert!(plain[0] > 0.99 && plain[1] > 0.99, "both sides carry the low band: {plain:?}");
+        let split = asth_split_out(9151, &[("asth_split", on.clone())]);
+        assert!(split[0] > 0.99 && split[1] == 0.0, "{split:?}");
+        let swapped = asth_split_out(9152, &[("asth_split", on.clone()), ("asth_swap", on)]);
+        assert!(swapped[0] == 0.0 && swapped[1] > 0.99, "{swapped:?}");
+    }
+
+    // With both bands in the audio, Split plays both, the right the high band, and
+    // each flutters by the other; Pure tones leaves them clean.
+    #[cfg(windows)]
+    #[test]
+    fn asth_split_plays_both_bands_and_pure_tones_drops_the_flutter() {
+        let both = |uid: usize, params: &[(&str, Value)]| {
+            let mut bands = flexinput_devices::loopback_manager::latest_spectrum(usize::MAX);
+            let n = bands.len();
+            for (i, b) in bands.iter_mut().enumerate() {
+                if i < n / 5 || i > n * 4 / 5 { *b = 0.5; }
+            }
+            flexinput_devices::loopback_manager::set_spectrum_for_test(uid, bands);
+            let mut all = vec![("asth_split", Value::Bool(true)), ("asth_freq_bias", Value::from(1.0))];
+            all.extend(params.iter().cloned());
+            asth_split_out(uid, &all)
+        };
+        let textured = both(9153, &[]);
+        assert!(textured[0] > 0.0 && textured[1] > 0.0, "a tone each side: {textured:?}");
+        assert!(textured[2] > 0.0 && textured[3] > 0.0, "each fluttered by the other: {textured:?}");
+        let pure = both(9154, &[("asth_pure", Value::Bool(true))]);
+        assert!(pure[0] > 0.0 && pure[1] > 0.0, "{pure:?}");
+        assert_eq!((pure[2], pure[3]), (0.0, 0.0), "no flutter");
+    }
+
+    // The module itself must see the game's rumble: at the gate end its OWN
+    // output is audio × game rumble (pad shows only the module here).
+    #[test]
+    fn asth_module_reads_game_rumble() {
+        let written = asth_pad_amp(9101, 0.0, 1.0, 0.8, false);
+        assert!((written - 0.8).abs() < 0.01, "gate must write audio 1.0 × game 0.8, got {written}");
+    }
+
+    // Modulator at the gate end: game rumble decides WHEN, audio the texture.
+    // Loud audio with no game rumble must stay silent; with game rumble the pad
+    // feels audio 0.5 × game 0.8 — not the game's own rumble on top.
+    #[test]
+    fn asth_gate_follows_game_rumble() {
+        let silent = asth_pad_amp(9102, 0.0, 1.0, 0.0, true);
+        assert!(silent < 0.01, "no game rumble must gate the audio shut, got {silent}");
+        let gated = asth_pad_amp(9103, 0.0, 0.5, 0.8, true);
+        assert!((gated - 0.4).abs() < 0.01, "gate must give audio 0.5 × game 0.8 = 0.4, got {gated}");
+    }
+
+    // Modulator at the replace end: the pad feels the audio only, never the
+    // game's rumble on top of it.
+    #[test]
+    fn asth_replace_ignores_game_rumble() {
+        let quiet = asth_pad_amp(9104, 1.0, 0.2, 0.9, true);
+        assert!((quiet - 0.2).abs() < 0.01, "replace must play audio 0.2 alone, got {quiet}");
+    }
+
+    // On a pad with classic motors AND HD pins, the game's rumble lands on the
+    // motors while the module drives the HD pins: taking over rumble must
+    // silence the motors too, and leave the light bar to the game.
+    #[test]
+    fn asth_silences_game_rumble_on_other_rumble_pins() {
+        let pad = fb_pad(1, FB_DS, FB_DS_PINS, Some(FB_VIRT));
+        let asth = asth_node(9105, FB_DS, FB_DS, 1.0, 0.3);
+        let sink = sink_node(3, FB_VIRT, "collector:9105", false);
+        let mut sigs = game_rumble(0.9);
+        sigs.insert((FB_VIRT.to_string(), "lightbar_g".to_string()), Signal::Float(0.6));
+        let out = fb_tick(vec![pad, asth, sink], &sigs);
+        assert_eq!(pad_value(&out, FB_DS, "rumble_strong"), 0.0, "game rumble on the motors must be silenced");
+        assert_eq!(pad_value(&out, FB_DS, "rumble_weak"), 0.0);
+        assert!((pad_value(&out, FB_DS, "hd_l_amp") - 0.3).abs() < 0.01);
+        assert!((pad_value(&out, FB_DS, "lightbar_g") - 0.6).abs() < 0.01, "light bar stays the game's");
+    }
+
+    /// DualSense → Feedback Control (a constant wired into `inlet`) → virtual pad.
+    fn feedback_control_pad(
+        inlet: &str,
+        value: f32,
+        override_game: bool,
+        sigs: &BusMap,
+    ) -> TickOutput {
+        let pad = fb_pad(1, FB_DS, FB_DS_PINS, Some(FB_VIRT));
+        let mut konst = empty_node(2, "module.constant");
+        konst.n_outputs = 1;
+        konst.params.insert("value".into(), Value::from(value as f64));
+        let mut fc = empty_node(3, "module.feedback_control");
+        let inlets: Vec<&str> = flexinput_core::automap::FEEDBACK_INLET_PINS.iter().map(|p| p.id).collect();
+        fc.params.insert("_fb_source_dev".into(), Value::String(FB_DS.into()));
+        fc.params.insert("_fb_inlet_ids".into(), serde_json::json!(inlets));
+        fc.params.insert("fb_override".into(), Value::Bool(override_game));
+        fc.input_sources = std::iter::once(Some((0, 0)))
+            .chain(inlets.iter().map(|p| (*p == inlet).then_some((1, 0))))
+            .collect();
+        fc.n_outputs = 1;
+        let sink = sink_node(4, FB_VIRT, FB_DS, false);
+        fb_tick(vec![pad, konst, fc, sink], sigs)
+    }
+
+    // Add (default) sums a wired rumble with the game's; Override replaces it.
+    #[test]
+    fn feedback_control_add_or_override_game_rumble() {
+        let add = feedback_control_pad("rumble_strong", 0.3, false, &game_rumble(0.5));
+        let v = pad_value(&add, FB_DS, "rumble_strong");
+        assert!((v - 0.8).abs() < 0.01, "add: game 0.5 + 0.3, got {v}");
+        let over = feedback_control_pad("rumble_strong", 0.3, true, &game_rumble(0.5));
+        let v = pad_value(&over, FB_DS, "rumble_strong");
+        assert!((v - 0.3).abs() < 0.01, "override: 0.3 alone, got {v}");
+        assert_eq!(pad_value(&over, FB_DS, "rumble_weak"), 0.0, "override takes over all rumble");
+    }
+
+    // An override takes over only its own kind of feedback: a wired light bar
+    // colour replaces the game's colour but leaves the game's rumble alone.
+    #[test]
+    fn feedback_control_override_is_per_kind() {
+        let mut sigs = game_rumble(0.5);
+        sigs.insert((FB_VIRT.to_string(), "lightbar_g".to_string()), Signal::Float(0.7));
+        let out = feedback_control_pad("lightbar_r", 1.0, true, &sigs);
+        assert!((pad_value(&out, FB_DS, "lightbar_r") - 1.0).abs() < 0.01);
+        assert_eq!(pad_value(&out, FB_DS, "lightbar_g"), 0.0, "the game's light bar colour is replaced");
+        assert!((pad_value(&out, FB_DS, "rumble_strong") - 0.5).abs() < 0.01, "game rumble untouched");
+    }
+
+    /// A DualSense with adaptive triggers whose RIGHT trigger defaults to
+    /// `RESISTANCE 2 5` (Calibration window).
+    fn ds_with_default_trigger() -> NodeSnap {
+        let mut pins: Vec<&str> = FB_DS_PINS.to_vec();
+        pins.extend(crate::eval::JSM_TRIGGER_PINS.iter().flatten());
+        let mut pad = fb_pad(1, FB_DS, &pins, Some(FB_VIRT));
+        pad.params.insert("rtrig_effect_mode".into(), Value::from("RESISTANCE"));
+        pad.params.insert("rtrig_effect_values".into(), serde_json::json!([2, 5]));
+        pad
+    }
+
+    // With nothing asking for an effect the default holds the trigger; the left
+    // trigger, with no default, is left alone.
+    #[test]
+    fn a_pads_default_trigger_effect_fills_in_when_nothing_asks() {
+        let out = fb_tick(vec![ds_with_default_trigger()], &BusMap::default());
+        let want = crate::eval::jsm_effect_pins("RESISTANCE", &[2, 5]).unwrap();
+        for (pin, v) in crate::eval::JSM_TRIGGER_PINS[1].iter().zip(want) {
+            assert!((pad_value(&out, FB_DS, pin) - v).abs() < 1e-6, "{pin}");
+        }
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "trigger_l_mode".to_string())));
+    }
+
+    /// A Steam Controller's haptic pins: it plays its own trigger clicks.
+    fn steam_pins() -> Vec<&'static str> {
+        FB_DS_PINS.iter().copied().chain(["tp_l_click", "grip_l_click", "grip_r_click"]).collect()
+    }
+
+    // A trigger click sits at the digital threshold plus its offset, on the pad's
+    // raw travel: the calibrated range maps back out, side by side.
+    #[test]
+    fn a_trigger_click_is_sent_as_raw_travel_from_the_threshold_and_offset() {
+        let mut pad = fb_pad(1, FB_DS, &steam_pins(), Some(FB_VIRT));
+        for (key, v) in [
+            ("ltrig_digital_threshold", 0.5), ("ltrig_click_offset", 0.25),
+            ("ltrig_min", 0.2), ("ltrig_max", 0.6),
+            ("rtrig_digital_threshold", 0.5), ("rtrig_click_offset", -0.1),
+            ("ltrig_click_gain_db", -6.0), ("rtrig_click_gain_db", 3.0),
+            ("ltrig_click_hz", 90.0), ("rtrig_click_ms", 45.0), ("ltrig_click_soft", 0.5),
+            ("rtrig_release_gain_db", -12.0), ("rtrig_release_hz", 60.0),
+        ] {
+            pad.params.insert(key.into(), Value::from(v));
+        }
+        pad.params.insert("trig_click_on".into(), Value::Bool(true));
+        pad.params.insert("rtrig_release_on".into(), Value::Bool(true));
+        let out = fb_tick(vec![pad], &BusMap::default());
+        // Each point and the band around it, 2% of the full travel whatever the
+        // range: 0.75 of 0.2..0.6 is 0.5, and the full range's 0.5 - 0.1 is 0.4.
+        // A pull from rest presses at the point, again past the top, lets go
+        // under the bottom for the debounce.
+        let at = |pin: &str, want: f32| (pad_value(&out, FB_DS, pin) - want).abs() < 1e-4;
+        assert!(at("trig_click_l", 0.5), "{}", pad_value(&out, FB_DS, "trig_click_l"));
+        assert!(at("trig_top_l", 0.51), "{}", pad_value(&out, FB_DS, "trig_top_l"));
+        assert!(at("trig_rearm_l", 0.49));
+        assert!(at("trig_rest_l", 0.2));
+        assert!(at("trig_click_r", 0.4));
+        assert!(at("trig_top_r", 0.41));
+        assert!(at("trig_rearm_r", 0.39));
+        assert!(at("trig_rest_r", 0.0));
+        assert!(at("trig_hold_l", 0.004) && at("trig_hold_r", 0.004));
+        assert!(at("trig_press_l", 1.0) && at("trig_press_r", 1.0));
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_gain_l"), -6.0);
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_gain_r"), 3.0);
+        // Each its own, and the default where it has none.
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_hz_l"), 90.0);
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_ms_r"), 45.0);
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_soft_l"), 0.5);
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_soft_r"), 0.0);
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_hz_r"), flexinput_core::automap::TRIGGER_CLICK_HZ);
+        assert_eq!(pad_value(&out, FB_DS, "trig_click_ms_l"), flexinput_core::automap::TRIGGER_CLICK_MS);
+        // The release only where it is on.
+        assert_eq!(pad_value(&out, FB_DS, "trig_release_r"), 1.0);
+        assert_eq!(pad_value(&out, FB_DS, "trig_release_gain_r"), -12.0);
+        assert_eq!(pad_value(&out, FB_DS, "trig_release_hz_r"), 60.0);
+        assert_eq!(pad_value(&out, FB_DS, "trig_release_ms_r"), flexinput_core::automap::TRIGGER_CLICK_MS);
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "trig_release_l".to_string())));
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "trig_release_gain_l".to_string())));
+    }
+
+    /// Ticks one pad through `steps` of its `trigger`, 10 ms apart and keeping
+    /// its state: what `pin` reads after each.
+    fn click_run(pad: NodeSnap, trigger: &str, steps: &[Signal], pin: &str) -> Vec<f32> {
+        let dev = pad.sink_target.as_ref().unwrap().device_id.clone();
+        let graph = ProcessingGraph { nodes: vec![pad], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        steps.iter().map(|&v| {
+            let mut sigs = BusMap::default();
+            sigs.insert((dev.clone(), trigger.to_string()), v);
+            eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&sigs), 0.01, &mut out);
+            pad_value(&out, &dev, pin)
+        }).collect()
+    }
+
+    /// A pad with its trigger clicks on, at full strength unless `params` say.
+    fn clicking(dev: &str, pins: &[&str], params: &[(&str, Value)]) -> NodeSnap {
+        let mut pad = fb_pad(1, dev, pins, None);
+        pad.params.insert("trig_click_on".into(), Value::Bool(true));
+        for side in ["l", "r"] {
+            pad.params.insert(format!("{side}trig_click_gain_db"), Value::from(0.0));
+        }
+        for (key, v) in params {
+            pad.params.insert(key.to_string(), v.clone());
+        }
+        pad
+    }
+
+    // On a pad with HD actuators the engine plays the click itself, on the
+    // trigger's side, for its length, at its pitch; once per pull.
+    #[test]
+    fn an_hd_pad_plays_a_trigger_click_on_its_own_side_for_its_length() {
+        let f = Signal::Float;
+        let steps = [f(0.0), f(0.6), f(0.7), f(0.8), f(0.9), f(0.0)];
+        let pad = || clicking(FB_DS, FB_DS_PINS, &[("ltrig_click_ms", Value::from(20.0))]);
+        assert_eq!(click_run(pad(), "left_trigger", &steps, "hd_l_amp"), [0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            "20 ms at full, from where it passes the threshold");
+        let mut stock = clicking(FB_DS, FB_DS_PINS, &[]);
+        stock.params.remove("ltrig_click_gain_db");
+        let amp = click_run(stock, "left_trigger", &steps, "hd_l_amp");
+        let full = 10f32.powf(flexinput_core::automap::TRIGGER_CLICK_DB / 20.0);
+        assert_eq!(amp, [0.0, full, 0.0, 0.0, 0.0, 0.0], "-5 dB for 5 ms by default: within the tick");
+        assert_eq!(click_run(pad(), "left_trigger", &steps, "hd_r_amp"), [0.0; 6], "not the other side");
+        let freq = click_run(pad(), "left_trigger", &steps, "hd_l_freq")[1];
+        let want = (flexinput_core::automap::TRIGGER_CLICK_HZ - 80.0) / 420.0;
+        assert!((freq - want).abs() < 1e-5, "{freq}");
+    }
+
+    // A release plays its own shape as the trigger comes back, once under the
+    // band for the debounce (a tick here), only when asked; and plays alone on
+    // a side with its press off.
+    #[test]
+    fn a_trigger_release_click_plays_on_the_way_back() {
+        let f = Signal::Float;
+        let steps = [f(0.0), f(0.9), f(0.9), f(0.9), f(0.0), f(0.0), f(0.0)];
+        let release = [
+            ("rtrig_release_on", Value::Bool(true)), ("rtrig_release_gain_db", Value::from(-20.0)),
+            ("rtrig_release_ms", Value::from(10.0)), ("rtrig_click_ms", Value::from(20.0)),
+        ];
+        let amp = click_run(clicking(FB_DS, FB_DS_PINS, &release), "right_trigger", &steps, "hd_r_amp");
+        assert_eq!(amp[..5], [0.0, 1.0, 1.0, 0.0, 0.0]);
+        assert!((amp[5] - 0.1).abs() < 1e-6, "-20 dB for 10 ms: {amp:?}");
+        assert_eq!(amp[6], 0.0);
+        let pad = clicking(FB_DS, FB_DS_PINS, &[
+            ("rtrig_release_gain_db", Value::from(-20.0)), ("rtrig_click_ms", Value::from(20.0)),
+        ]);
+        assert_eq!(click_run(pad, "right_trigger", &steps, "hd_r_amp"), [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            "off unless asked");
+        let mut quiet_press = release.to_vec();
+        quiet_press.push(("rtrig_press_on", Value::Bool(false)));
+        let amp = click_run(clicking(FB_DS, FB_DS_PINS, &quiet_press), "right_trigger", &steps, "hd_r_amp");
+        assert_eq!(amp[..5], [0.0; 5], "no press click");
+        assert!((amp[5] - 0.1).abs() < 1e-6, "the release still: {amp:?}");
+    }
+
+    // A pad with motors only gets a longer pulse on the side's motor; a digital
+    // trigger clicks as it is pressed; a Switch Pro reads pitch on its own table.
+    #[test]
+    fn rumble_and_digital_pads_click_too() {
+        let (f, b) = (Signal::Float, Signal::Bool);
+        let xbox = clicking("gilrs:xinput:0", &["rumble_strong", "rumble_weak"], &[]);
+        assert_eq!(click_run(xbox, "right_trigger", &[f(0.0), f(1.0), f(1.0), f(1.0), f(1.0), f(1.0), f(1.0)], "rumble_weak"),
+            [0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0], "50 ms");
+        let switch: Vec<&str> = FB_HD_PINS.iter().copied().chain(["hd_rumble_l", "hd_rumble_r"]).collect();
+        let pro = |params: &[(&str, Value)]| {
+            let mut all = vec![("ltrig_click_hz", Value::from(327.0))];
+            all.extend(params.iter().cloned());
+            clicking("gilrs:switch_pro:0", &switch, &all)
+        };
+        let held = [b(false), b(true), b(true), b(true), b(true), b(true)];
+        assert_eq!(click_run(pro(&[]), "btn_lt_dig", &held, "hd_l_amp"), [0.0, 1.0, 1.0, 1.0, 1.0, 0.0], "40 ms");
+        assert_eq!(click_run(pro(&[("ltrig_click_ms", Value::from(10.0))]), "btn_lt_dig", &held, "hd_l_amp"),
+            [0.0, 1.0, 1.0, 1.0, 1.0, 0.0], "never shorter than 35 ms, which a Switch Pro drops");
+        let freq = click_run(pro(&[]), "btn_lt_dig", &[b(false), b(true)], "hd_l_freq")[1];
+        assert!((freq - 64.0 / 126.0).abs() < 1e-5, "two octaves over 81.75 Hz, 64 of the table's 126 steps: {freq}");
+        let half = click_run(pro(&[("ltrig_click_gain_db", Value::from(-6.0))]), "btn_lt_dig", &[b(false), b(true)], "hd_l_amp")[1];
+        assert!((half - flexinput_core::automap::switch_hd_amp(10f32.powf(-6.0 / 20.0))).abs() < 1e-6,
+            "its strength by its own table: {half}");
+        let off = clicking("gilrs:xinput:0", &["rumble_strong", "rumble_weak"], &[("trig_click_on", Value::Bool(false))]);
+        assert_eq!(click_run(off, "left_trigger", &[f(0.0), f(1.0)], "rumble_strong"), [0.0, 0.0], "off");
+    }
+
+    // Click feedback goes out as each pad's mode value, while it is on: from the
+    // start, light, on release too, at -7 dB; and only to a pad with trackpad
+    // clicks. Split per pad, each side takes its own settings, else the shared.
+    #[test]
+    fn pad_click_feedback_reaches_the_pad_as_its_mode_bits() {
+        use flexinput_core::automap::{PAD_CLICK_DB, PAD_CLICK_ON, PAD_CLICK_ON_RELEASE, PAD_CLICK_STRONG};
+        let mode = |out: &TickOutput, side: &str| pad_value(out, FB_DS, &format!("pad_click_mode_{side}"));
+        let mut pad = fb_pad(1, FB_DS, &steam_pins(), Some(FB_VIRT));
+        let out = fb_tick(vec![pad.clone()], &BusMap::default());
+        for side in ["l", "r"] {
+            assert_eq!(mode(&out, side), (PAD_CLICK_ON | PAD_CLICK_ON_RELEASE) as f32, "on by default");
+            assert_eq!(pad_value(&out, FB_DS, &format!("pad_click_gain_{side}")), PAD_CLICK_DB);
+        }
+        pad.params.insert("pad_click_on".into(), Value::Bool(false));
+        let out = fb_tick(vec![pad.clone()], &BusMap::default());
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "pad_click_mode_l".to_string())), "off");
+        pad.params.insert("pad_click_on".into(), Value::Bool(true));
+        pad.params.insert("pad_click_release".into(), Value::Bool(false));
+        pad.params.insert("pad_click_strong".into(), Value::Bool(true));
+        pad.params.insert("pad_click_gain_db".into(), Value::from(-6.0));
+        let out = fb_tick(vec![pad.clone()], &BusMap::default());
+        assert_eq!(mode(&out, "r"), (PAD_CLICK_ON | PAD_CLICK_STRONG) as f32);
+        assert_eq!(pad_value(&out, FB_DS, "pad_click_gain_r"), -6.0);
+        assert_eq!(pad_value(&out, FB_DS, "pad_click_hz_l"), flexinput_core::automap::PAD_CLICK_HZ);
+        // A side's own settings count only split, and it falls back to the shared.
+        pad.params.insert("pad_click_on_r".into(), Value::Bool(false));
+        pad.params.insert("pad_click_gain_db_l".into(), Value::from(-12.0));
+        let out = fb_tick(vec![pad.clone()], &BusMap::default());
+        assert_eq!(mode(&out, "r"), (PAD_CLICK_ON | PAD_CLICK_STRONG) as f32, "not split");
+        pad.params.insert("pad_click_split".into(), Value::Bool(true));
+        let out = fb_tick(vec![pad], &BusMap::default());
+        assert_eq!((mode(&out, "l"), mode(&out, "r")), ((PAD_CLICK_ON | PAD_CLICK_STRONG) as f32, 0.0));
+        assert_eq!(pad_value(&out, FB_DS, "pad_click_gain_l"), -12.0);
+        assert_eq!(pad_value(&out, FB_DS, "pad_click_gain_r"), -6.0, "the shared one");
+        let other = fb_tick(vec![fb_pad(1, FB_DS, FB_DS_PINS, Some(FB_VIRT))], &BusMap::default());
+        assert!(!other.sink_outputs.contains_key(&(FB_DS.to_string(), "pad_click_mode_l".to_string())),
+            "a pad without trackpad clicks gets none");
+    }
+
+    // Each trackpad's click force reaches the pad on its own pin, and one saved
+    // for both pads at once still counts for a pad without its own.
+    #[test]
+    fn each_trackpads_click_force_reaches_the_pad() {
+        let mut pad = fb_pad(1, FB_DS, &steam_pins(), Some(FB_VIRT));
+        pad.params.insert("tp_click_force".into(), Value::from(0.4));
+        pad.params.insert("tp_click_force_r".into(), Value::from(0.6));
+        let out = fb_tick(vec![pad], &BusMap::default());
+        assert!((pad_value(&out, FB_DS, "tp_click_force_l") - 0.4).abs() < 1e-6);
+        assert!((pad_value(&out, FB_DS, "tp_click_force_r") - 0.6).abs() < 1e-6);
+        assert!((pad_value(&out, FB_DS, "tp_click_hold") - flexinput_core::automap::TRACKPAD_CLICK_HOLD).abs() < 1e-6);
+    }
+
+    // A click's shape reaches a pad that plays those clicks, and not one that
+    // answers them with a rumble.
+    #[test]
+    fn a_clicks_tone_only_reaches_a_pad_that_has_the_click() {
+        let dev = "gilrs:dualsense:0";
+        let mut collector = BusMap::default();
+        collector.set_pin(&format!("feedback_inject:{dev}"), &"tp_r_click", Signal::Float(0.5));
+        collector.set_pin(&format!("feedback_click_tone:{dev}"), &"tp_r_click_hz", Signal::Float(300.0));
+        let hz_with = |pins: Vec<&str>| {
+            let pad = fb_pad(1, FB_DS, &pins, Some(FB_VIRT));
+            let mut st = pad.sink_target.as_ref().unwrap().clone();
+            st.device_id = dev.to_string();
+            let mut out = BusMap::default();
+            crate::eval::apply_pad_feedback(&st, &collector, &mut out);
+            out.get_pin(&dev, &"tp_r_click_hz").map(|s| s.as_float())
+        };
+        assert_eq!(hz_with(FB_DS_PINS.iter().copied().chain(["tp_r_click"]).collect()), Some(300.0));
+        assert_eq!(hz_with(FB_DS_PINS.to_vec()), None);
+    }
+
+    // A trackpad pin wired into Feedback Control reaches a pad that has it.
+    #[test]
+    fn feedback_control_drives_a_trackpad_pin() {
+        let pins: Vec<&str> = FB_DS_PINS.iter().copied().chain(["tp_r_amp"]).collect();
+        let pad = fb_pad(1, FB_DS, &pins, Some(FB_VIRT));
+        let mut collector = BusMap::default();
+        collector.set_pin(&"feedback_inject:gilrs:dualsense:0", &"tp_r_amp", Signal::Float(0.5));
+        let mut sink_outputs = BusMap::default();
+        let st = pad.sink_target.as_ref().unwrap();
+        let mut st = st.clone();
+        st.device_id = "gilrs:dualsense:0".to_string();
+        crate::eval::apply_pad_feedback(&st, &collector, &mut sink_outputs);
+        assert_eq!(sink_outputs.get_pin(&"gilrs:dualsense:0", &"tp_r_amp").map(|s| s.as_float()), Some(0.5));
+    }
+
+    // Grip settings go out once the user has set them, and not before.
+    #[test]
+    fn grip_sensor_settings_reach_the_pad_only_once_set() {
+        let mut pad = fb_pad(1, FB_DS, FB_DS_PINS, Some(FB_VIRT));
+        let out = fb_tick(vec![fb_pad(1, FB_DS, FB_DS_PINS, Some(FB_VIRT))], &BusMap::default());
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "grip_touch".to_string())));
+        pad.params.insert("grip_touch".into(), Value::from(150.0));
+        let out = fb_tick(vec![pad], &BusMap::default());
+        assert_eq!(pad_value(&out, FB_DS, "grip_touch"), 150.0);
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "grip_release".to_string())));
+    }
+
+    // Off means no pins at all, which is how the backend learns it went off: the
+    // whole click, or a side with its press and release both off.
+    #[test]
+    fn a_trigger_click_that_is_off_sends_nothing() {
+        let mut pad = fb_pad(1, FB_DS, &steam_pins(), Some(FB_VIRT));
+        pad.params.insert("ltrig_click_offset".into(), Value::from(0.25));
+        let out = fb_tick(vec![pad.clone()], &BusMap::default());
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "trig_click_l".to_string())));
+        pad.params.insert("trig_click_on".into(), Value::Bool(true));
+        pad.params.insert("ltrig_press_on".into(), Value::Bool(false));
+        let out = fb_tick(vec![pad], &BusMap::default());
+        assert!(!out.sink_outputs.contains_key(&(FB_DS.to_string(), "trig_click_l".to_string())));
+        assert!(out.sink_outputs.contains_key(&(FB_DS.to_string(), "trig_click_r".to_string())));
+    }
+
+    // Any instruction from the game wins over the default — Off included: a game
+    // that drives the triggers and asks for none means none.
+    #[test]
+    fn the_games_trigger_effect_beats_the_default() {
+        use flexinput_core::automap::TriggerMode;
+        let mut sigs = BusMap::default();
+        sigs.insert((FB_VIRT.to_string(), "trigger_r_mode".to_string()), Signal::Float(TriggerMode::Off.pin()));
+        let out = fb_tick(vec![ds_with_default_trigger()], &sigs);
+        assert_eq!(pad_value(&out, FB_DS, "trigger_r_mode"), TriggerMode::Off.pin());
+        assert_eq!(pad_value(&out, FB_DS, "trigger_r_strength"), 0.0);
+
+        sigs.insert((FB_VIRT.to_string(), "trigger_r_mode".to_string()), Signal::Float(TriggerMode::Weapon.pin()));
+        sigs.insert((FB_VIRT.to_string(), "trigger_r_start".to_string()), Signal::Float(0.4));
+        let out = fb_tick(vec![ds_with_default_trigger()], &sigs);
+        assert!((pad_value(&out, FB_DS, "trigger_r_mode") - TriggerMode::Weapon.pin()).abs() < 1e-6);
+        assert!((pad_value(&out, FB_DS, "trigger_r_start") - 0.4).abs() < 1e-6);
+    }
+
+    // A module that takes the trigger over (JSM, Feedback Control in Override)
+    // wins too — even when what it asks for is Off.
+    #[test]
+    fn a_trigger_override_beats_the_default() {
+        let mut pad = ds_with_default_trigger();
+        let mut konst = empty_node(2, "module.constant");
+        konst.n_outputs = 1;
+        konst.params.insert("value".into(), Value::from(0.0));
+        let mut fc = empty_node(3, "module.feedback_control");
+        let inlets: Vec<&str> = flexinput_core::automap::FEEDBACK_INLET_PINS.iter().map(|p| p.id).collect();
+        fc.params.insert("_fb_source_dev".into(), Value::String(FB_DS.into()));
+        fc.params.insert("_fb_inlet_ids".into(), serde_json::json!(inlets));
+        fc.params.insert("fb_override".into(), Value::Bool(true));
+        fc.input_sources = std::iter::once(Some((0, 0)))
+            .chain(inlets.iter().map(|p| (*p == "trigger_r_mode").then_some((1, 0))))
+            .collect();
+        fc.n_outputs = 1;
+        pad.sink_target.as_mut().unwrap().feedback_sources.clear();
+        let out = fb_tick(vec![pad, konst, fc], &BusMap::default());
+        assert_eq!(pad_value(&out, FB_DS, "trigger_r_mode"), 0.0);
+        assert_eq!(pad_value(&out, FB_DS, "trigger_r_strength"), 0.0);
+    }
+
+    fn peer_rumble(send_uid: usize, level: f32) {
+        let mut fb = flexinput_net::FeedbackFrame::empty();
+        fb.set("rumble_strong", level);
+        flexinput_net::set_latest_feedback(send_uid, fb);
+    }
+
+    fn net_send_node(uid: usize, upstream: usize, upstream_dev: &str) -> NodeSnap {
+        let mut send = empty_node(uid, crate::eval::NET_SEND_ID);
+        send.params.insert("_automap_device_id".into(), Value::String(upstream_dev.into()));
+        send.input_sources = vec![Some((upstream, 0))];
+        send.n_outputs = 1;
+        send
+    }
+
+    // A network peer's game rumble still reaches the sender's pad…
+    #[test]
+    fn network_peer_rumble_reaches_pad() {
+        peer_rumble(9201, 0.6);
+        let pad = fb_pad(1, FB_DS, FB_DS_PINS, None);
+        let out = fb_tick(vec![pad, net_send_node(9201, 0, FB_DS)], &BusMap::default());
+        let v = pad_value(&out, FB_DS, "rumble_strong");
+        assert!((v - 0.6).abs() < 0.01, "peer rumble 0.6 must reach the pad, got {v}");
+    }
+
+    // …and counts as the game for Audio Stream Haptics on the sender: it shapes
+    // the audio and never plays on its own.
+    #[test]
+    fn asth_takes_over_network_peer_rumble() {
+        peer_rumble(9202, 0.6);
+        let pad = fb_pad(1, FB_DS, FB_DS_PINS, None);
+        let asth = asth_node(9203, FB_DS, FB_DS, 0.0, 0.5);
+        let send = net_send_node(9202, 1, FB_DS);
+        let out = fb_tick(vec![pad, asth, send], &BusMap::default());
+        assert_eq!(pad_value(&out, FB_DS, "rumble_strong"), 0.0, "peer rumble must not play alongside");
+        let v = pad_value(&out, FB_DS, "hd_l_amp");
+        assert!((v - 0.3).abs() < 0.01, "gate: audio 0.5 × peer 0.6, got {v}");
+    }
+
+    // Receiver side: Audio Stream Haptics on a Network Receive's bus reads the
+    // game that bus feeds, and its rumble — not the game's — goes back to the
+    // sender (the game's is sent as 0 so the far pad lets go).
+    #[test]
+    fn asth_on_receiver_reads_game_and_sends_its_rumble_back() {
+        let recv_uid = 9301;
+        let mut recv = empty_node(recv_uid, crate::eval::NET_RECV_ID);
+        recv.n_outputs = 2;
+        let asth = asth_node(9302, "", &format!("collector:{recv_uid}"), 0.0, 1.0);
+        let sink = sink_node(3, FB_VIRT, &format!("collector:{recv_uid}"), false);
+        fb_tick(vec![recv, asth, sink], &game_rumble(0.7));
+        let (frame, _) = flexinput_net::latest_feedback_frame(recv_uid).expect("receiver publishes feedback");
+        let get = |pin: &str| frame.iter_present().find(|(p, _)| *p == pin).map(|(_, v)| v);
+        assert!(get("hd_l_amp").is_some_and(|v| (v - 0.7).abs() < 0.01),
+            "gate: audio 1.0 × game 0.7, got {:?}", get("hd_l_amp"));
+        assert_eq!(get("rumble_strong"), Some(0.0), "the game's rumble must go back as 0");
+    }
+
+    // Behind an AutoMap Selector the module still reads the game, and takes over
+    // the pad the Selector gates from.
+    #[test]
+    fn asth_after_selector_takes_over_the_selected_pad() {
+        let pad = fb_pad(1, FB_DS, FB_DS_PINS, Some(FB_VIRT));
+        let mut sel = empty_node(2, "module.automap_selector");
+        sel.params.insert("_automap_input_devs".into(), serde_json::json!([FB_DS]));
+        sel.params.insert("_automap_input_collectors".into(), serde_json::json!([""]));
+        sel.input_sources = vec![None, Some((0, 0))];
+        sel.n_outputs = 1;
+        let mut asth = asth_node(9401, "", "forksel:2:0", 0.0, 0.5);
+        asth.params.insert("_automap_collector_id".into(), Value::String("forksel:2:0".into()));
+        asth.input_sources = vec![Some((1, 0))];
+        // The virtual pad sits behind a later module, not right behind this one,
+        // so only the Selector's forwarding can tell it what the game wants.
+        let sink = sink_node(4, FB_VIRT, "remap:77", false);
+        let out = fb_tick(vec![pad, sel, asth, sink], &game_rumble(0.8));
+        assert_eq!(pad_value(&out, FB_DS, "rumble_strong"), 0.0, "game rumble must be taken over");
+        let v = pad_value(&out, FB_DS, "hd_l_amp");
+        assert!((v - 0.4).abs() < 0.01, "gate: audio 0.5 × game 0.8, got {v}");
+    }
+}
+
+#[cfg(test)]
+mod menu_eval_tests {
+    use super::*;
+
+    fn menu_snap(uid: usize) -> NodeSnap {
+        let mut n = NodeSnap {
+            node_uid: uid,
+            module_id: "module.menu".to_string(),
+            params: HashMap::new(),
+            n_outputs: 3,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: vec![
+                "automap_pass".to_string(), "menu_open".to_string(), "menu_hover".to_string(),
+            ],
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        };
+        n.params.insert("_automap_device_id".into(), Value::String("dev".into()));
+        n.params.insert("menu_id".into(), Value::String("abcd1234".into()));
+        // 2x2 grid: zone ids row-major (0 TL, 1 TR, 2 BL, 3 BR).
+        n.params.insert("col_edges".into(), serde_json::json!([0.5]));
+        n.params.insert("row_edges".into(), serde_json::json!([0.5]));
+        n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        n
+    }
+
+    fn dev_stick(x: f32, y: f32) -> BusMap {
+        let mut m = BusMap::default();
+        m.insert(("dev".to_string(), "left_stick".to_string()), Signal::Vec2(Vec2::new(x, y)));
+        m
+    }
+
+    fn show(b: bool) -> Vec<Option<Signal>> {
+        vec![None, Some(Signal::Bool(b)), None, None]
+    }
+
+    // Hold activation + release-select: wired Show opens, stick bottom-right
+    // highlights zone 3 (hover is sticky once the stick returns to center),
+    // releasing Show closes AND selects — the zone's card fires for the pulse.
+    #[test]
+    fn hold_open_stick_hover_release_selects() {
+        let mut snap = menu_snap(1);
+        snap.params.insert("zone_maps".into(), serde_json::json!([
+            { "f": 0, "z": 3, "in": ["menu_sel"], "out": ["btn_south"] }
+        ]));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+
+        let out = eval_menu_node(&snap, 1, &show(false), &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(false)));
+        assert_eq!(out[2], Some(Signal::Float(-1.0)));
+
+        // Open + point bottom-right (stick +x, -y => unit (0.9, 0.9) => zone 3).
+        let out = eval_menu_node(&snap, 1, &show(true), &dev_stick(0.8, -0.8), &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)));
+        assert_eq!(out[2], Some(Signal::Float(3.0)));
+        // Trailing mirror slots: no selection yet, live pointer present.
+        assert_eq!(out[out.len() - 2], None);
+        assert!(matches!(out[out.len() - 1], Some(Signal::Vec2(_))));
+        // Not selected yet — the card hasn't fired.
+        assert!(c.get(&("menumap:1".to_string(), "btn_south".to_string()))
+            .map(|s| !s.as_bool()).unwrap_or(true));
+        // Suppression: the pointing stick is zeroed on the passthrough while open.
+        assert_eq!(c.get(&("menumap:1".to_string(), "left_stick".to_string())).copied(),
+            Some(Signal::Vec2(Vec2::ZERO)));
+
+        // Stick back to center — hover STAYS on 3 (sticky).
+        let out = eval_menu_node(&snap, 1, &show(true), &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(3.0)));
+
+        // Release Show: closes, selects zone 3, card fires during the pulse.
+        let out = eval_menu_node(&snap, 1, &show(false), &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(false)));
+        assert_eq!(out[2], Some(Signal::Float(-1.0)));
+        assert_eq!(c.get(&("menumap:1".to_string(), "btn_south".to_string())).copied(),
+            Some(Signal::Bool(true)));
+        // Selection mirror: zone 3, seq 1 — persists for the overlay's linger.
+        assert_eq!(out[out.len() - 2], Some(Signal::Vec2(Vec2::new(3.0, 1.0))));
+        assert_eq!(out[out.len() - 1], None, "pointer mirror clears when closed");
+    }
+
+    // The menu republishes the FULL upstream bus under `menumap:{uid}` (like
+    // Touch Zones' touchmap:), not a sparse override map — so the AutoMap output
+    // port glows and downstream reads a complete, coherently-suppressed bus.
+    #[test]
+    fn passthrough_republishes_full_bus() {
+        // Closed menu = pure passthrough: the stick passes straight through.
+        let snap = menu_snap(8);
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        eval_menu_node(&snap, 8, &show(false), &dev_stick(0.6, -0.3), &mut c, &mut state, 0.016);
+        assert_eq!(
+            c.get(&("menumap:8".to_string(), "left_stick".to_string())).copied(),
+            Some(Signal::Vec2(Vec2::new(0.6, -0.3))),
+            "closed menu passes the stick through under menumap:"
+        );
+
+        // Open with suppression OFF: still passes through (suppression is opt-in).
+        let mut snap2 = menu_snap(9);
+        snap2.params.insert("suppress_while_open".into(), Value::Bool(false));
+        let mut c2: BusMap = BusMap::default();
+        let mut st2 = HashMap::new();
+        eval_menu_node(&snap2, 9, &show(true), &dev_stick(0.6, -0.3), &mut c2, &mut st2, 0.016);
+        assert_eq!(
+            c2.get(&("menumap:9".to_string(), "left_stick".to_string())).copied(),
+            Some(Signal::Vec2(Vec2::new(0.6, -0.3))),
+            "suppression off → stick passes through even while open"
+        );
+    }
+
+    // Suppression zeros the enabled pointer pins on the menu's OWN passthrough
+    // AND publishes a SOURCE-BLOCK request keyed by the physical source device
+    // (`__src_block__:{dev}`), drained into `dev_sigs` next tick so the input
+    // reaches ONLY the menu's navigation — not a mouse mapping, another module,
+    // or the pad.
+    #[test]
+    fn suppress_publishes_source_block() {
+        let snap = menu_snap(11); // default: suppress = true, left-stick pointer
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        // Open (wired Show) while the left stick is deflected (active).
+        eval_menu_node(&snap, 11, &show(true), &dev_stick(0.8, -0.8), &mut c, &mut state, 0.016);
+
+        let sk = format!("{SRC_BLOCK_PREFIX}dev");
+        // Zeroed on the menu's own passthrough bus …
+        assert_eq!(
+            c.get(&("menumap:11".to_string(), "left_stick".to_string())).copied(),
+            Some(Signal::Vec2(Vec2::ZERO)),
+        );
+        // … and the active driver's pins are flagged on the source-block channel.
+        for pin in ["left_stick", "left_stick_x", "left_stick_y"] {
+            assert_eq!(
+                c.get(&(sk.clone(), pin.to_string())).map(|s| s.as_bool()),
+                Some(true),
+                "{pin} must be requested for source-block while open",
+            );
+        }
+        // A source that ISN'T an enabled driver is not blocked.
+        assert!(c.get(&(sk.clone(), "right_stick".to_string())).is_none());
+
+        // Partial mode: an IDLE enabled driver (stick inside deadzone) is NOT
+        // blocked, so it still reaches the game.
+        let mut c_idle: BusMap = BusMap::default();
+        let mut st_idle = HashMap::new();
+        eval_menu_node(&snap, 11, &show(true), &dev_stick(0.05, 0.0), &mut c_idle, &mut st_idle, 0.016);
+        assert!(c_idle.get(&(sk.clone(), "left_stick".to_string())).is_none(),
+            "partial mode must not block an idle driver");
+
+        // Full mode: the enabled driver is blocked even when idle.
+        let mut snap_full = menu_snap(14);
+        snap_full.params.insert("suppress_mode".into(), Value::String("full".into()));
+        let mut c_full: BusMap = BusMap::default();
+        let mut st_full = HashMap::new();
+        eval_menu_node(&snap_full, 14, &show(true), &dev_stick(0.0, 0.0), &mut c_full, &mut st_full, 0.016);
+        assert_eq!(
+            c_full.get(&(format!("{SRC_BLOCK_PREFIX}dev"), "left_stick".to_string())).map(|s| s.as_bool()),
+            Some(true), "full mode blocks the enabled driver even when idle",
+        );
+
+        // Suppression OFF → no block published.
+        let mut snap2 = menu_snap(12);
+        snap2.params.insert("suppress_while_open".into(), Value::Bool(false));
+        let mut c2: BusMap = BusMap::default();
+        let mut st2 = HashMap::new();
+        eval_menu_node(&snap2, 12, &show(true), &dev_stick(0.8, -0.8), &mut c2, &mut st2, 0.016);
+        assert!(c2.get(&(sk, "left_stick".to_string())).is_none());
+    }
+
+    // Partial suppression must LATCH gyro as the active driver off the menu
+    // CURSOR being out of the deadzone: the rotation rate drops to ~0 whenever
+    // the user holds the cursor on a target, and a rate-only flag would unblock
+    // the source for those ticks — leaking gyro to e.g. a mouse mapping one
+    // tick at a time while the menu is being steered.
+    #[test]
+    fn gyro_partial_suppress_latches_while_cursor_deflected() {
+        let mut snap = menu_snap(15);
+        snap.params.insert("ptr_ls".into(), Value::Bool(false));
+        snap.params.insert("ptr_gyro".into(), Value::Bool(true));
+        let dev_gyro = |rate: f32| -> BusMap {
+            let mut m = BusMap::default();
+            for pin in ["gyro_x", "gyro_y", "gyro_z"] {
+                m.insert(("dev".to_string(), pin.to_string()), Signal::Float(rate));
+            }
+            m
+        };
+        let gk = (format!("{SRC_BLOCK_PREFIX}dev"), "gyro_x".to_string());
+        let mut state = HashMap::new();
+
+        // Tick 1 opens (prev_open false → no integration yet); tick 2 rotates,
+        // driving the cursor past the deadzone. Fresh collector map per tick,
+        // like the real pipeline — a stale block entry can't fake a pass.
+        let mut c: BusMap = BusMap::default();
+        eval_menu_node(&snap, 15, &show(true), &dev_gyro(1.0), &mut c, &mut state, 0.016);
+        let mut c: BusMap = BusMap::default();
+        eval_menu_node(&snap, 15, &show(true), &dev_gyro(1.0), &mut c, &mut state, 0.016);
+        assert_eq!(c.get(&gk).map(|s| s.as_bool()), Some(true),
+            "rotating gyro must be source-blocked in partial mode");
+
+        // Rotation stops (holding on a target): the cursor is still deflected,
+        // so the block must hold.
+        let mut c: BusMap = BusMap::default();
+        eval_menu_node(&snap, 15, &show(true), &dev_gyro(0.0), &mut c, &mut state, 0.016);
+        assert_eq!(c.get(&gk).map(|s| s.as_bool()), Some(true),
+            "block must latch while the gyro cursor is out of the deadzone");
+
+        // A menu opened without ever tilting keeps gyro passing in partial mode.
+        let mut st2 = HashMap::new();
+        let mut c2: BusMap = BusMap::default();
+        for _ in 0..3 {
+            c2 = BusMap::default();
+            eval_menu_node(&snap, 15, &show(true), &dev_gyro(0.0), &mut c2, &mut st2, 0.016);
+        }
+        assert!(c2.get(&gk).is_none(),
+            "an untouched gyro driver must not be blocked in partial mode");
+    }
+
+    // Latch mode: the first driver to engage owns the menu exclusively — it is
+    // blocked at the source while every OTHER enabled driver keeps passing to
+    // the game — until it disengages, at which point the next engaged driver
+    // takes over.
+    #[test]
+    fn latch_suppress_first_engaged_driver_owns_menu() {
+        let mut snap = menu_snap(16);
+        snap.params.insert("ptr_ls".into(), Value::Bool(true));
+        snap.params.insert("ptr_gyro".into(), Value::Bool(true));
+        snap.params.insert("suppress_mode".into(), Value::String("latch".into()));
+        let dev = |x: f32, y: f32, rate: f32| -> BusMap {
+            let mut m = BusMap::default();
+            m.insert(("dev".to_string(), "left_stick".to_string()), Signal::Vec2(Vec2::new(x, y)));
+            for pin in ["gyro_x", "gyro_y", "gyro_z"] {
+                m.insert(("dev".to_string(), pin.to_string()), Signal::Float(rate));
+            }
+            m
+        };
+        let sk = format!("{SRC_BLOCK_PREFIX}dev");
+        let lk = (sk.clone(), "left_stick".to_string());
+        let gk = (sk.clone(), "gyro_x".to_string());
+        let mut state = HashMap::new();
+
+        // Tick 1 opens (no engagement while prev_open is false); tick 2: LS
+        // deflects AND gyro rotates at once — LS engages first and takes the
+        // latch, so LS is blocked while gyro passes untouched.
+        let mut c: BusMap = BusMap::default();
+        eval_menu_node(&snap, 16, &show(true), &dev(0.8, -0.8, 1.0), &mut c, &mut state, 0.016);
+        let mut c: BusMap = BusMap::default();
+        eval_menu_node(&snap, 16, &show(true), &dev(0.8, -0.8, 1.0), &mut c, &mut state, 0.016);
+        assert_eq!(c.get(&lk).map(|s| s.as_bool()), Some(true),
+            "the latched driver must be source-blocked");
+        assert!(c.get(&gk).is_none(),
+            "a non-latched driver must keep passing while another owns the menu");
+
+        // LS returns to the deadzone while gyro keeps rotating: ownership hands
+        // over — gyro is now blocked, LS passes again.
+        let mut c: BusMap = BusMap::default();
+        eval_menu_node(&snap, 16, &show(true), &dev(0.0, 0.0, 1.0), &mut c, &mut state, 0.016);
+        assert!(c.get(&lk).is_none(),
+            "a disengaged driver must be released from the block");
+        assert_eq!(c.get(&gk).map(|s| s.as_bool()), Some(true),
+            "the next engaged driver must take over the latch");
+    }
+
+    // A selected zone card must fire a momentary PULSE and then RELEASE, even
+    // when its output pin isn't on the passthrough bus (the source device never
+    // emits it). Without an explicit off-write the pin would latch "pressed" on
+    // the virtual sink forever — the stuck-selection regression.
+    #[test]
+    fn selected_card_pulse_releases_not_latches() {
+        let mut snap = menu_snap(13);
+        snap.params.insert("select_on".into(), Value::String("press".into()));
+        snap.params.insert("zone_maps".into(), serde_json::json!([
+            { "f": 0, "z": 3, "in": ["menu_sel"], "out": ["btn_north"] }
+        ]));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        // Wired Show + Select: [_, Show, Select, _].
+        let sel = |sh: bool, se: bool|
+            vec![None, Some(Signal::Bool(sh)), Some(Signal::Bool(se)), None];
+
+        // Open + hover zone 3, then press Select (rising edge selects).
+        eval_menu_node(&snap, 13, &sel(true, false), &dev_stick(0.8, -0.8), &mut c, &mut state, 0.016);
+        eval_menu_node(&snap, 13, &sel(true, true), &dev_stick(0.8, -0.8), &mut c, &mut state, 0.016);
+        assert_eq!(
+            c.get(&("menumap:13".to_string(), "btn_north".to_string())).map(|s| s.as_bool()),
+            Some(true), "the select pulse asserts the zone card's output",
+        );
+
+        // Hold past the pulse (120 ms / 16 ms ≈ 8 ticks) with Select released.
+        for _ in 0..12 {
+            eval_menu_node(&snap, 13, &sel(true, false), &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        }
+        assert_eq!(
+            c.get(&("menumap:13".to_string(), "btn_north".to_string())).map(|s| s.as_bool()),
+            Some(false), "after the pulse the card output must RELEASE (explicit off, no latch)",
+        );
+    }
+
+    // The macro-style Show target (published by a Remapper mapping via
+    // merge_macro_scalar) opens the menu with nothing wired.
+    #[test]
+    fn macro_style_show_target_opens() {
+        let snap = menu_snap(2);
+        let mut c: BusMap = BusMap::default();
+        merge_macro_scalar(&mut c, "menu:abcd1234_show", Signal::Bool(true));
+        let mut state = HashMap::new();
+        let out = eval_menu_node(&snap, 2, &[], &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)));
+    }
+
+    // Toggle activation: rising Show opens, holding/releasing changes nothing,
+    // the next rising edge closes.
+    #[test]
+    fn toggle_mode_edges() {
+        let mut snap = menu_snap(3);
+        snap.params.insert("activation_mode".into(), Value::String("toggle".into()));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let dev = dev_stick(0.0, 0.0);
+
+        let out = eval_menu_node(&snap, 3, &show(true), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)), "rising edge opens");
+        let out = eval_menu_node(&snap, 3, &show(true), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)), "held: stays open");
+        let out = eval_menu_node(&snap, 3, &show(false), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)), "released: stays open");
+        let out = eval_menu_node(&snap, 3, &show(true), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(false)), "second rising edge closes");
+    }
+
+    /// The last selection `(zone, seq)` from the trailing mirror slot.
+    fn menu_sel(out: &[Option<Signal>]) -> Option<(u32, u32)> {
+        match out.get(out.len().checked_sub(2)?) {
+            Some(Some(Signal::Vec2(v))) => Some((v.x as u32, v.y as u32)),
+            _ => None,
+        }
+    }
+
+    /// Tap a macro-style target — pressed one tick, released the next — with
+    /// wired Show held as given. Returns the press tick's outputs.
+    fn tap_target(
+        snap: &NodeSnap,
+        pin: &str,
+        show_b: bool,
+        dev: &BusMap,
+        c: &mut BusMap,
+        state: &mut HashMap<usize, NodeState>,
+    ) -> Vec<Option<Signal>> {
+        let uid = snap.node_uid;
+        merge_macro_scalar(c, pin, Signal::Bool(true));
+        let out = eval_menu_node(snap, uid, &show(show_b), dev, c, state, 0.016);
+        c.remove(&(flexinput_core::macros::SIGS_NS.to_string(), pin.to_string()));
+        eval_menu_node(snap, uid, &show(show_b), dev, c, state, 0.016);
+        out
+    }
+
+    const NEXT: &str = "menu:abcd1234_next";
+    const PREV: &str = "menu:abcd1234_prev";
+
+    // Closed: Next / Previous select outright, in reading order, wrapping
+    // both ways, and never open the menu. A HELD press steps only once.
+    #[test]
+    fn next_prev_select_while_closed() {
+        let snap = menu_snap(20);
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let dev = dev_stick(0.0, 0.0);
+        let mut tap = |pin: &str| {
+            let out = tap_target(&snap, pin, false, &dev, &mut c, &mut state);
+            assert_eq!(out[1], Some(Signal::Bool(false)), "stepping while closed never opens");
+            menu_sel(&out)
+        };
+        assert_eq!(tap(NEXT), Some((0, 1)), "from no selection, Next starts at the first cell");
+        assert_eq!(tap(NEXT), Some((1, 2)));
+        assert_eq!(tap(PREV), Some((0, 3)));
+        assert_eq!(tap(PREV), Some((3, 4)), "Previous wraps to the last cell");
+        assert_eq!(tap(NEXT), Some((0, 5)), "Next wraps to the first cell");
+
+        merge_macro_scalar(&mut c, NEXT, Signal::Bool(true));
+        for _ in 0..5 {
+            eval_menu_node(&snap, 20, &show(false), &dev, &mut c, &mut state, 0.016);
+        }
+        let out = eval_menu_node(&snap, 20, &show(false), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(menu_sel(&out), Some((1, 6)), "holding Next steps once, not every tick");
+    }
+
+    // Closed steps fire the cell's card like any selection.
+    #[test]
+    fn next_while_closed_fires_the_cells_card() {
+        let mut snap = menu_snap(21);
+        snap.params.insert("zone_maps".into(), serde_json::json!([
+            { "f": 0, "z": 0, "in": ["menu_sel"], "out": ["btn_east"] }
+        ]));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        tap_target(&snap, NEXT, false, &dev_stick(0.0, 0.0), &mut c, &mut state);
+        assert_eq!(c.get(&("menumap:21".to_string(), "btn_east".to_string())).copied(),
+            Some(Signal::Bool(true)), "the stepped-to cell's card must fire");
+    }
+
+    // Open: Next / Previous move the highlight (carrying on from the last
+    // selection), it holds against a resting stick even with sticky hover
+    // off, and letting go of Show selects the stepped-to cell.
+    #[test]
+    fn next_moves_highlight_while_open_and_release_selects_it() {
+        let mut snap = menu_snap(22);
+        snap.params.insert("hover_sticky".into(), Value::Bool(false));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let rest = dev_stick(0.0, 0.0);
+
+        // A closed step first, so the open cycle has somewhere to carry on from.
+        tap_target(&snap, NEXT, false, &rest, &mut c, &mut state);
+        let out = eval_menu_node(&snap, 22, &show(true), &rest, &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(-1.0)), "opens with nothing highlighted");
+
+        let out = tap_target(&snap, NEXT, true, &rest, &mut c, &mut state);
+        assert_eq!(out[1], Some(Signal::Bool(true)));
+        assert_eq!(out[2], Some(Signal::Float(1.0)), "Next carries on after the last selection (0)");
+        assert_eq!(menu_sel(&out), Some((0, 1)), "moving the highlight selects nothing");
+        let out = eval_menu_node(&snap, 22, &show(true), &rest, &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(1.0)), "a stepped highlight survives a resting stick");
+        let out = tap_target(&snap, PREV, true, &rest, &mut c, &mut state);
+        assert_eq!(out[2], Some(Signal::Float(0.0)));
+        let out = tap_target(&snap, PREV, true, &rest, &mut c, &mut state);
+        assert_eq!(out[2], Some(Signal::Float(3.0)), "Previous wraps while open too");
+
+        // The stick takes over once it leaves the deadzone (top-right = 1).
+        let out = eval_menu_node(&snap, 22, &show(true), &dev_stick(0.8, 0.8), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(1.0)), "the pointer takes the highlight back");
+        let out = eval_menu_node(&snap, 22, &show(true), &rest, &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(-1.0)), "pointer-made highlight still clears (sticky off)");
+
+        let out = tap_target(&snap, NEXT, true, &rest, &mut c, &mut state);
+        assert_eq!(out[2], Some(Signal::Float(1.0)),
+            "with nothing highlighted, Next carries on after the last selection (0) again");
+
+        let out = eval_menu_node(&snap, 22, &show(false), &rest, &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(false)));
+        assert_eq!(menu_sel(&out), Some((1, 2)), "letting go of Show selects the stepped-to cell");
+    }
+
+    fn show_sel(show_b: bool, sel_b: bool) -> Vec<Option<Signal>> {
+        vec![None, Some(Signal::Bool(show_b)), Some(Signal::Bool(sel_b)), None]
+    }
+
+    // Never: Show doesn't open the menu and Select, with no open highlight
+    // to commit, does nothing — only Next / Previous select.
+    #[test]
+    fn never_mode_stays_shut_and_only_next_prev_select() {
+        let mut snap = menu_snap(23);
+        snap.params.insert("activation_mode".into(), Value::String("never".into()));
+        snap.params.insert("select_on".into(), Value::String("press".into()));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let dev = dev_stick(0.8, 0.8);
+
+        let out = eval_menu_node(&snap, 23, &show_sel(true, false), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(false)), "Show can't open a never-shown menu");
+        assert_eq!(out[2], Some(Signal::Float(-1.0)), "nothing is ever highlighted");
+        assert_eq!(*out.last().unwrap(), None, "no live pointer while shut");
+        let out = eval_menu_node(&snap, 23, &show_sel(true, true), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(menu_sel(&out), None, "Select has nothing to commit");
+
+        let out = tap_target(&snap, NEXT, true, &dev, &mut c, &mut state);
+        assert_eq!(menu_sel(&out), Some((0, 1)));
+        let out = tap_target(&snap, PREV, true, &dev, &mut c, &mut state);
+        assert_eq!(menu_sel(&out), Some((3, 2)), "Previous steps back, wrapping");
+    }
+
+    // No pointer driving the menu at all: Next / Previous are its only way
+    // round, and Select commits what they highlighted.
+    #[test]
+    fn without_a_pointer_next_highlights_and_select_commits() {
+        let mut snap = menu_snap(24);
+        snap.params.insert("ptr_ls".into(), Value::Bool(false));
+        snap.params.insert("select_on".into(), Value::String("press".into()));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let dev = dev_stick(0.8, 0.8); // deflected, but no source reads it
+
+        let out = eval_menu_node(&snap, 24, &show_sel(true, false), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(-1.0)), "a disabled stick highlights nothing");
+        tap_target(&snap, NEXT, true, &dev, &mut c, &mut state);
+        let out = tap_target(&snap, NEXT, true, &dev, &mut c, &mut state);
+        assert_eq!(out[2], Some(Signal::Float(1.0)));
+        assert_eq!(menu_sel(&out), None, "highlighting selects nothing");
+        let out = eval_menu_node(&snap, 24, &show_sel(true, true), &dev, &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)), "a press select keeps the menu open");
+        assert_eq!(menu_sel(&out), Some((1, 1)), "Select commits the stepped-to cell");
+    }
+
+    // select_on = "press": the wired Select input commits the hovered zone
+    // while the menu stays open.
+    #[test]
+    fn press_select_fires_card_while_open() {
+        let mut snap = menu_snap(4);
+        snap.params.insert("select_on".into(), Value::String("press".into()));
+        snap.params.insert("zone_maps".into(), serde_json::json!([
+            { "f": 0, "z": 0, "in": ["menu_sel"], "out": ["btn_west"] }
+        ]));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let sel = |show_b: bool, sel_b: bool| {
+            vec![None, Some(Signal::Bool(show_b)), Some(Signal::Bool(sel_b)), None]
+        };
+        // Open + hover top-left (stick -x, +y => unit (0.1, 0.1) => zone 0).
+        let out = eval_menu_node(&snap, 4, &sel(true, false), &dev_stick(-0.8, 0.8), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(0.0)));
+        // Select press: card fires; menu stays open.
+        let out = eval_menu_node(&snap, 4, &sel(true, true), &dev_stick(-0.8, 0.8), &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)));
+        assert_eq!(c.get(&("menumap:4".to_string(), "btn_west".to_string())).copied(),
+            Some(Signal::Bool(true)));
+    }
+
+    // Radial mode: the pointer picks a sector by ANGLE (sector 0 up,
+    // clockwise), the dead center hovers nothing, and hover stays sticky
+    // when the stick returns to rest.
+    #[test]
+    fn radial_mode_sector_by_angle() {
+        let mut snap = menu_snap(6);
+        snap.params.insert("menu_radial".into(), Value::Bool(true));
+        // Synthetic 1×4 strip = 4 sectors (up, right, down, left).
+        snap.params.insert("col_edges".into(), serde_json::json!([0.25, 0.5, 0.75]));
+        snap.params.insert("row_edges".into(), serde_json::json!([] as [f32; 0]));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+
+        // Stick up (+y = up in stick coords) → sector 0.
+        let out = eval_menu_node(&snap, 6, &show(true), &dev_stick(0.0, 0.9), &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(true)));
+        assert_eq!(out[2], Some(Signal::Float(0.0)));
+        // Stick right → sector 1; down → 2; left → 3.
+        let out = eval_menu_node(&snap, 6, &show(true), &dev_stick(0.9, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(1.0)));
+        let out = eval_menu_node(&snap, 6, &show(true), &dev_stick(0.0, -0.9), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(2.0)));
+        let out = eval_menu_node(&snap, 6, &show(true), &dev_stick(-0.9, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(3.0)));
+        // Back to rest: hover stays sticky on the last sector.
+        let out = eval_menu_node(&snap, 6, &show(true), &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(3.0)));
+    }
+
+    // hover_sticky = false: returning to the deadzone clears the highlight,
+    // and a release there selects nothing (no card fires).
+    #[test]
+    fn non_sticky_hover_clears_in_deadzone() {
+        let mut snap = menu_snap(7);
+        snap.params.insert("hover_sticky".into(), Value::Bool(false));
+        snap.params.insert("zone_maps".into(), serde_json::json!([
+            { "f": 0, "z": 3, "in": ["menu_sel"], "out": ["btn_south"] }
+        ]));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+
+        let out = eval_menu_node(&snap, 7, &show(true), &dev_stick(0.8, -0.8), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(3.0)));
+        // Back inside the deadzone: highlight clears instead of sticking.
+        let out = eval_menu_node(&snap, 7, &show(true), &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[2], Some(Signal::Float(-1.0)));
+        // Release with nothing highlighted: closes without selecting.
+        let out = eval_menu_node(&snap, 7, &show(false), &dev_stick(0.0, 0.0), &mut c, &mut state, 0.016);
+        assert_eq!(out[1], Some(Signal::Bool(false)));
+        assert_eq!(out[out.len() - 2], None, "no selection mirrored");
+        assert!(c.get(&("menumap:7".to_string(), "btn_south".to_string()))
+            .map(|s| !s.as_bool()).unwrap_or(true));
+    }
+
+    // A mapping card targeting ANOTHER macro-style pin routes into the macro
+    // namespace instead of the bus (a menu selection can raise a Macro port /
+    // another menu's Show).
+    #[test]
+    fn menu_card_can_target_macro_pin() {
+        let mut snap = menu_snap(5);
+        snap.params.insert("select_on".into(), Value::String("press".into()));
+        snap.params.insert("zone_maps".into(), serde_json::json!([
+            { "f": 0, "z": 0, "in": ["menu_sel"], "out": ["macro:ff00ff00"] }
+        ]));
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        // Two frames: hover establishes on frame 1, the Select edge rises on
+        // frame 2 (prev_sel must be low for the edge to register).
+        let f1 = vec![None, Some(Signal::Bool(true)), Some(Signal::Bool(false)), None];
+        let f2 = vec![None, Some(Signal::Bool(true)), Some(Signal::Bool(true)), None];
+        eval_menu_node(&snap, 5, &f1, &dev_stick(-0.8, 0.8), &mut c, &mut state, 0.016);
+        eval_menu_node(&snap, 5, &f2, &dev_stick(-0.8, 0.8), &mut c, &mut state, 0.016);
+        assert_eq!(c.get(&("macro".to_string(), "macro:ff00ff00".to_string())).copied(),
+            Some(Signal::Bool(true)));
+        assert!(!c.contains_key(&("menumap:5".to_string(), "macro:ff00ff00".to_string())),
+            "macro-style targets must not leak onto the menu's bus key");
+    }
+}
+
+#[cfg(test)]
+mod inverse_tests {
+    use super::*;
+
+    fn inverse(v: Signal, params: &[(&str, serde_json::Value)]) -> Option<Signal> {
+        let params: HashMap<String, serde_json::Value> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        eval_pure("math.negate", 0, &[Some(v)], &params, 1)
+    }
+
+    #[test]
+    fn bipolar_is_a_plain_sign_flip() {
+        assert_eq!(inverse(Signal::Float(0.25), &[]), Some(Signal::Float(-0.25)));
+        assert_eq!(
+            inverse(Signal::Vec2(glam::Vec2::new(0.5, -0.5)), &[]),
+            Some(Signal::Vec2(glam::Vec2::new(-0.5, 0.5)))
+        );
+        // Explicit unipolar=false behaves the same as no param at all.
+        assert_eq!(
+            inverse(Signal::Float(0.25), &[("unipolar", false.into())]),
+            Some(Signal::Float(-0.25))
+        );
+    }
+
+    #[test]
+    fn unipolar_mirrors_within_max_and_clips_outside() {
+        let on: &[(&str, serde_json::Value)] = &[("unipolar", true.into())];
+        // Default max = 1: 0 → 1, 1 → 0, midpoint holds.
+        assert_eq!(inverse(Signal::Float(0.0), on), Some(Signal::Float(1.0)));
+        assert_eq!(inverse(Signal::Float(1.0), on), Some(Signal::Float(0.0)));
+        assert_eq!(inverse(Signal::Float(0.25), on), Some(Signal::Float(0.75)));
+        // Past either end clips instead of going negative / above max.
+        assert_eq!(inverse(Signal::Float(1.5), on), Some(Signal::Float(0.0)));
+        assert_eq!(inverse(Signal::Float(-0.5), on), Some(Signal::Float(1.0)));
+    }
+
+    #[test]
+    fn unipolar_max_rescales_the_mirror() {
+        let on: &[(&str, serde_json::Value)] =
+            &[("unipolar", true.into()), ("unipolar_max", (2.0_f64).into())];
+        assert_eq!(inverse(Signal::Float(0.0), on), Some(Signal::Float(2.0)));
+        assert_eq!(inverse(Signal::Float(2.0), on), Some(Signal::Float(0.0)));
+        assert_eq!(inverse(Signal::Float(0.5), on), Some(Signal::Float(1.5)));
+        assert_eq!(inverse(Signal::Float(3.0), on), Some(Signal::Float(0.0)));
+        // Vec2 mirrors component-wise.
+        assert_eq!(
+            inverse(Signal::Vec2(glam::Vec2::new(0.0, 2.0)), on),
+            Some(Signal::Vec2(glam::Vec2::new(2.0, 0.0)))
+        );
+    }
+
+    #[test]
+    fn nonpositive_max_degenerates_to_zero() {
+        let on: &[(&str, serde_json::Value)] =
+            &[("unipolar", true.into()), ("unipolar_max", (0.0_f64).into())];
+        assert_eq!(inverse(Signal::Float(0.0), on), Some(Signal::Float(0.0)));
+        assert_eq!(inverse(Signal::Float(0.5), on), Some(Signal::Float(0.0)));
+    }
+}
+
+#[cfg(test)]
+mod min_max_tests {
+    use super::*;
+
+    /// (max, min) — output 0 is the max, output 1 is the min.
+    fn min_max(inputs: &[Option<Signal>]) -> (Option<Signal>, Option<Signal>) {
+        let p = HashMap::new();
+        (
+            eval_pure("math.min_max", 0, inputs, &p, 2),
+            eval_pure("math.min_max", 1, inputs, &p, 2),
+        )
+    }
+
+    fn f(v: f32) -> Option<Signal> { Some(Signal::Float(v)) }
+
+    #[test]
+    fn reports_extremes_of_two_inputs() {
+        assert_eq!(min_max(&[f(0.2), f(0.9)]), (f(0.9), f(0.2)));
+        // Order doesn't matter, and negatives sort correctly.
+        assert_eq!(min_max(&[f(-1.0), f(0.5)]), (f(0.5), f(-1.0)));
+    }
+
+    #[test]
+    fn scales_past_the_default_two_pins() {
+        assert_eq!(min_max(&[f(0.3), f(-0.7), f(1.2), f(0.0)]), (f(1.2), f(-0.7)));
+    }
+
+    /// An unwired spare pin must not count as a 0 — otherwise adding a pin you
+    /// haven't connected yet would silently pin the min at 0.
+    #[test]
+    fn unwired_pins_are_ignored() {
+        assert_eq!(min_max(&[f(0.4), None, f(0.9)]), (f(0.9), f(0.4)));
+        // Nothing wired at all → both outputs rest at 0.
+        assert_eq!(min_max(&[None, None]), (f(0.0), f(0.0)));
+    }
+
+    #[test]
+    fn vec2_extremes_are_component_wise() {
+        let a = Some(Signal::Vec2(glam::Vec2::new(0.8, -0.2)));
+        let b = Some(Signal::Vec2(glam::Vec2::new(-0.1, 0.6)));
+        assert_eq!(
+            min_max(&[a, b]),
+            (
+                Some(Signal::Vec2(glam::Vec2::new(0.8, 0.6))),
+                Some(Signal::Vec2(glam::Vec2::new(-0.1, -0.2))),
+            )
+        );
+    }
+}
+
+#[cfg(test)]
+mod quantize_tests {
+    use super::*;
+
+    fn quantize(inputs: &[Option<Signal>], params: &[(&str, serde_json::Value)]) -> Option<Signal> {
+        let params: HashMap<String, serde_json::Value> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        eval_pure("math.quantize", 0, inputs, &params, 1)
+    }
+
+    fn at(v: f32, factor: f64) -> Option<Signal> {
+        quantize(&[Some(Signal::Float(v)), None], &[("factor", factor.into())])
+    }
+
+    #[test]
+    fn factor_one_snaps_to_integers() {
+        assert_eq!(at(0.4, 1.0), Some(Signal::Float(0.0)));
+        assert_eq!(at(0.6, 1.0), Some(Signal::Float(1.0)));
+        assert_eq!(at(-0.6, 1.0), Some(Signal::Float(-1.0)));
+        assert_eq!(at(2.5, 1.0), Some(Signal::Float(3.0)));
+    }
+
+    #[test]
+    fn factor_two_snaps_to_halves_and_four_to_quarters() {
+        assert_eq!(at(0.3, 2.0), Some(Signal::Float(0.5)));
+        assert_eq!(at(0.2, 2.0), Some(Signal::Float(0.0)));
+        assert_eq!(at(0.8, 2.0), Some(Signal::Float(1.0)));
+        assert_eq!(at(0.3, 4.0), Some(Signal::Float(0.25)));
+        assert_eq!(at(0.4, 4.0), Some(Signal::Float(0.5)));
+    }
+
+    #[test]
+    fn modes_pick_which_grid_line_a_value_falls_to() {
+        let go = |v: f32, mode: &str| quantize(
+            &[Some(Signal::Float(v)), None],
+            &[("factor", (1.0_f64).into()), ("mode", mode.into())],
+        );
+        assert_eq!(go(1.7, "round"), Some(Signal::Float(2.0)));
+        assert_eq!(go(1.7, "floor"), Some(Signal::Float(1.0)));
+        assert_eq!(go(1.2, "ceil"),  Some(Signal::Float(2.0)));
+        // Floor vs trunc only differ below zero.
+        assert_eq!(go(-1.2, "floor"), Some(Signal::Float(-2.0)));
+        assert_eq!(go(-1.2, "trunc"), Some(Signal::Float(-1.0)));
+        // An unknown mode string degrades to Round rather than dropping output.
+        assert_eq!(go(1.7, "wat"), Some(Signal::Float(2.0)));
+    }
+
+    #[test]
+    fn wired_factor_pin_overrides_the_body_value() {
+        let out = quantize(
+            &[Some(Signal::Float(0.3)), Some(Signal::Float(2.0))],
+            &[("factor", (1.0_f64).into())],
+        );
+        assert_eq!(out, Some(Signal::Float(0.5)), "pin factor 2 must win over param 1");
+    }
+
+    #[test]
+    fn nonpositive_factor_passes_through_unquantized() {
+        assert_eq!(at(0.37, 0.0), Some(Signal::Float(0.37)));
+        assert_eq!(at(0.37, -2.0), Some(Signal::Float(0.37)));
+    }
+
+    #[test]
+    fn vec2_quantizes_component_wise() {
+        let out = quantize(
+            &[Some(Signal::Vec2(glam::Vec2::new(0.3, -0.8))), None],
+            &[("factor", (2.0_f64).into())],
+        );
+        assert_eq!(out, Some(Signal::Vec2(glam::Vec2::new(0.5, -1.0))));
+    }
+}
+
+#[cfg(test)]
+mod vec_to_deflection_tests {
+    use super::*;
+
+    fn out(v: glam::Vec2, degrees: bool) -> (f32, f32) {
+        let mut params = HashMap::new();
+        params.insert("degrees".to_string(), serde_json::Value::Bool(degrees));
+        let inputs = [Some(Signal::Vec2(v))];
+        let g = |i| match eval_pure("module.vec_to_deflection", i, &inputs, &params, 2) {
+            Some(Signal::Float(f)) => f,
+            other => panic!("expected Float, got {other:?}"),
+        };
+        (g(0), g(1))
+    }
+
+    #[test]
+    fn deflection_is_distance_from_centre() {
+        assert!((out(glam::Vec2::new(0.0, 1.0), false).0 - 1.0).abs() < 1e-5);
+        assert!((out(glam::Vec2::new(3.0, 4.0), false).0 - 5.0).abs() < 1e-5);
+        assert_eq!(out(glam::Vec2::ZERO, false).0, 0.0);
+    }
+
+    /// Up is 0 and the angle grows clockwise, so right is a quarter turn.
+    #[test]
+    fn angle_zero_is_up_and_turns_clockwise() {
+        let a = |x: f32, y: f32| out(glam::Vec2::new(x, y), false).1;
+        assert!((a(0.0,  1.0) - 0.00).abs() < 1e-5, "up");
+        assert!((a(1.0,  0.0) - 0.25).abs() < 1e-5, "right");
+        assert!((a(0.0, -1.0) - 0.50).abs() < 1e-5, "down");
+        assert!((a(-1.0, 0.0) - 0.75).abs() < 1e-5, "left");
+    }
+
+    #[test]
+    fn degrees_mode_spans_the_same_circle() {
+        let a = |x: f32, y: f32| out(glam::Vec2::new(x, y), true).1;
+        assert!((a(0.0,  1.0) -   0.0).abs() < 1e-3, "up");
+        assert!((a(1.0,  0.0) -  90.0).abs() < 1e-3, "right");
+        assert!((a(0.0, -1.0) - 180.0).abs() < 1e-3, "down");
+        assert!((a(-1.0, 0.0) - 270.0).abs() < 1e-3, "left");
+    }
+
+    /// The theoretical max and 0 are the same direction — the output must land
+    /// on 0, never on 1.0 / 360.0, so downstream wrapping stays continuous.
+    #[test]
+    fn angle_wraps_to_zero_at_the_top_of_the_range() {
+        for degrees in [false, true] {
+            let full = if degrees { 360.0 } else { 1.0 };
+            // A hair clockwise of "up" from the negative side.
+            let just_under = glam::Vec2::new(-1e-6, 1.0);
+            let a = out(just_under, degrees).1;
+            assert!(a >= 0.0 && a < full, "angle {a} must stay inside [0, {full})");
+            // Dead up reads exactly 0.
+            assert_eq!(out(glam::Vec2::new(0.0, 1.0), degrees).1, 0.0);
+        }
+    }
+
+    /// A zero vector has no direction; report 0 rather than NaN.
+    #[test]
+    fn zero_vector_has_zero_angle() {
+        assert_eq!(out(glam::Vec2::ZERO, false).1, 0.0);
+        assert_eq!(out(glam::Vec2::ZERO, true).1, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod source_namespace_tests {
+    use super::*;
+
+    #[test]
+    fn every_prefix_is_recognised() {
+        for p in NAMESPACED_SOURCE_PREFIXES {
+            assert!(
+                is_namespaced_source(&format!("{p}42")),
+                "{p} is listed but not recognised"
+            );
+        }
+    }
+
+    #[test]
+    fn physical_devices_are_not_namespaced() {
+        // Real ids the graph carries alongside node-produced ones. If a device
+        // backend ever adopts one of these prefixes, the engine would start
+        // routing it through collector_sigs instead of the device bus.
+        for id in [
+            "gilrs:dualsense:0",
+            "gilrs:xinput:v0",
+            "midi_in:0",
+            "virtual.hm.xinput",
+            "virtual.keymouse",
+        ] {
+            assert!(!is_namespaced_source(id), "{id} must read as a physical source");
+        }
+    }
+}
+
+#[cfg(test)]
+mod lean_axis_tests {
+    use super::*;
+
+    /// Output slot 3 of `compute_gyro_3dof` is the lean scalar.
+    const LEAN_OUT: usize = 3;
+
+    /// Drive the module through its direct accel pin overrides (inputs 5/6/7 =
+    /// Accel X/Y/Z) and read the lean scalar back.
+    fn lean_for(accel: [f32; 3]) -> f32 {
+        let inputs: Vec<Option<Signal>> = vec![
+            None, None,                       // 0,1: unused here
+            Some(Signal::Float(0.0)),         // 2: gyro X
+            Some(Signal::Float(0.0)),         // 3: gyro Y
+            Some(Signal::Float(0.0)),         // 4: gyro Z
+            Some(Signal::Float(accel[0])),    // 5: accel X
+            Some(Signal::Float(accel[1])),    // 6: accel Y
+            Some(Signal::Float(accel[2])),    // 7: accel Z
+        ];
+        let mut state = NodeState::default();
+        let out = compute_gyro_3dof(
+            &inputs,
+            &mut state,
+            &HashMap::new(),
+            &BusMap::default(),
+            &BusMap::default(),
+            1.0 / 60.0,
+        );
+        match out.get(LEAN_OUT) {
+            Some(Some(Signal::Float(f))) => *f,
+            other => panic!("lean output slot held {other:?}"),
+        }
+    }
+
+    /// Run the module until its smoothed gravity settles, then report lean.
+    /// `axis` picks the mode; `accel` is held steady throughout.
+    fn settled_lean(axis: &str, accel: [f32; 3]) -> f32 {
+        let inputs: Vec<Option<Signal>> = vec![
+            None, None,
+            Some(Signal::Float(0.0)),
+            Some(Signal::Float(0.0)),
+            Some(Signal::Float(0.0)),
+            Some(Signal::Float(accel[0])),
+            Some(Signal::Float(accel[1])),
+            Some(Signal::Float(accel[2])),
+        ];
+        let mut params = HashMap::new();
+        params.insert("family".to_string(), Value::String("pointer".into()));
+        params.insert("axis".to_string(), Value::String(axis.into()));
+        let mut state = NodeState::default();
+        let mut lean = 0.0;
+        // 10 s at 60 Hz — past the longest smoothing tau (World, 3 s).
+        for _ in 0..600 {
+            let out = compute_gyro_3dof(
+                &inputs, &mut state, &params,
+                &BusMap::default(), &BusMap::default(), 1.0 / 60.0,
+            );
+            lean = match out.get(LEAN_OUT) {
+                Some(Some(Signal::Float(f))) => *f,
+                other => panic!("lean output slot held {other:?}"),
+            };
+        }
+        lean
+    }
+
+    // Gravity in the CANONICAL frame — the accel pins carry it now:
+    // (x = forward/+nose-up, y = side/+right-grip-down, z = vertical/+flat),
+    // tilted sideways by ~45°.
+    const FLAT_TILTED: [f32; 3] = [0.0, 0.707, 0.707];      // held flat, rolled
+    const UPRIGHT_TILTED: [f32; 3] = [0.707, 0.707, 0.0];   // nose-up, grips down
+
+    /// Pitch+Yaw assumes the pad points forward, so it leans on roll — and
+    /// should go quiet if the pad is actually being held nose-up, where the
+    /// same side tilt means something else to the player.
+    #[test]
+    fn pitch_yaw_leans_when_held_flat_only() {
+        assert!(
+            settled_lean("pitch_yaw", FLAT_TILTED).abs() > 0.5,
+            "held flat and rolled: this is Pitch+Yaw's lean",
+        );
+        assert!(
+            settled_lean("pitch_yaw", UPRIGHT_TILTED).abs() < 0.1,
+            "held nose-up: not the orientation this mode assumes",
+        );
+    }
+
+    /// Pitch+Roll assumes a handheld / ceiling-pointing pad, where the lean the
+    /// player performs reads to them as a yaw. Same accel axis, opposite gate.
+    #[test]
+    fn pitch_roll_leans_when_held_nose_up_only() {
+        assert!(
+            settled_lean("pitch_roll", UPRIGHT_TILTED).abs() > 0.5,
+            "held nose-up and tilted: this is Pitch+Roll's lean",
+        );
+        assert!(
+            settled_lean("pitch_roll", FLAT_TILTED).abs() < 0.1,
+            "held flat: not the orientation this mode assumes",
+        );
+    }
+
+    /// Player/World project the gyro onto the gravity direction to split yaw
+    /// from the rest, so the accel (gravity) and gyro vectors MUST be read in
+    /// the same body frame. When they weren't, a rotation about gravity leaked
+    /// into the other output axis — the "slant" where a yaw drifted the cursor
+    /// diagonally. Frames matched on the Switch Pro but not on Sony pads.
+    ///
+    /// Roll the pad onto its right side (gravity along +Y = side), then rotate
+    /// about that same axis (pure pitch gyro = rotation about Y = about
+    /// gravity). That is a world-yaw, so it must land in X alone. With mixed
+    /// frames it would appear in Y instead.
+    #[test]
+    fn player_yaw_about_gravity_stays_out_of_the_other_axis() {
+        let inputs: Vec<Option<Signal>> = vec![
+            None, None,
+            Some(Signal::Float(0.0)),  // gyro x (roll)
+            Some(Signal::Float(0.6)),  // gyro y (pitch) — about the side axis
+            Some(Signal::Float(0.0)),  // gyro z (yaw)
+            Some(Signal::Float(0.0)),  // accel x (forward)
+            Some(Signal::Float(1.0)),  // accel y (side) — gravity, right side down
+            Some(Signal::Float(0.0)),  // accel z (vertical)
+        ];
+        let mut params = HashMap::new();
+        params.insert("family".to_string(), Value::String("pointer".into()));
+        params.insert("axis".to_string(), Value::String("player".into()));
+        let mut state = NodeState::default();
+        let mut out = Vec::new();
+        for _ in 0..600 {
+            out = compute_gyro_3dof(
+                &inputs, &mut state, &params,
+                &BusMap::default(), &BusMap::default(), 1.0 / 60.0,
+            );
+        }
+        let x = match out.get(1) { Some(Some(Signal::Float(f))) => *f, o => panic!("x: {o:?}") };
+        let y = match out.get(2) { Some(Some(Signal::Float(f))) => *f, o => panic!("y: {o:?}") };
+        assert!(x.abs() > 0.3, "rotation about gravity must drive X, got {x}");
+        assert!(y.abs() < 0.05, "and must NOT leak into Y (the slant), got {y}");
+    }
+
+    /// Player and World adapt to however the pad is held, so they lean in both.
+    #[test]
+    fn adaptive_modes_lean_however_the_pad_is_held() {
+        for axis in ["player", "world"] {
+            assert!(
+                settled_lean(axis, FLAT_TILTED).abs() > 0.5,
+                "{axis} must lean when held flat",
+            );
+            assert!(
+                settled_lean(axis, UPRIGHT_TILTED).abs() > 0.5,
+                "{axis} must lean when held nose-up",
+            );
+        }
+    }
+
+    /// Whatever the mode, forward tilt is pitch (canonical X) and must never
+    /// read as lean — lean is the side (Y) component alone.
+    #[test]
+    fn no_mode_leans_on_forward_tilt() {
+        for axis in ["pitch_yaw", "pitch_roll", "player", "world"] {
+            assert!(
+                settled_lean(axis, [0.707, 0.0, 0.707]).abs() < 0.1,
+                "{axis} leaned on a nose-up tilt",
+            );
+        }
+    }
+
+    /// Lean means SIDE tilt — canonical accel Y, with X (forward) and Z
+    /// (vertical) ignored. It read forward tilt until 2026-07, which made
+    /// leaning fire on pitch. (The accel pins carry the canonical frame; the
+    /// module adapts it internally, so these feed canonical directly.)
+    #[test]
+    fn lean_follows_side_tilt_not_forward_tilt() {
+        // Flat: gravity straight down the vertical axis, no lean.
+        assert!(lean_for([0.0, 0.0, 1.0]).abs() < 1e-3, "flat must not lean");
+
+        // Tipped nose up / nose down — pitch (canonical X). Lean stays silent.
+        assert!(
+            lean_for([0.7, 0.0, 0.7]).abs() < 1e-3,
+            "nose-up tilt is pitch, not lean",
+        );
+        assert!(
+            lean_for([-0.7, 0.0, 0.7]).abs() < 1e-3,
+            "nose-down tilt is pitch, not lean",
+        );
+
+        // Rolled onto its side (canonical Y) — this is what lean means.
+        let right = lean_for([0.0, 0.7, 0.7]);
+        let left = lean_for([0.0, -0.7, 0.7]);
+        assert!(right.abs() > 0.5, "side tilt must lean, got {right}");
+        assert!(left.abs() > 0.5, "side tilt must lean, got {left}");
+        assert!(
+            right.signum() != left.signum(),
+            "opposite side tilts must lean opposite ways ({right} vs {left})",
+        );
+
+        // Nearly on its side (a little vertical left so Pitch+Yaw still trusts
+        // the pose) reads as strong deflection.
+        assert!(lean_for([0.0, 0.99, 0.14]).abs() > 0.9);
+    }
+
+    /// Which way is positive: canonical +Y is the right grip dropping, which is
+    /// a right lean → positive. Verified against a physical pad and pinned so
+    /// the sign can't drift behind a comment.
+    #[test]
+    fn positive_lean_is_a_right_lean() {
+        // +Y (right grip down) → right lean, positive.
+        assert!(lean_for([0.0, 0.707, 0.707]) > 0.0, "right grip down is a right lean");
+        // -Y (left grip down) → left lean, negative.
+        assert!(lean_for([0.0, -0.707, 0.707]) < 0.0, "left grip down is a left lean");
+    }
+}
+
+#[cfg(test)]
+mod rws_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn params(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    // Gyro mode: input Vec2 is angular rate in ±1 == ±GYRO_REF_DPS deg/s. The
+    // per-tick mouse displacement = deg/s * dt * scale(counts/deg) * rws.
+    #[test]
+    fn gyro_rate_scales_to_mouse_displacement() {
+        let mut st = NodeState::default();
+        let p = params(&[("scale", serde_json::json!(2.0)), ("rws", serde_json::json!(3.0))]);
+        let inputs = vec![Some(Signal::Vec2(glam::Vec2::new(0.5, -0.25)))];
+        let out = compute_rws(&inputs, &mut st, &p, 0.01);
+        let ex = 0.5 * GYRO_REF_DPS * 0.01 * 2.0 * 3.0;
+        let ey = -0.25 * GYRO_REF_DPS * 0.01 * 2.0 * 3.0;
+        match out[0] {
+            Some(Signal::Vec2(v)) => {
+                assert!((v.x - ex).abs() < 1e-3, "x {} vs {}", v.x, ex);
+                assert!((v.y - ey).abs() < 1e-3, "y {} vs {}", v.y, ey);
+            }
+            _ => panic!("expected Vec2 output"),
+        }
+    }
+
+    // Stick output: the desired turn rate (rws applied) normalized by the game's
+    // full-deflection turn rate, clamped to the unit range.
+    #[test]
+    fn stick_output_normalizes_rate_by_max() {
+        let mut st = NodeState::default();
+        let p = params(&[
+            ("scale", serde_json::json!(100.0)), // irrelevant to the stick output
+            ("rws", serde_json::json!(1.0)),
+            ("stick_out_dps", serde_json::json!(2000.0)),
+        ]);
+        // yaw 0.5 → 1000 deg/s; deflection = 1000 / 2000 = 0.5. pitch −0.1 → −0.1.
+        let inputs = vec![Some(Signal::Vec2(glam::Vec2::new(0.5, -0.1)))];
+        let out = compute_rws(&inputs, &mut st, &p, 0.01);
+        match out[1] {
+            Some(Signal::Vec2(v)) => {
+                assert!((v.x - 0.5).abs() < 1e-3, "sx {}", v.x);
+                assert!((v.y - (-0.1)).abs() < 1e-3, "sy {}", v.y);
+            }
+            _ => panic!("expected Stick Vec2 output"),
+        }
+        // Beyond full deflection it clamps to the unit range.
+        let fast = vec![Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        let out2 = compute_rws(&fast, &mut st, &p, 0.01);
+        assert!(matches!(out2[1], Some(Signal::Vec2(v)) if (v.x - 1.0).abs() < 1e-6));
+    }
+
+    // V/H bias scales the VERTICAL (pitch) axis only; horizontal is the reference.
+    #[test]
+    fn gyro_vh_ratio_biases_pitch_only() {
+        let mut st = NodeState::default();
+        let p = params(&[
+            ("scale", serde_json::json!(1.0)),
+            ("rws", serde_json::json!(1.0)),
+            ("gyro_vh_ratio", serde_json::json!(2.0)),
+        ]);
+        // Equal yaw & pitch input → pitch output should be 2× the yaw output.
+        let inputs = vec![Some(Signal::Vec2(glam::Vec2::new(0.5, 0.5)))];
+        let out = compute_rws(&inputs, &mut st, &p, 0.01);
+        match out[0] {
+            Some(Signal::Vec2(v)) => assert!((v.y - 2.0 * v.x).abs() < 1e-3, "y {} x {}", v.y, v.x),
+            _ => panic!("expected Vec2"),
+        }
+    }
+
+    // Stick-aim: the flick stick INSIDE the deadzone adds a rate to both outputs
+    // with its own RWS, even when the primary rotation input is zero.
+    #[test]
+    fn stick_aim_inside_deadzone_feeds_both_outputs() {
+        let mut st = NodeState::default();
+        let p = params(&[
+            ("scale", serde_json::json!(1.0)),
+            ("rws", serde_json::json!(1.0)),
+            ("stick_out_dps", serde_json::json!(360.0)),
+            ("max_rate_dps", serde_json::json!(360.0)),
+            ("flick_output", serde_json::json!("both")),
+            ("flick_deadzone", serde_json::json!(0.85)),
+            ("stick_aim_enabled", serde_json::json!(true)),
+            ("stick_aim_rws", serde_json::json!(1.0)),
+        ]);
+        // Primary rotation zero; flick stick at 0.4 right (inside the 0.85 dz).
+        let inputs = vec![
+            Some(Signal::Vec2(glam::Vec2::ZERO)),
+            Some(Signal::Vec2(glam::Vec2::new(0.4, 0.0))),
+        ];
+        let out = compute_rws(&inputs, &mut st, &p, 0.01);
+        let t = 0.4 / 0.85;
+        let a_yaw = t * 360.0; // dir.x=1
+        match out[0] {
+            Some(Signal::Vec2(v)) => {
+                assert!((v.x - a_yaw * 0.01).abs() < 1e-3, "mouse x {}", v.x);
+                assert!(v.y.abs() < 1e-4, "mouse y {}", v.y);
+            }
+            _ => panic!("expected Mouse Vec2"),
+        }
+        match out[1] {
+            Some(Signal::Vec2(v)) => assert!((v.x - a_yaw / 360.0).abs() < 1e-3, "stick x {}", v.x),
+            _ => panic!("expected Stick Vec2"),
+        }
+    }
+
+    // Past the deadzone the flick takes over — stick-aim does NOT also add its rate.
+    #[test]
+    fn stick_aim_inactive_past_deadzone() {
+        let mut st = NodeState::default();
+        let p = params(&[
+            ("scale", serde_json::json!(1.0)),
+            ("rws", serde_json::json!(1.0)),
+            ("max_rate_dps", serde_json::json!(360.0)),
+            ("flick_output", serde_json::json!("both")),
+            ("flick_deadzone", serde_json::json!(0.85)),
+            ("flick_smooth_ms", serde_json::json!(0.0)),
+            ("stick_aim_enabled", serde_json::json!(true)),
+        ]);
+        // Straight up, past the deadzone → a 0° flick engages (no yaw), and the
+        // stick-aim rate must NOT contribute (it is deadzone-only).
+        let inputs = vec![
+            Some(Signal::Vec2(glam::Vec2::ZERO)),
+            Some(Signal::Vec2(glam::Vec2::new(0.0, 1.0))),
+        ];
+        let out = compute_rws(&inputs, &mut st, &p, 0.01);
+        match out[0] {
+            Some(Signal::Vec2(v)) => {
+                assert!(v.x.abs() < 1e-4, "no yaw from a straight-up flick/aim, got {}", v.x);
+                assert!(v.y.abs() < 1e-4, "stick-aim must not add pitch past dz, got {}", v.y);
+            }
+            _ => panic!("expected Mouse Vec2"),
+        }
+    }
+
+    // Where compute_rws's display-only readouts sit (after all three pins).
+    const DEG: usize = 3;
+    const PEAK: usize = 4;
+
+    fn float_at(out: &[Option<Signal>], i: usize) -> f32 {
+        match out.get(i).copied().flatten() {
+            Some(Signal::Float(f)) => f,
+            other => panic!("expected Float at out[{i}], got {other:?}"),
+        }
+    }
+
+    // Measure calibration integrates the rotation in the ENGINE (exact tick dt)
+    // and publishes it as the display-only out[2]. Signed: turning back subtracts.
+    #[test]
+    fn measure_accumulates_signed_degrees_in_engine() {
+        let mut st = NodeState::default();
+        let p = params(&[("cal_measure", serde_json::json!("yaw"))]);
+        // 0.1 gyro = 200 °/s; 100 ticks × 10 ms = 1 s → +200°.
+        let fwd = vec![Some(Signal::Vec2(glam::Vec2::new(0.1, 0.0)))];
+        let mut out = Vec::new();
+        for _ in 0..100 { out = compute_rws(&fwd, &mut st, &p, 0.01); }
+        assert!((float_at(&out, DEG) - 200.0).abs() < 1e-2, "fwd {}", float_at(&out, DEG));
+        // Overshoot correction: 25 ticks back → −50° → 150° net.
+        let back = vec![Some(Signal::Vec2(glam::Vec2::new(-0.1, 0.0)))];
+        for _ in 0..25 { out = compute_rws(&back, &mut st, &p, 0.01); }
+        assert!((float_at(&out, DEG) - 150.0).abs() < 1e-2, "after backtrack {}", float_at(&out, DEG));
+    }
+
+    // The count restarts when the sweep switches axis, and is HELD while off so a
+    // Finish that reads a tick late still sees the full sweep.
+    #[test]
+    fn measure_restarts_on_axis_switch_and_holds_when_off() {
+        let mut st = NodeState::default();
+        let rot = vec![Some(Signal::Vec2(glam::Vec2::new(0.1, 0.1)))];
+        let yaw = params(&[("cal_measure", serde_json::json!("yaw"))]);
+        for _ in 0..50 { compute_rws(&rot, &mut st, &yaw, 0.01); }
+        let off = params(&[("cal_measure", serde_json::json!("off"))]);
+        let held = compute_rws(&rot, &mut st, &off, 0.01);
+        assert!((float_at(&held, DEG) - 100.0).abs() < 1e-2, "held {}", float_at(&held, DEG));
+        let pitch = params(&[("cal_measure", serde_json::json!("pitch"))]);
+        let restarted = compute_rws(&rot, &mut st, &pitch, 0.01);
+        // One tick of pitch after the switch: 200 °/s × 10 ms = 2°.
+        assert!((float_at(&restarted, DEG) - 2.0).abs() < 1e-3, "restart {}", float_at(&restarted, DEG));
+    }
+
+    // Stick calibration: out[3] reports the peak UNclamped deflection so the UI can
+    // reject a sweep turned faster than full stick (the game rate caps there).
+    #[test]
+    fn measure_reports_stick_saturation_peak() {
+        let mut st = NodeState::default();
+        let p = params(&[
+            ("cal_measure", serde_json::json!("yaw")),
+            ("cal_output", serde_json::json!("stick")),
+            ("stick_out_dps", serde_json::json!(100.0)),
+        ]);
+        // 200 °/s against a 100 °/s full-stick rate → 2× full deflection.
+        let fast = vec![Some(Signal::Vec2(glam::Vec2::new(0.1, 0.0)))];
+        let out = compute_rws(&fast, &mut st, &p, 0.01);
+        assert!((float_at(&out, PEAK) - 2.0).abs() < 1e-3, "peak {}", float_at(&out, PEAK));
+        match out[1] {
+            Some(Signal::Vec2(v)) => assert!((v.x - 1.0).abs() < 1e-6, "stick clamps, got {}", v.x),
+            _ => panic!("expected Stick Vec2"),
+        }
+    }
+
+
+    fn flick_params(smooth_ms: f32, scale: f32, rws: f32) -> HashMap<String, serde_json::Value> {
+        params(&[
+            ("flick_output", serde_json::json!("both")),
+            ("flick_deadzone", serde_json::json!(0.85)),
+            ("flick_smooth_ms", serde_json::json!(smooth_ms)),
+            ("scale", serde_json::json!(scale)),
+            ("rws", serde_json::json!(rws)),
+        ])
+    }
+
+    // Pushing the stick RIGHT past the deadzone flicks the camera +90°, mapped
+    // 1:1 through `scale` ONLY — `rws` must NOT scale a flick.
+    #[test]
+    fn flick_engage_snaps_by_stick_angle_ignoring_rws() {
+        let mut st = NodeState::default();
+        let p = flick_params(0.0, 2.0, 5.0); // instant (no smoothing), rws=5
+        let inputs = vec![
+            Some(Signal::Vec2(glam::Vec2::ZERO)),        // rotation input: none
+            Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0))), // flick: full right
+        ];
+        let out = compute_rws(&inputs, &mut st, &p, 0.01);
+        match out[0] {
+            // 90° flick × scale(2), rws ignored → 180 (NOT ×5).
+            Some(Signal::Vec2(v)) => assert!((v.x - 180.0).abs() < 1e-1, "x {}", v.x),
+            _ => panic!("expected Vec2 output"),
+        }
+    }
+
+    fn vec_at(out: &[Option<Signal>], i: usize) -> glam::Vec2 {
+        match out.get(i).copied().flatten() {
+            Some(Signal::Vec2(v)) => v,
+            other => panic!("expected Vec2 at out[{i}], got {other:?}"),
+        }
+    }
+
+    fn stick_at(deg: f32) -> Option<Signal> {
+        let r = deg.to_radians();
+        Some(Signal::Vec2(glam::Vec2::new(r.sin(), r.cos())))
+    }
+
+    // Inside the forward deadzone a flick engages WITHOUT the snap, so rotating
+    // the stick from there turns the camera; outside it snaps as before.
+    #[test]
+    fn flick_forward_deadzone_primes_without_snapping() {
+        let mut p = flick_params(0.0, 1.0, 1.0);
+        p.insert("flick_fwd_dz_deg".into(), serde_json::json!(20.0));
+        let gyro = Some(Signal::Vec2(glam::Vec2::ZERO));
+        let mut st = NodeState::default();
+        // A shallow push 15° right of forward: engaged, camera still.
+        let out = compute_rws(&[gyro, stick_at(15.0)], &mut st, &p, 0.001);
+        assert!(vec_at(&out, 0).x.abs() < 1e-6, "no snap inside the forward deadzone");
+        // Rotating on to 105° tracks the 90° turned (paid out over the smoothing).
+        let mut dx = 0.0;
+        for _ in 0..500 {
+            dx += vec_at(&compute_rws(&[gyro, stick_at(105.0)], &mut st, &p, 0.001), 0).x;
+        }
+        assert!((dx - 90.0).abs() < 0.1, "tracked {dx}");
+
+        // Outside the deadzone the flick snaps to the stick's heading.
+        let mut st = NodeState::default();
+        let out = compute_rws(&[gyro, stick_at(40.0)], &mut st, &p, 0.001);
+        assert!((vec_at(&out, 0).x - 40.0).abs() < 0.1, "snap {}", vec_at(&out, 0).x);
+    }
+
+    // Flick a stick down (180°) and let go: it springs back past the centre to
+    // straight up before the release hold lets go. That is not a turn — tracking
+    // it as one turned the camera 180° straight back.
+    #[test]
+    fn a_stick_springing_past_the_centre_does_not_turn_the_flick_back() {
+        let p = flick_params(0.0, 1.0, 1.0);
+        let gyro = Some(Signal::Vec2(glam::Vec2::ZERO));
+        let mut st = NodeState::default();
+        let mut dx = 0.0;
+        let feed = |stick: Option<Signal>, ms: usize, st: &mut NodeState, dx: &mut f32| {
+            for _ in 0..ms {
+                *dx += vec_at(&compute_rws(&[gyro, stick], st, &p, 0.001), 0).x.abs();
+            }
+        };
+        feed(stick_at(180.0), 50, &mut st, &mut dx); // the flick: 180°
+        let flicked = dx;
+        assert!((flicked - 180.0).abs() < 0.1, "flicked {flicked}");
+        feed(Some(Signal::Vec2(glam::Vec2::ZERO)), 10, &mut st, &mut dx); // springs to the centre
+        feed(stick_at(0.0).map(|s| match s { Signal::Vec2(v) => Signal::Vec2(v * 0.6), o => o }), 15, &mut st, &mut dx); // overshoots up
+        feed(Some(Signal::Vec2(glam::Vec2::ZERO)), 200, &mut st, &mut dx); // settles
+        assert!((dx - flicked).abs() < 1e-3, "the bounce turned the camera {}°", dx - flicked);
+    }
+
+    // The stabiliser holds back a tremor on a held flick, and still lands a
+    // deliberate rotation in full once the stick is let go.
+    #[test]
+    fn flick_stabilise_damps_tremor_and_conserves_the_turn() {
+        let gyro = Some(Signal::Vec2(glam::Vec2::ZERO));
+        // Tremor: ±3° at 8 Hz around straight right, for half a second.
+        let tremor_out = |stab_ms: f32| -> f32 {
+            let mut p = flick_params(0.0, 1.0, 1.0);
+            p.insert("flick_stabilise_ms".into(), serde_json::json!(stab_ms));
+            let mut st = NodeState::default();
+            compute_rws(&[gyro, stick_at(90.0)], &mut st, &p, 0.001); // engage
+            let mut travel = 0.0;
+            for i in 0..500 {
+                let a = 90.0 + 3.0 * (i as f32 * 0.001 * 8.0 * std::f32::consts::TAU).sin();
+                travel += vec_at(&compute_rws(&[gyro, stick_at(a)], &mut st, &p, 0.001), 0).x.abs();
+            }
+            travel
+        };
+        let (raw, stab) = (tremor_out(0.0), tremor_out(150.0));
+        assert!(stab < raw * 0.5, "tremor travel {stab} stabilised vs {raw} raw");
+
+        // A deliberate quarter turn, then let go: the full 90° arrives.
+        let mut p = flick_params(0.0, 1.0, 1.0);
+        p.insert("flick_stabilise_ms".into(), serde_json::json!(150.0));
+        let mut st = NodeState::default();
+        compute_rws(&[gyro, stick_at(0.0)], &mut st, &p, 0.001);
+        let mut dx = 0.0;
+        for i in 0..=90 {
+            dx += vec_at(&compute_rws(&[gyro, stick_at(i as f32)], &mut st, &p, 0.001), 0).x;
+        }
+        for _ in 0..1000 {
+            dx += vec_at(&compute_rws(&[gyro, Some(Signal::Vec2(glam::Vec2::ZERO))], &mut st, &p, 0.001), 0).x;
+        }
+        assert!((dx - 90.0).abs() < 0.05, "turned {dx}");
+    }
+
+    // ── Speed-gated flick ──
+    // Stick aim at 100 °/s full rate, flick deadzone 0.8, speed gate 60 ms,
+    // merged into the Mouse output at 1 count/degree, catch-up over 50 ms.
+    fn gated_params(lock: bool) -> HashMap<String, serde_json::Value> {
+        params(&[
+            ("flick_output", serde_json::json!("both")),
+            ("flick_deadzone", serde_json::json!(0.8)),
+            ("flick_smooth_ms", serde_json::json!(50.0)),
+            ("flick_speed_ms", serde_json::json!(60.0)),
+            ("flick_slow_lock", serde_json::json!(lock)),
+            ("stick_aim_enabled", serde_json::json!(true)),
+            ("max_rate_dps", serde_json::json!(100.0)),
+            ("scale", serde_json::json!(1.0)),
+        ])
+    }
+
+    /// Feed `ms` 1 ms ticks of the Flick stick at `v`; the Mouse x turned.
+    fn gated_feed(st: &mut NodeState, p: &HashMap<String, serde_json::Value>, v: glam::Vec2, ms: usize) -> f32 {
+        let gyro = Some(Signal::Vec2(glam::Vec2::ZERO));
+        (0..ms).map(|_| vec_at(&compute_rws(&[gyro, Some(Signal::Vec2(v))], st, p, 0.001), 0).x).sum()
+    }
+
+    // A fast push to the flick zone is a flick: the aim it made crossing the
+    // aim zone is thrown away, so only the flick turns the camera — and the
+    // stick springing back through the aim zone turns nothing either.
+    #[test]
+    fn a_fast_push_flicks_clean() {
+        let p = gated_params(false);
+        let mut st = NodeState::default();
+        let mut dx = gated_feed(&mut st, &p, glam::Vec2::new(0.5, 0.0), 20); // crossing the aim zone
+        dx += gated_feed(&mut st, &p, glam::Vec2::new(1.0, 0.0), 300);      // the flick: 90°
+        dx += gated_feed(&mut st, &p, glam::Vec2::new(0.5, 0.0), 10);       // springing back
+        dx += gated_feed(&mut st, &p, glam::Vec2::ZERO, 300);
+        assert!((dx - 90.0).abs() < 0.01, "turned {dx}°, the flick alone is 90°");
+    }
+
+    // A slow push is steering: the aim held back while deciding catches up, so
+    // the whole aim arrives — as much as an ungated stick would have turned.
+    #[test]
+    fn a_slow_push_steers_and_catches_up_in_full() {
+        let mut ungated = gated_params(false);
+        ungated.insert("flick_speed_ms".into(), serde_json::json!(0.0));
+        let turned = |p: &HashMap<String, serde_json::Value>| {
+            let mut st = NodeState::default();
+            gated_feed(&mut st, p, glam::Vec2::new(0.4, 0.0), 200)
+                + gated_feed(&mut st, p, glam::Vec2::ZERO, 300)
+        };
+        let (gated, plain) = (turned(&gated_params(false)), turned(&ungated));
+        // 0.4 of a 0.8 deadzone = half rate: 50 °/s for 0.2 s.
+        assert!((plain - 10.0).abs() < 0.01, "plain {plain}");
+        assert!((gated - plain).abs() < 0.01, "gated {gated} vs plain {plain}");
+    }
+
+    // With the lock, a slow push that goes on into the flick zone doesn't flick
+    // — it aims at full rate until the stick is back at the centre. Without the
+    // lock it flicks.
+    #[test]
+    fn the_slow_lock_keeps_a_steering_push_from_flicking() {
+        let run = |lock: bool| {
+            let p = gated_params(lock);
+            let mut st = NodeState::default();
+            gated_feed(&mut st, &p, glam::Vec2::new(0.4, 0.0), 100) // slow: steering
+                + gated_feed(&mut st, &p, glam::Vec2::new(1.0, 0.0), 1000) // on past the deadzone
+        };
+        let locked = run(true);
+        // Half rate (50 °/s) for 0.1 s, then full rate (100 °/s) for 1 s.
+        assert!((locked - 105.0).abs() < 0.01, "locked turned {locked}°");
+        let unlocked = run(false);
+        // The 5° of steering, then a 90° flick (the aim zone is past it).
+        assert!((unlocked - 95.0).abs() < 0.01, "unlocked steers then flicks: {unlocked}");
+
+        // Back at the centre, the next fast push flicks again.
+        let p = gated_params(true);
+        let mut st = NodeState::default();
+        gated_feed(&mut st, &p, glam::Vec2::new(0.4, 0.0), 100);
+        gated_feed(&mut st, &p, glam::Vec2::ZERO, 50);
+        let flick = gated_feed(&mut st, &p, glam::Vec2::new(1.0, 0.0), 300);
+        assert!((flick - 90.0).abs() < 0.01, "flick after the centre: {flick}");
+    }
+
+    // A quick nudge that comes back before the gate decides is aim, not a
+    // flick: it isn't thrown away.
+    #[test]
+    fn a_quick_nudge_still_aims() {
+        let p = gated_params(true);
+        let mut st = NodeState::default();
+        let dx = gated_feed(&mut st, &p, glam::Vec2::new(0.4, 0.0), 30)
+            + gated_feed(&mut st, &p, glam::Vec2::ZERO, 300);
+        // 50 °/s for 0.03 s.
+        assert!((dx - 1.5).abs() < 0.01, "nudge turned {dx}");
+    }
+
+    // `flick_output` "mouse" (the default) puts the flick on the Flick pin alone,
+    // in mouse counts; "both" merges it into the Mouse AND Stick outputs and
+    // leaves the pin at zero.
+    #[test]
+    fn flick_pin_mouse_mode_takes_the_flick_off_the_mouse_output() {
+        let inputs = [Some(Signal::Vec2(glam::Vec2::ZERO)), stick_at(90.0)];
+        let mut both_p = flick_params(0.0, 2.0, 1.0);
+        both_p.insert("stick_out_dps".into(), serde_json::json!(360.0));
+        let both = compute_rws(&inputs, &mut NodeState::default(), &both_p, 0.01);
+        assert!((vec_at(&both, 0).x - 180.0).abs() < 0.1);
+        assert!((vec_at(&both, 1).x - 1.0).abs() < 1e-4, "the Stick output turns at full tilt");
+        assert_eq!(vec_at(&both, 2), glam::Vec2::ZERO);
+
+        let mut p = flick_params(0.0, 2.0, 1.0);
+        p.insert("flick_output".into(), serde_json::json!("mouse"));
+        p.insert("_rws_flick_out_wired".into(), serde_json::json!(true));
+        let pin = compute_rws(&inputs, &mut NodeState::default(), &p, 0.01);
+        assert!(vec_at(&pin, 0).x.abs() < 1e-6, "the Mouse output no longer carries it");
+        assert!((vec_at(&pin, 2).x - 180.0).abs() < 0.1, "flick pin {}", vec_at(&pin, 2).x);
+    }
+
+    // A pin-only flick whose Flick pin isn't wired reaches nothing, so it is off:
+    // Stick aim keeps the stick's whole range (as with the old Flick checkbox
+    // unticked) and the flick doesn't engage.
+    #[test]
+    fn an_unwired_flick_pin_leaves_stick_aim_the_whole_range() {
+        let p = params(&[
+            ("stick_aim_enabled", serde_json::json!(true)),
+            ("flick_deadzone", serde_json::json!(0.5)),
+            ("max_rate_dps", serde_json::json!(100.0)),
+            ("scale", serde_json::json!(1.0)),
+        ]);
+        let inputs = [Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        let out = compute_rws(&inputs, &mut NodeState::default(), &p, 0.01);
+        // Full right = full rate: 100 °/s × 10 ms × scale 1.
+        assert!((vec_at(&out, 0).x - 1.0).abs() < 1e-4, "aim {}", vec_at(&out, 0).x);
+        assert_eq!(vec_at(&out, 2), glam::Vec2::ZERO, "no flick");
+    }
+
+    // The Flick On control (input 2) off: no flick, no Stick aim, and the stick
+    // isn't suppressed — it behaves as a plain stick again (a weapon wheel).
+    #[test]
+    fn flick_on_control_off_hands_the_stick_back() {
+        let mut snap = rws_snap(27, "full");
+        snap.params.insert("stick_aim_enabled".into(), Value::Bool(true));
+        snap.params.insert("flick_smooth_ms".into(), serde_json::json!(0.0));
+        let gyro = Some(Signal::Vec2(glam::Vec2::ZERO));
+        let push = Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)));
+        let run = |ctl: Option<Signal>| {
+            let mut c: BusMap = BusMap::default();
+            let mut state = HashMap::new();
+            let out = eval_rws_node(&snap, 27, &[gyro, push, ctl], &mut c, &mut state, 0.01);
+            (vec_at(&out, 0), c.is_empty())
+        };
+        let (on_mouse, on_unblocked) = run(Some(Signal::Bool(true)));
+        assert!(on_mouse.x > 1.0 && !on_unblocked, "on: flicks and blocks");
+        let (off_mouse, off_unblocked) = run(Some(Signal::Bool(false)));
+        assert_eq!(off_mouse, glam::Vec2::ZERO, "off: the stick turns nothing");
+        assert!(off_unblocked, "off: the stick is not suppressed");
+        let (unwired, _) = run(None);
+        assert_eq!(unwired, on_mouse, "unwired = on");
+    }
+
+    // As stick deflection a flick is capped at full tilt, and what a tick can't
+    // carry is owed to the next: the turn is conserved.
+    #[test]
+    fn flick_pin_stick_mode_conserves_the_turn_past_full_tilt() {
+        let mut p = flick_params(0.0, 2.0, 1.0);
+        p.insert("flick_output".into(), serde_json::json!("stick"));
+        p.insert("_rws_flick_out_wired".into(), serde_json::json!(true));
+        p.insert("stick_out_dps".into(), serde_json::json!(360.0));
+        let gyro = Some(Signal::Vec2(glam::Vec2::ZERO));
+        let mut st = NodeState::default();
+        let dt = 0.001;
+        let mut turned = 0.0;
+        // An instant 90° flick, then hold: 360°/s at full tilt → 0.25 s to pay out.
+        for i in 0..400 {
+            let out = compute_rws(&[gyro, stick_at(90.0)], &mut st, &p, dt);
+            let v = vec_at(&out, 2);
+            assert!(v.x <= 1.0 + 1e-6 && v.y == 0.0, "tick {i}: {v:?}");
+            assert!(vec_at(&out, 0).x.abs() < 1e-6, "the Mouse output carries nothing");
+            if i == 100 { assert!((v.x - 1.0).abs() < 1e-4, "still at full tilt mid-flick: {}", v.x); }
+            turned += v.x * 360.0 * dt;
+        }
+        assert!((turned - 90.0).abs() < 0.01, "stick turned {turned}°");
+    }
+
+    // A node saved before the Flick pin has two pins: the engine drops the Flick
+    // entry so the display-only readouts still sit right after its pins.
+    #[test]
+    fn two_pin_nodes_keep_the_readouts_after_their_pins() {
+        let full: Vec<Option<Signal>> = (0..5).map(|i| Some(Signal::Float(i as f32))).collect();
+        let old = rws_fit_outputs(full.clone(), 2);
+        assert_eq!(old.len(), 4);
+        assert_eq!(old[rws_cal_deg_out(2)], Some(Signal::Float(3.0)));
+        assert_eq!(old[rws_cal_peak_out(2)], Some(Signal::Float(4.0)));
+        let new = rws_fit_outputs(full, 3);
+        assert_eq!(new[rws_cal_deg_out(3)], Some(Signal::Float(3.0)));
+        assert_eq!(new[rws_cal_peak_out(3)], Some(Signal::Float(4.0)));
+    }
+
+    // While engaged, rotating the stick tracks the camera 1:1 by the shortest arc
+    // (delivered as a smoothed stream, so sum the pay-out).
+    #[test]
+    fn flick_tracks_rotation_while_engaged() {
+        let mut st = NodeState::default();
+        let p = flick_params(0.0, 1.0, 1.0);
+        // Engage pointing forward (up) → 0° flick.
+        let up = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(0.0, 1.0)))];
+        let o1 = compute_rws(&up, &mut st, &p, 0.01);
+        assert!(matches!(o1[0], Some(Signal::Vec2(v)) if v.x.abs() < 1e-3), "engage forward = 0");
+        // Rotate to point right; the +90° tracks out over the smoothing window.
+        let right = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        let mut total = 0.0_f32;
+        for _ in 0..20 {
+            if let Some(Signal::Vec2(v)) = compute_rws(&right, &mut st, &p, 0.01)[0] {
+                total += v.x;
+            }
+        }
+        assert!((total - 90.0).abs() < 1.0, "tracked ~90°, got {total}");
+    }
+
+    // A SUSTAINED release disengages, but a brief release does not.
+    #[test]
+    fn flick_disengages_after_sustained_release() {
+        let mut st = NodeState::default();
+        let p = flick_params(0.0, 1.0, 1.0);
+        let right = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        compute_rws(&right, &mut st, &p, 0.01); // engage
+        assert!(st.aux_f32[0] > 0.5, "engaged after crossing deadzone");
+        // One centred frame (< the 60 ms disengage hold) must NOT disengage.
+        let center = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::ZERO))];
+        let out = compute_rws(&center, &mut st, &p, 0.01);
+        assert!(st.aux_f32[0] > 0.5, "a brief release keeps the flick engaged");
+        assert!(matches!(out[0], Some(Signal::Vec2(v)) if v.x.abs() < 1e-3), "no spurious rotation while released");
+        // Sustained release (> 60 ms) finally disengages.
+        for _ in 0..8 {
+            compute_rws(&center, &mut st, &p, 0.01);
+        }
+        assert!(st.aux_f32[0] < 0.5, "sustained release disengages");
+    }
+
+    // A brief input dropout (stick momentarily reads ~0, e.g. a Bluetooth gap)
+    // must NOT yank the camera toward 0° or drop the flick — tracking resumes
+    // from the held heading when the stick recovers.
+    #[test]
+    fn flick_survives_brief_dropout() {
+        let mut st = NodeState::default();
+        let p = flick_params(0.0, 1.0, 1.0);
+        // Engage pointing up (0°).
+        compute_rws(
+            &vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(0.0, 1.0)))],
+            &mut st, &p, 0.01,
+        );
+        // One-frame dropout: no rotation, still engaged.
+        let gap = compute_rws(
+            &vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::ZERO))],
+            &mut st, &p, 0.01,
+        );
+        assert!(st.aux_f32[0] > 0.5, "dropout keeps engagement");
+        assert!(matches!(gap[0], Some(Signal::Vec2(v)) if v.x.abs() < 1e-3), "no yank toward 0° on a dropout");
+        // Recover pointing right → tracks the +90° swing from the held heading
+        // (smoothed pay-out).
+        let right = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        let mut total = 0.0_f32;
+        for _ in 0..20 {
+            if let Some(Signal::Vec2(v)) = compute_rws(&right, &mut st, &p, 0.01)[0] {
+                total += v.x;
+            }
+        }
+        assert!((total - 90.0).abs() < 1.0, "resumes tracking after the gap, got {total}");
+    }
+
+    // Rolling the stick a full turn around the rim accumulates a full 360° of
+    // tracked rotation (no drops, no double-counting through the ±180° wrap).
+    #[test]
+    fn flick_continuous_roll_accumulates_full_turn() {
+        let mut st = NodeState::default();
+        let p = flick_params(0.0, 1.0, 1.0); // no smoothing, scale 1
+        // Engage pointing up (0° flick, no initial jump).
+        compute_rws(
+            &vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(0.0, 1.0)))],
+            &mut st, &p, 0.001,
+        );
+        // Roll clockwise through 24 positions (15° each) = 360°, then hold to let
+        // the smoothed tracking finish paying out.
+        let mut total = 0.0_f32;
+        let push = |stick: glam::Vec2, st: &mut NodeState, total: &mut f32| {
+            let out = compute_rws(
+                &vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(stick))],
+                st, &p, 0.01,
+            );
+            if let Some(Signal::Vec2(v)) = out[0] {
+                *total += v.x;
+            }
+        };
+        for step in 1..=24 {
+            let ang = (step as f32) * 15.0_f32.to_radians(); // heading from up, CW
+            push(glam::Vec2::new(ang.sin(), ang.cos()), &mut st, &mut total); // atan2(x,y)==ang
+        }
+        for _ in 0..30 {
+            push(glam::Vec2::new(0.0, 1.0), &mut st, &mut total); // hold at 360° (up) to drain
+        }
+        assert!((total - 360.0).abs() < 1.0, "full roll should track ~360°, got {total}");
+    }
+
+    // Hysteresis: once engaged, a magnitude dip below the deadzone but above the
+    // release threshold keeps TRACKING (doesn't disengage → re-flick) so a sweep
+    // around the rim rotates smoothly.
+    #[test]
+    fn flick_stays_engaged_through_magnitude_dip() {
+        let mut st = NodeState::default();
+        let p = flick_params(0.0, 1.0, 1.0); // deadzone 0.85 → release ~0.68
+        // Engage at full right (angle +90°).
+        compute_rws(
+            &vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))],
+            &mut st, &p, 0.01,
+        );
+        assert!(st.aux_f32[0] > 0.5, "engaged after crossing the deadzone");
+        // Sweep to point up, magnitude 0.75 (< 0.85 deadzone, > release floor).
+        let dip = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(0.0, 0.75)))];
+        let mut total = 0.0_f32;
+        for _ in 0..20 {
+            if let Some(Signal::Vec2(v)) = compute_rws(&dip, &mut st, &p, 0.01)[0] {
+                total += v.x;
+            }
+        }
+        assert!(st.aux_f32[0] > 0.5, "must stay engaged through a dip above the release threshold");
+        // It TRACKED the −90° swing (right→up), not re-flicked to the new heading (0).
+        assert!((total - (-90.0)).abs() < 1.0, "tracked swing, got {total}");
+    }
+
+    // A smoothed flick pays out its full angle across the smoothing window.
+    #[test]
+    fn flick_smoothing_pays_out_full_angle() {
+        let mut st = NodeState::default();
+        let p = flick_params(100.0, 1.0, 1.0); // 100 ms window
+        let right = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        let mut sum = 0.0_f32;
+        // Hold the stick out; the angle is constant so tracking adds 0 and only
+        // the smoothed flick contributes. 50 × 10 ms far exceeds the window.
+        for _ in 0..50 {
+            if let Some(Signal::Vec2(v)) = compute_rws(&right, &mut st, &p, 0.01)[0] {
+                sum += v.x;
+            }
+        }
+        assert!((sum - 90.0).abs() < 1.0, "smoothed flick summed to {sum}, expected ~90");
+    }
+
+    // ── Flick-stick source suppression (eval_rws_node) ──
+    fn rws_snap(uid: usize, suppress: &str) -> NodeSnap {
+        let mut n = NodeSnap {
+            node_uid: uid,
+            module_id: "processing.rws".to_string(),
+            params: HashMap::new(),
+            n_outputs: 2,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: vec!["mouse".to_string(), "stick".to_string()],
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        };
+        n.params.insert("flick_output".into(), Value::String("both".into()));
+        n.params.insert("suppress_source".into(), Value::String(suppress.into()));
+        n.params.insert("_rws_flick_device".into(), Value::String("dev".into()));
+        n.params.insert("_rws_flick_stick".into(), Value::String("right_stick".into()));
+        n
+    }
+
+    // Full mode blocks the flick stick (and only that stick) at the source.
+    #[test]
+    fn rws_full_suppress_publishes_block() {
+        let snap = rws_snap(21, "full");
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let inputs = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::ZERO))];
+        eval_rws_node(&snap, 21, &inputs, &mut c, &mut state, 0.016);
+        let sk = format!("{SRC_BLOCK_PREFIX}dev");
+        for pin in ["right_stick", "right_stick_x", "right_stick_y"] {
+            assert_eq!(
+                c.get(&(sk.clone(), pin.to_string())).map(|s| s.as_bool()),
+                Some(true), "{pin} must be source-blocked in full mode",
+            );
+        }
+        assert!(c.get(&(sk, "left_stick".to_string())).is_none(), "the other stick is untouched");
+    }
+
+    // Off → nothing published.
+    #[test]
+    fn rws_suppress_off_publishes_nothing() {
+        let snap = rws_snap(22, "off");
+        let mut c: BusMap = BusMap::default();
+        let mut state = HashMap::new();
+        let inputs = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        eval_rws_node(&snap, 22, &inputs, &mut c, &mut state, 0.016);
+        assert!(c.is_empty(), "off mode must publish no source-block");
+    }
+
+    // Deadzone mode blocks only while the stick is past the flick deadzone.
+    #[test]
+    fn rws_deadzone_suppress_gates_on_magnitude() {
+        let snap = rws_snap(23, "deadzone");
+        let sk = format!("{SRC_BLOCK_PREFIX}dev");
+        // Inside the deadzone (0.85) → not blocked, still reaches the game.
+        let mut c1: BusMap = BusMap::default();
+        let mut s1 = HashMap::new();
+        let inside = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(0.1, 0.0)))];
+        eval_rws_node(&snap, 23, &inside, &mut c1, &mut s1, 0.016);
+        assert!(c1.get(&(sk.clone(), "right_stick".to_string())).is_none(), "inside deadzone: not blocked");
+        // Past the deadzone → blocked.
+        let mut c2: BusMap = BusMap::default();
+        let mut s2 = HashMap::new();
+        let past = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+        eval_rws_node(&snap, 23, &past, &mut c2, &mut s2, 0.016);
+        assert_eq!(
+            c2.get(&(sk, "right_stick".to_string())).map(|s| s.as_bool()),
+            Some(true), "past deadzone: blocked",
+        );
+    }
+
+    // The module keeps steering from the flick stick via the pre-block snapshot
+    // even when the resolved input is zeroed (the block is live).
+    #[test]
+    fn rws_reads_flick_from_preblock_snapshot() {
+        let mut snap = rws_snap(24, "full");
+        snap.params.insert("scale".into(), serde_json::json!(1.0));
+        snap.params.insert("flick_smooth_ms".into(), serde_json::json!(0.0));
+        let mut c: BusMap = BusMap::default();
+        let mut state: HashMap<usize, NodeState> = HashMap::new();
+        // Block is active: the resolved Flick input is zeroed, but the snapshot
+        // holds the real stick (pushed full right).
+        let carry = state.entry(MACRO_CARRY_UID).or_default();
+        carry.unblocked_src.insert(("dev".into(), "right_stick_x".into()), Signal::Float(1.0));
+        carry.unblocked_src.insert(("dev".into(), "right_stick_y".into()), Signal::Float(0.0));
+        let inputs = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::ZERO))];
+        let out = eval_rws_node(&snap, 24, &inputs, &mut c, &mut state, 0.016);
+        // Flick engaged from the snapshot (full right ≈ +90° × scale 1) despite the
+        // zeroed resolved input.
+        match out[0] {
+            Some(Signal::Vec2(v)) => assert!(v.x > 45.0, "flick must engage from the snapshot, dx={}", v.x),
+            _ => panic!("expected Vec2 output"),
+        }
+    }
+
+    // Stick-aim alone never mutes the stick for other modules: with suppression
+    // Off the stick stays unblocked however far it is pushed.
+    #[test]
+    fn rws_stick_aim_honours_suppress_off() {
+        let mut snap = rws_snap(25, "off");
+        snap.params.insert("stick_aim_enabled".into(), Value::Bool(true));
+        for v in [glam::Vec2::new(0.3, 0.0), glam::Vec2::new(1.0, 0.0)] {
+            let mut c: BusMap = BusMap::default();
+            let mut state = HashMap::new();
+            let inputs = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(v))];
+            eval_rws_node(&snap, 25, &inputs, &mut c, &mut state, 0.016);
+            assert!(c.is_empty(), "stick-aim with suppression off must not block (stick {v:?})");
+        }
+    }
+
+    // A calibration sweep blocks the stick whatever the suppression mode, so it
+    // can't turn the camera a second time through its default mapping.
+    #[test]
+    fn rws_sweep_blocks_stick_even_with_suppress_off() {
+        let sk = format!("{SRC_BLOCK_PREFIX}dev");
+        for axis in ["yaw", "pitch"] {
+            let mut snap = rws_snap(26, "off");
+            snap.params.insert("flick_output".into(), Value::String("mouse".into()));
+            snap.params.insert("cal_measure".into(), Value::String(axis.into()));
+            let mut c: BusMap = BusMap::default();
+            let mut state = HashMap::new();
+            let inputs = vec![Some(Signal::Vec2(glam::Vec2::ZERO)), Some(Signal::Vec2(glam::Vec2::ZERO))];
+            eval_rws_node(&snap, 26, &inputs, &mut c, &mut state, 0.016);
+            assert_eq!(
+                c.get(&(sk.clone(), "right_stick".to_string())).map(|s| s.as_bool()),
+                Some(true), "{axis} sweep must block the flick stick",
+            );
+        }
+    }
+
+    // The 360° sweep counts the Flick stick circled round its edge on top of the
+    // gyro, and drives the game by it at the base scale; pitch ignores the stick.
+    #[test]
+    fn measure_yaw_counts_a_circled_flick_stick() {
+        let at = |deg: f32| {
+            let r = deg.to_radians();
+            Some(Signal::Vec2(glam::Vec2::new(r.sin(), r.cos())))
+        };
+        let gyro = Some(Signal::Vec2(glam::Vec2::ZERO));
+        let p = params(&[("cal_measure", serde_json::json!("yaw")), ("scale", serde_json::json!(2.0))]);
+        let mut st = NodeState::default();
+        let mut dx = 0.0;
+        let mut out = Vec::new();
+        // Push out (picks the start, turns nothing), then circle a full turn
+        // clockwise in 10° steps, then let the pay-out settle.
+        for i in 0..=36 {
+            for _ in 0..5 {
+                out = compute_rws(&[gyro, at(i as f32 * 10.0)], &mut st, &p, 0.001);
+                if let Some(Signal::Vec2(v)) = out[0] { dx += v.x; }
+            }
+        }
+        for _ in 0..500 {
+            out = compute_rws(&[gyro, at(0.0)], &mut st, &p, 0.001);
+            if let Some(Signal::Vec2(v)) = out[0] { dx += v.x; }
+        }
+        assert!((float_at(&out, DEG) - 360.0).abs() < 0.1, "measured {}", float_at(&out, DEG));
+        assert!((dx - 720.0).abs() < 0.5, "drove {dx} counts, expected 360° × scale 2");
+
+        // The pitch sweep has no stick form.
+        let pitch = params(&[("cal_measure", serde_json::json!("pitch"))]);
+        let mut st = NodeState::default();
+        for i in 0..=36 {
+            out = compute_rws(&[gyro, at(i as f32 * 10.0)], &mut st, &pitch, 0.001);
+        }
+        assert!(float_at(&out, DEG).abs() < 1e-6, "pitch measured {}", float_at(&out, DEG));
+    }
+}
+
+#[cfg(test)]
+mod curve_edit_tests {
+    use super::*;
+
+    // The reported bug: 4 dots, bend on the 3rd→4th segment, remove the 2nd dot.
+    // The bend must stay on the 3rd→4th segment (now segment 1), not slide left.
+    #[test]
+    fn removing_a_dot_keeps_later_bends_on_their_segment() {
+        let mut pts = vec![[0.0, 0.0], [0.2, 0.1], [0.4, 0.3], [1.0, 1.0]];
+        let mut biases = vec![0.0, 0.0, 0.5];
+        curve_remove_point(&mut pts, &mut biases, 1);
+        assert_eq!(pts, vec![[0.0, 0.0], [0.4, 0.3], [1.0, 1.0]]);
+        assert_eq!(biases, vec![0.0, 0.5]);
+    }
+
+    // Only the segments touching the removed dot lose their bend.
+    #[test]
+    fn removing_a_dot_clears_only_its_own_segments() {
+        let pts0 = vec![[0.0, 0.0], [0.25, 0.2], [0.5, 0.5], [0.75, 0.7], [1.0, 1.0]];
+        let b0 = vec![0.1, 0.2, 0.3, 0.4];
+
+        let (mut pts, mut b) = (pts0.clone(), b0.clone());
+        curve_remove_point(&mut pts, &mut b, 2);
+        assert_eq!(b, vec![0.1, 0.0, 0.4]);
+
+        let (mut pts, mut b) = (pts0.clone(), b0.clone());
+        curve_remove_point(&mut pts, &mut b, 0);
+        assert_eq!(b, vec![0.2, 0.3, 0.4]);
+
+        let (mut pts, mut b) = (pts0.clone(), b0.clone());
+        curve_remove_point(&mut pts, &mut b, 4);
+        assert_eq!(b, vec![0.1, 0.2, 0.3]);
+        assert_eq!(pts.len(), 4);
+    }
+
+    // Short (never-edited) bias lists read as zeros and come back one-per-segment.
+    #[test]
+    fn short_bias_list_is_padded() {
+        let mut pts = vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]];
+        let mut b = vec![];
+        curve_remove_point(&mut pts, &mut b, 1);
+        assert_eq!(b, vec![0.0]);
+        curve_insert_point(&mut pts, &mut b, 1, [0.5, 0.2]);
+        assert_eq!(b, vec![0.0, 0.0]);
+    }
+
+    // Adding a dot shifts later bends with their segments; a dot dropped onto a
+    // bent segment splits it without changing the curve's shape.
+    #[test]
+    fn inserting_a_dot_keeps_bends_and_shape() {
+        let mut pts = vec![[0.0, 0.0], [0.4, 0.2], [1.0, 1.0]];
+        let mut b = vec![0.3, -0.6];
+        let before: Vec<f32> = (0..=100).map(|i| sample_curve(&pts, i as f32 / 100.0, &b)).collect();
+
+        let x = 0.1;
+        let y = sample_curve(&pts, x, &b);
+        curve_insert_point(&mut pts, &mut b, 1, [x, y]);
+        assert_eq!(pts.len(), 4);
+        assert_eq!(b.len(), 3);
+        assert_eq!(b[2], -0.6, "untouched later segment keeps its bend");
+        for (i, want) in before.iter().enumerate() {
+            let got = sample_curve(&pts, i as f32 / 100.0, &b);
+            assert!((got - want).abs() < 1e-5, "x={} got {} want {}", i as f32 / 100.0, got, want);
+        }
+    }
+
+    #[test]
+    fn inserting_past_the_ends_adds_straight_segments() {
+        let mut pts = vec![[0.2, 0.2], [0.8, 0.8]];
+        let mut b = vec![0.5];
+        curve_insert_point(&mut pts, &mut b, 0, [0.0, 0.0]);
+        curve_insert_point(&mut pts, &mut b, 3, [1.0, 1.0]);
+        assert_eq!(b, vec![0.0, 0.5, 0.0]);
+    }
+}
+
+#[cfg(test)]
+mod midi_source_tests {
+    use super::*;
+
+    fn midi_source(pins: &[&str]) -> NodeSnap {
+        NodeSnap {
+            node_uid: 1,
+            module_id: "device.source".to_string(),
+            params: HashMap::new(),
+            n_outputs: pins.len(),
+            input_sources: Vec::new(),
+            device_id: Some("midi_in:0".to_string()),
+            output_pin_ids: pins.iter().map(|p| p.to_string()).collect(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    /// MIDI ports only publish pins away from rest. A MIDI In node must still
+    /// read an untouched pin as its rest value — every legacy CC pin read 0.0
+    /// back when the backend emitted all 128 of them each tick.
+    #[test]
+    fn untouched_midi_pins_read_as_rest_on_a_midi_source() {
+        let snap = midi_source(&["cc_7", "pitch_bend", "midi:note:1:60", "midi:cc:2:1", "btn_south"]);
+        let mut dev_sigs = BusMap::default();
+        dev_sigs.insert(("midi_in:0".to_string(), "midi:cc:2:1".to_string()), Signal::Float(0.5));
+        let out = compute_node(&snap, &[], &mut NodeState::default(), &dev_sigs, &BusMap::default(), 0.016);
+        assert_eq!(out, vec![
+            Some(Signal::Float(0.0)),
+            Some(Signal::Float(0.0)),
+            Some(Signal::Bool(false)),
+            Some(Signal::Float(0.5)),
+            None, // not a MIDI pin: no substitute
+        ]);
+    }
+
+    fn node(uid: usize, module_id: &str) -> NodeSnap {
+        let mut n = midi_source(&[]);
+        n.node_uid = uid;
+        n.module_id = module_id.to_string();
+        n.device_id = None;
+        n
+    }
+
+    fn midi_out_sink(uid: usize, src_key: &str, fallback: Option<&str>, thru: bool) -> NodeSnap {
+        let mut n = node(uid, "device.sink");
+        n.params.insert("midi_thru".into(), Value::Bool(thru));
+        n.sink_target = Some(crate::graph::SinkTarget {
+            device_id: "midi_out:0".to_string(),
+            pin_ids: vec!["automap_in".to_string()],
+            multi_sources: vec![Vec::new()],
+            automap_source: Some((src_key.to_string(), vec!["automap_out".to_string()])),
+            automap_fallback_dev: fallback.map(str::to_string),
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        n
+    }
+
+    fn played() -> BusMap {
+        let mut m = BusMap::default();
+        m.insert(("midi_in:0".to_string(), "midi:note:1:60".to_string()), Signal::Bool(true));
+        m.insert(("midi_in:0".to_string(), "midi:cc:1:7".to_string()), Signal::Float(0.5));
+        m.insert(("midi_in:0".to_string(), "cc_7".to_string()), Signal::Float(0.5));
+        m
+    }
+
+    fn midi_sent(out: &TickOutput) -> Vec<String> {
+        let mut v: Vec<String> = out.sink_outputs.keys()
+            .filter(|(d, _)| *d == "midi_out:0")
+            .map(|(_, p)| p.to_string())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// MIDI In wired straight to MIDI Out: with Thru off nothing is sent (on a
+    /// shared port that would be an instant loop); with Thru on the bus's MIDI
+    /// pins go out, but never the legacy aliases.
+    #[test]
+    fn raw_midi_reaches_a_midi_out_only_with_thru() {
+        for (thru, want) in [(false, vec![]), (true, vec!["midi:cc:1:7", "midi:note:1:60"])] {
+            let graph = ProcessingGraph {
+                nodes: vec![midi_source(&["automap_out"]), midi_out_sink(2, "midi_in:0", None, thru)], ..Default::default()
+            };
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(&played()), 0.016, &mut out);
+            assert_eq!(midi_sent(&out), want, "thru={thru}");
+        }
+    }
+
+    /// A MIDI pin wired into a Collector is PRODUCED and goes out with Thru
+    /// off; the raw MIDI the Collector passes through alongside it does not.
+    #[test]
+    fn a_collected_midi_pin_is_sent_but_its_raw_pass_through_is_not() {
+        let src = midi_source(&["automap_out"]);
+        let mut split = node(2, "module.automap_split");
+        split.params.insert("_automap_device_id".into(), Value::String("midi_in:0".into()));
+        split.n_outputs = 2;
+        split.output_pin_ids = vec!["automap_pass".into(), "midi:cc:1:7".into()];
+        split.input_sources = vec![Some((0, 0))];
+        let mut collect = node(3, "module.automap_collect");
+        collect.params.insert("_automap_device_id".into(), Value::String("midi_in:0".into()));
+        collect.params.insert("_collect_pin_ids".into(), serde_json::json!(["midi:cc:2:8"]));
+        collect.input_sources = vec![Some((1, 0)), Some((1, 1))];
+        collect.n_outputs = 1;
+        let sink = midi_out_sink(4, "collector:3", Some("midi_in:0"), false);
+        let graph = ProcessingGraph { nodes: vec![src, split, collect, sink], ..Default::default() };
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(&played()), 0.016, &mut out);
+        assert_eq!(midi_sent(&out), vec!["midi:cc:2:8"]);
+        assert_eq!(
+            out.sink_outputs.get(&("midi_out:0".to_string(), "midi:cc:2:8".to_string())),
+            Some(&Signal::Float(0.5)),
+        );
+    }
+
+    fn pad_sink(uid: usize, src_key: &str) -> NodeSnap {
+        let pins: Vec<String> = automap::ALL_PINS.iter().map(|p| p.id.to_string()).collect();
+        let mut n = node(uid, "device.sink");
+        n.sink_target = Some(crate::graph::SinkTarget {
+            device_id: "virtual.xinput:0".to_string(),
+            multi_sources: vec![Vec::new(); pins.len()],
+            automap_source: Some((src_key.to_string(), pins.clone())),
+            pin_ids: pins,
+            automap_fallback_dev: Some("midi_in:0".to_string()),
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        n
+    }
+
+    fn remapper(uid: usize, mappings: serde_json::Value) -> NodeSnap {
+        let mut n = node(uid, "module.remapper");
+        n.params.insert("_automap_device_id".into(), Value::String("midi_in:0".into()));
+        n.params.insert("mappings".into(), mappings);
+        n.input_sources = vec![Some((0, 0))];
+        n.n_outputs = 1;
+        n
+    }
+
+    /// A MIDI note drives a pad button through the Remapper; the note it
+    /// consumed is published RELEASED on its bus (so a downstream reader can't
+    /// fall back to the raw device and see it still held), while a MIDI pin the
+    /// config never mentions passes through untouched.
+    ///
+    /// The pass-through under test is `remapper_pass_through_and_suppress`,
+    /// which the JSM module calls too — so this pins MIDI on the bus for both.
+    #[test]
+    fn a_midi_note_drives_a_pad_button_and_is_consumed() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                midi_source(&["automap_out"]),
+                remapper(2, serde_json::json!([{ "in": ["midi:note:1:60"], "out": ["btn_south"] }])),
+                pad_sink(3, "remap:2"),
+                midi_out_sink(4, "remap:2", Some("midi_in:0"), true),
+            ], ..Default::default()
+        };
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(&played()), 0.016, &mut out);
+
+        assert_eq!(
+            out.sink_outputs.get(&("virtual.xinput:0".to_string(), "btn_south".to_string())),
+            Some(&Signal::Bool(true)),
+            "the note should press the pad button",
+        );
+        assert_eq!(
+            out.sink_outputs.get(&("midi_out:0".to_string(), "midi:note:1:60".to_string())),
+            Some(&Signal::Bool(false)),
+            "a consumed note must read released downstream, not leak from the raw device",
+        );
+        assert_eq!(
+            out.sink_outputs.get(&("midi_out:0".to_string(), "midi:cc:1:7".to_string())),
+            Some(&Signal::Float(0.5)),
+            "an unmapped MIDI pin passes through",
+        );
+    }
+
+    /// A MIDI knob on an Analog card drives its pad target by the knob's
+    /// VALUE — not full strength the moment it leaves zero — and a bend's lower
+    /// half pushes the other way, so one card maps the whole wheel to an axis.
+    #[test]
+    fn an_analog_card_passes_a_midi_value_through() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                midi_source(&["automap_out"]),
+                remapper(2, serde_json::json!([
+                    { "in": ["midi:cc:1:7"], "out": ["right_trigger"], "mode": "analog" },
+                    { "in": ["midi:pb:1"], "out": ["left_stick_right"], "mode": "analog" },
+                ])),
+                pad_sink(3, "remap:2"),
+            ], ..Default::default()
+        };
+        let mut sigs = HashMap::new();
+        sigs.insert(("midi_in:0".to_string(), "midi:cc:1:7".to_string()), Signal::Float(0.3));
+        sigs.insert(("midi_in:0".to_string(), "midi:pb:1".to_string()), Signal::Float(-0.4));
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.016, &mut out);
+        let f = |pin: &str| out.sink_outputs
+            .get(&("virtual.xinput:0".to_string(), pin.to_string()))
+            .map(|s| s.as_float()).unwrap_or(f32::NAN);
+        assert!((f("right_trigger") - 0.3).abs() < 1e-4, "got {}", f("right_trigger"));
+        let stick = out.sink_outputs.get(&("virtual.xinput:0".to_string(), "left_stick".to_string()));
+        let Some(Signal::Vec2(v)) = stick else { panic!("no stick: {stick:?}") };
+        assert!((v.x + 0.4).abs() < 1e-4, "bend down should push the stick left, got {}", v.x);
+    }
+
+    /// Analog mode needs an analog input: a card of buttons alone can't carry a
+    /// magnitude, while a stick / trigger / MIDI value — alone or chorded with
+    /// buttons — can. The tempo is continuous but is not a 0..1 position.
+    #[test]
+    fn analog_mode_is_allowed_only_with_an_analog_input() {
+        let ok = |card: serde_json::Value| card_allows_analog_mode(&card);
+        assert!(!ok(serde_json::json!({ "in": ["btn_south"] })));
+        assert!(!ok(serde_json::json!({ "in": ["btn_south", "dpad_up"] })));
+        // A note is a gate AND a value (its aftertouch), so it is analog too.
+        assert!(ok(serde_json::json!({ "in": ["midi:note:1:60"] })));
+        assert!(!ok(serde_json::json!({ "in": ["midi:rt:bpm"] })));
+        assert!(!ok(serde_json::json!({})));
+        assert!(ok(serde_json::json!({ "in": ["btn_l1", "left_stick_up"] })));
+        assert!(ok(serde_json::json!({ "in": ["right_trigger"] })));
+        assert!(ok(serde_json::json!({ "in": ["midi:cc:*:74"] })));
+        assert!(ok(serde_json::json!({ "in": ["midi:pb:3"] })));
+        // Map Action's legacy bare pin list.
+        assert!(ok(serde_json::json!(["left_stick_down"])));
+        assert!(!ok(serde_json::json!(["btn_east"])));
+    }
+
+    /// Any-channel input: a mapping on `midi:note:*:60` fires whichever channel
+    /// the note arrives on (the device publishes the `*` twin).
+    #[test]
+    fn an_any_channel_mapping_fires_from_any_channel() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                midi_source(&["automap_out"]),
+                remapper(2, serde_json::json!([{ "in": ["midi:note:*:60"], "out": ["btn_north"] }])),
+                pad_sink(3, "remap:2"),
+            ], ..Default::default()
+        };
+        let north = |sigs: &BusMap| {
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(sigs), 0.016, &mut out);
+            out.sink_outputs
+                .get(&("virtual.xinput:0".to_string(), "btn_north".to_string()))
+                .map(|s| s.as_bool())
+                .unwrap_or(false)
+        };
+        let mut on_ch9 = BusMap::default();
+        on_ch9.insert(("midi_in:0".to_string(), "midi:note:9:60".to_string()), Signal::Bool(true));
+        on_ch9.insert(("midi_in:0".to_string(), "midi:note:*:60".to_string()), Signal::Bool(true));
+        assert!(north(&on_ch9));
+        assert!(!north(&BusMap::default()));
+    }
+
+    const PAD: &str = "gilrs:xinput:0";
+
+    fn pad_source_for_midi(uid: usize) -> NodeSnap {
+        let mut n = node(uid, "device.source");
+        n.device_id = Some(PAD.to_string());
+        // No stick deadzone, so the numbers below are the ones the mapping
+        // sees rather than deadzone-rescaled ones.
+        n.params.insert("deadzone".into(), Value::from(0.0));
+        n
+    }
+
+    fn pad_remapper(uid: usize, mappings: serde_json::Value) -> NodeSnap {
+        let mut n = node(uid, "module.remapper");
+        n.params.insert("_automap_device_id".into(), Value::String(PAD.into()));
+        n.params.insert("mappings".into(), mappings);
+        n.input_sources = vec![Some((0, 0))];
+        n.n_outputs = 1;
+        n
+    }
+
+    fn pad_sigs(pairs: &[(&str, Signal)]) -> BusMap {
+        pairs.iter().map(|(p, s)| ((PAD.to_string(), p.to_string()), *s)).collect()
+    }
+
+    fn midi_out_of(out: &TickOutput, pin: &str) -> Option<Signal> {
+        out.sink_outputs.get(&("midi_out:0".to_string(), pin.to_string())).copied()
+    }
+
+    /// A pad button plays a note, and the note reaches a MIDI Out with Thru
+    /// OFF — proving it was published as PRODUCED, the thing that separates a
+    /// mapping's own MIDI from raw MIDI passing by. Its velocity rides the twin
+    /// pin the device encoder reads, and releasing lifts both.
+    #[test]
+    fn a_pad_button_plays_a_note_with_its_velocity() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                pad_source_for_midi(1),
+                pad_remapper(2, serde_json::json!([
+                    { "in": ["btn_south"], "out": ["midi:note:1:60"], "midi_vel": 64.0 }
+                ])),
+                midi_out_sink(3, "remap:2", Some(PAD), false),
+            ], ..Default::default()
+        };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&pad_sigs(&[("btn_south", Signal::Bool(true))])), 0.016, &mut out);
+        assert_eq!(midi_out_of(&out, "midi:note:1:60"), Some(Signal::Bool(true)));
+        let vel = midi_out_of(&out, "midi:vel:1:60").map(|s| s.as_float()).unwrap_or(0.0);
+        assert!((vel - 64.0 / 127.0).abs() < 1e-6, "velocity {vel}");
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&pad_sigs(&[("btn_south", Signal::Bool(false))])), 0.016, &mut out);
+        assert_eq!(midi_out_of(&out, "midi:note:1:60"), Some(Signal::Bool(false)));
+        assert_eq!(midi_out_of(&out, "midi:vel:1:60"), Some(Signal::Float(0.0)));
+    }
+
+    /// A button on a CC sends the card's on level, and its off level when
+    /// released — so a CC used as a switch doesn't stick at its last value.
+    #[test]
+    fn a_button_on_a_cc_sends_the_cards_levels() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                pad_source_for_midi(1),
+                pad_remapper(2, serde_json::json!([
+                    { "in": ["btn_east"], "out": ["midi:cc:2:74"], "midi_on": 100.0, "midi_off": 20.0 }
+                ])),
+                midi_out_sink(3, "remap:2", Some(PAD), false),
+            ], ..Default::default()
+        };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        let value = |o: &TickOutput| midi_out_of(o, "midi:cc:2:74").map(|s| s.as_float()).unwrap_or(-1.0);
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&pad_sigs(&[("btn_east", Signal::Bool(true))])), 0.016, &mut out);
+        assert!((value(&out) - 100.0 / 127.0).abs() < 1e-6, "on {}", value(&out));
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&pad_sigs(&[("btn_east", Signal::Bool(false))])), 0.016, &mut out);
+        assert!((value(&out) - 20.0 / 127.0).abs() < 1e-6, "off {}", value(&out));
+    }
+
+    /// An analog card sends a live value: a trigger's TRAVEL (not a full-scale
+    /// stand-in the moment it leaves zero), and a stick's two directions bend
+    /// either side of centre.
+    #[test]
+    fn analog_cards_send_travel_and_bend_both_ways() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                pad_source_for_midi(1),
+                pad_remapper(2, serde_json::json!([
+                    { "in": ["left_trigger"], "out": ["midi:cc:1:7"], "mode": "analog" },
+                    { "in": ["left_stick_right"], "out": ["midi:pb:1"], "mode": "analog" },
+                    { "in": ["left_stick_left"], "out": ["midi:pb:1"], "mode": "analog" },
+                ])),
+                midi_out_sink(3, "remap:2", Some(PAD), false),
+            ], ..Default::default()
+        };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&pad_sigs(&[
+            ("left_trigger", Signal::Float(0.5)),
+            ("left_stick_x", Signal::Float(0.8)),
+        ])), 0.016, &mut out);
+        let cc = midi_out_of(&out, "midi:cc:1:7").map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((cc - 0.5).abs() < 1e-3, "a half-pulled trigger should send half scale, got {cc}");
+        let bend = midi_out_of(&out, "midi:pb:1").map(|s| s.as_float()).unwrap_or(0.0);
+        assert!((bend - 0.8).abs() < 1e-3, "stick right bends up, got {bend}");
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&pad_sigs(&[("left_stick_x", Signal::Float(-0.6))])), 0.016, &mut out);
+        let bend = midi_out_of(&out, "midi:pb:1").map(|s| s.as_float()).unwrap_or(0.0);
+        assert!((bend + 0.6).abs() < 1e-3, "stick left bends down, got {bend}");
+
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&pad_sigs(&[])), 0.016, &mut out);
+        let bend = midi_out_of(&out, "midi:pb:1").map(|s| s.as_float()).unwrap_or(9.0);
+        let cc = midi_out_of(&out, "midi:cc:1:7").map(|s| s.as_float()).unwrap_or(9.0);
+        assert!(bend.abs() < 1e-6 && cc.abs() < 1e-6, "released analog cards rest, got {bend} / {cc}");
+    }
+
+    /// A Splitter reading a MIDI pin that isn't playing gets its rest value,
+    /// not "no signal".
+    #[test]
+    fn a_splitter_reads_an_idle_midi_pin_as_rest() {
+        let mut split = node(2, "module.automap_split");
+        split.params.insert("_automap_device_id".into(), Value::String("midi_in:0".into()));
+        split.n_outputs = 3;
+        split.output_pin_ids = vec!["automap_pass".into(), "midi:note:1:61".into(), "midi:pb:1".into()];
+        let out = compute_node(&split, &[], &mut NodeState::default(), &played(), &BusMap::default(), 0.016);
+        assert_eq!(out, vec![None, Some(Signal::Bool(false)), Some(Signal::Float(0.0))]);
+    }
+
+    #[test]
+    fn non_midi_sources_are_not_rest_filled() {
+        let mut snap = midi_source(&["cc_7"]);
+        snap.device_id = Some("gilrs:xinput:0".to_string());
+        let out = compute_node(&snap, &[], &mut NodeState::default(), &BusMap::default(), &BusMap::default(), 0.016);
+        assert_eq!(out, vec![None]);
+    }
+
+    fn note_sigs(vel: f32, pat: Option<f32>, cp: Option<f32>) -> BusMap {
+        let mut m = BusMap::default();
+        let d = "midi_in:0".to_string();
+        m.insert((d.clone(), "midi:note:1:60".to_string()), Signal::Bool(true));
+        m.insert((d.clone(), "midi:vel:1:60".to_string()), Signal::Float(vel));
+        if let Some(v) = pat { m.insert((d.clone(), "midi:pat:1:60".to_string()), Signal::Float(v)); }
+        if let Some(v) = cp { m.insert((d.clone(), "midi:cp:1".to_string()), Signal::Float(v)); }
+        m
+    }
+
+    fn trigger_from(graph: &ProcessingGraph, sigs: &BusMap) -> f32 {
+        let mut out = TickOutput::default();
+        eval_graph_tick(graph, &mut HashMap::new(), &flexinput_core::SigMap::from(sigs), 0.016, &mut out);
+        out.sink_outputs.get(&("virtual.xinput:0".to_string(), "right_trigger".to_string()))
+            .map(|s| s.as_float()).unwrap_or(f32::NAN)
+    }
+
+    /// A note's live value is its poly aftertouch, else its channel's pressure,
+    /// else its velocity — so an Analog card on a note follows whatever the
+    /// keyboard sends while the key is down.
+    #[test]
+    fn a_note_on_an_analog_card_gives_aftertouch_then_pressure_then_velocity() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                midi_source(&["automap_out"]),
+                remapper(2, serde_json::json!([
+                    { "in": ["midi:note:1:60"], "out": ["right_trigger"], "mode": "analog" },
+                ])),
+                pad_sink(3, "remap:2"),
+            ], ..Default::default()
+        };
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(near(trigger_from(&graph, &note_sigs(0.8, None, None)), 0.8), "velocity alone");
+        assert!(near(trigger_from(&graph, &note_sigs(0.8, None, Some(0.3))), 0.3), "channel pressure");
+        assert!(near(trigger_from(&graph, &note_sigs(0.8, Some(0.5), Some(0.3))), 0.5), "aftertouch");
+        let eased = trigger_from(&graph, &note_sigs(0.8, Some(0.0), None));
+        assert!(eased == 0.0 || eased.is_nan(),
+            "aftertouch eased off reads 0 (released), not the velocity — got {eased}");
+    }
+
+    /// A card's threshold on a note is its VELOCITY: soft strikes don't count.
+    #[test]
+    fn a_note_cards_threshold_is_on_velocity() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                midi_source(&["automap_out"]),
+                remapper(2, serde_json::json!([
+                    { "in": ["midi:note:1:60"], "out": ["btn_south"], "threshold": 0.6 },
+                ])),
+                pad_sink(3, "remap:2"),
+            ], ..Default::default()
+        };
+        let south = |sigs: &BusMap| {
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(sigs), 0.016, &mut out);
+            out.sink_outputs.get(&("virtual.xinput:0".to_string(), "btn_south".to_string()))
+                .map(|s| s.as_bool()).unwrap_or(false)
+        };
+        assert!(!south(&note_sigs(0.4, Some(0.9), None)), "a soft strike, however hard it is pressed after");
+        assert!(south(&note_sigs(0.7, Some(0.0), None)), "a hard strike, whatever its aftertouch");
+    }
+
+    /// A note played by a moving source: on at the threshold, velocity = the
+    /// value then, and poly aftertouch following it while it sounds.
+    #[test]
+    fn an_analog_card_plays_a_note_with_velocity_and_aftertouch() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                pad_source_for_midi(1),
+                pad_remapper(2, serde_json::json!([
+                    { "in": ["right_trigger"], "out": ["midi:note:1:60"], "mode": "analog", "threshold": 0.2 },
+                ])),
+                midi_out_sink(4, "remap:2", None, false),
+            ], ..Default::default()
+        };
+        let run = |v: f32| {
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(&pad_sigs(&[("right_trigger", Signal::Float(v))])), 0.016, &mut out);
+            (midi_out_of(&out, "midi:note:1:60"), midi_out_of(&out, "midi:vel:1:60"), midi_out_of(&out, "midi:pat:1:60"))
+        };
+        let (note, _, _) = run(0.1);
+        assert_ne!(note, Some(Signal::Bool(true)), "below the threshold, silent");
+        let (note, vel, pat) = run(0.5);
+        assert_eq!(note, Some(Signal::Bool(true)));
+        assert!((vel.unwrap().as_float() - 0.5).abs() < 1e-4, "{vel:?}");
+        assert!((pat.unwrap().as_float() - 0.5).abs() < 1e-4, "{pat:?}");
+    }
+
+    /// A note playing a note on an Analog card follows the key: on while it is
+    /// down even with its aftertouch eased right off, struck with the source's
+    /// velocity, its aftertouch the source's.
+    #[test]
+    fn a_note_played_by_a_note_follows_the_key() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                midi_source(&["automap_out"]),
+                remapper(2, serde_json::json!([
+                    { "in": ["midi:note:1:60"], "out": ["midi:note:2:72"], "mode": "analog" },
+                ])),
+                midi_out_sink(4, "remap:2", Some("midi_in:0"), false),
+            ], ..Default::default()
+        };
+        let run = |sigs: &BusMap| {
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(sigs), 0.016, &mut out);
+            (midi_out_of(&out, "midi:note:2:72"), midi_out_of(&out, "midi:vel:2:72"), midi_out_of(&out, "midi:pat:2:72"))
+        };
+        let (note, vel, pat) = run(&note_sigs(0.7, Some(0.0), None));
+        assert_eq!(note, Some(Signal::Bool(true)), "key down, aftertouch at 0: still sounding");
+        assert!((vel.unwrap().as_float() - 0.7).abs() < 1e-4, "the source's velocity: {vel:?}");
+        assert_eq!(pat.map(|s| s.as_float()), Some(0.0));
+        let (_, _, pat) = run(&note_sigs(0.7, Some(0.4), None));
+        assert!((pat.unwrap().as_float() - 0.4).abs() < 1e-4);
+    }
+
+    /// Two notes chorded on an Analog card need BOTH keys — only stick
+    /// directions are "any one of them".
+    #[test]
+    fn an_analog_chord_of_two_notes_needs_both() {
+        let graph = ProcessingGraph {
+            nodes: vec![
+                midi_source(&["automap_out"]),
+                remapper(2, serde_json::json!([
+                    { "in": ["midi:note:1:60", "midi:note:1:64"], "out": ["right_trigger"], "mode": "analog" },
+                ])),
+                pad_sink(3, "remap:2"),
+            ], ..Default::default()
+        };
+        let one = note_sigs(0.8, None, None);
+        assert!(trigger_from(&graph, &one) == 0.0 || trigger_from(&graph, &one).is_nan(), "one key isn't the chord");
+        let mut both = one.clone();
+        both.insert(("midi_in:0".to_string(), "midi:note:1:64".to_string()), Signal::Bool(true));
+        both.insert(("midi_in:0".to_string(), "midi:vel:1:64".to_string()), Signal::Float(0.8));
+        assert!(trigger_from(&graph, &both) > 0.5);
+    }
+
+    /// A Combiner fed a MIDI port and a gamepad carries BOTH on: the pad's pins
+    /// and the MIDI pins never compete for a pin, so port order must not decide
+    /// which one gets through — whichever sits on port 0.
+    #[test]
+    fn a_combiner_carries_midi_and_a_pad_whichever_port_comes_first() {
+        for midi_first in [true, false] {
+            let midi = midi_source(&["automap_out"]);
+            let pad = pad_source_for_midi(5);
+            let devs = if midi_first { ["midi_in:0", PAD] } else { [PAD, "midi_in:0"] };
+            let mut comb = node(3, "module.automap_combiner");
+            comb.params.insert("_automap_input_devs".into(), serde_json::json!(devs));
+            comb.params.insert("_automap_input_collectors".into(), serde_json::json!(["", ""]));
+            comb.input_sources = vec![Some((0, 0)), Some((1, 0))];
+            // Downstream, a Remapper resolves to the combiner's bus, with the
+            // first port's device as its raw fallback — as the graph builder
+            // stamps it.
+            let mut remap = node(2, "module.remapper");
+            remap.params.insert("_automap_device_id".into(), Value::String(devs[0].into()));
+            remap.params.insert("_automap_collector_id".into(), Value::String("combiner:3".into()));
+            remap.params.insert("mappings".into(), serde_json::json!([
+                { "in": ["midi:note:1:60"], "out": ["btn_north"] },
+            ]));
+            remap.input_sources = vec![Some((2, 0))];
+            remap.n_outputs = 1;
+            let sink = pad_sink(4, "remap:2");
+            let graph = ProcessingGraph { nodes: vec![midi, pad, comb, remap, sink], ..Default::default() };
+            let mut sigs = pad_sigs(&[("btn_south", Signal::Bool(true))]);
+            sigs.insert(("midi_in:0".to_string(), "midi:note:1:60".to_string()), Signal::Bool(true));
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(&sigs), 0.016, &mut out);
+            let on = |pin: &str| out.sink_outputs
+                .get(&("virtual.xinput:0".to_string(), pin.to_string()))
+                .map(|s| s.as_bool()).unwrap_or(false);
+            assert!(on("btn_north"), "midi first = {midi_first}: the note should press North");
+            assert!(on("btn_south"), "midi first = {midi_first}: the pad's South should pass");
+        }
+    }
+}
+
+/// MIDI outputs from the other mapping modules — Lean, Touch Zones, the Virtual
+/// Menu — go through one publisher, so a card means what it means on a
+/// Remapper; and Map Action can be triggered by MIDI.
+#[cfg(test)]
+mod midi_card_module_tests {
+    use super::*;
+
+    fn node(uid: usize, module_id: &str) -> NodeSnap {
+        NodeSnap {
+            node_uid: uid,
+            module_id: module_id.to_string(),
+            params: HashMap::new(),
+            n_outputs: 0,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    fn get(c: &BusMap, key: &str, pin: &str) -> Option<Signal> {
+        c.get(&(key.to_string(), pin.to_string())).copied()
+    }
+
+    #[test]
+    fn a_lean_card_plays_a_note_at_its_velocity_and_marks_it_produced() {
+        let mut n = node(1, "processing.gyro_3dof");
+        n.params.insert("lean_right".into(), serde_json::json!([
+            { "out": ["midi:note:2:60"], "midi_vel": 64 }
+        ]));
+        let outs = |lean: f32| vec![None, None, None, Some(Signal::Float(lean))];
+        let mut ns = NodeState::default();
+        let mut c = BusMap::default();
+        lean_dispatch_into_collector_sigs(&n, 1, &outs(1.0), &mut ns, &mut c, 0.016);
+        assert_eq!(get(&c, "lean:1", "midi:note:2:60"), Some(Signal::Bool(true)), "{c:?}");
+        assert_eq!(get(&c, "lean:1", "midi:vel:2:60"), Some(Signal::Float(64.0 / 127.0)));
+        assert!(c.contains_key(&("lean:1".to_string(), "__midi_out__:midi:note:2:60".to_string())));
+        c.clear();
+        lean_dispatch_into_collector_sigs(&n, 1, &outs(0.0), &mut ns, &mut c, 0.016);
+        assert_eq!(get(&c, "lean:1", "midi:note:2:60"), Some(Signal::Bool(false)), "upright, it lifts");
+    }
+
+    #[test]
+    fn an_analog_lean_card_sends_how_far_the_pad_leans() {
+        let mut n = node(1, "processing.gyro_3dof");
+        n.params.insert("lean_left".into(), serde_json::json!([
+            { "out": ["midi:cc:1:11"], "mode": "analog" },
+            { "out": ["midi:pb:1"], "mode": "analog" },
+        ]));
+        let outs = |lean: f32| vec![None, None, None, Some(Signal::Float(lean))];
+        let mut ns = NodeState::default();
+        let mut c = BusMap::default();
+        lean_dispatch_into_collector_sigs(&n, 1, &outs(-0.6), &mut ns, &mut c, 0.016);
+        let f = |pin: &str| get(&c, "lean:1", pin).map(|s| s.as_float()).unwrap_or(f32::NAN);
+        assert!((f("midi:cc:1:11") - 0.6).abs() < 1e-4, "{c:?}");
+        assert!((f("midi:pb:1") + 0.6).abs() < 1e-4, "leaning left bends down");
+    }
+
+    #[test]
+    fn a_touch_zone_plays_midi() {
+        let mut n = node(1, "module.touch_zones");
+        n.params.insert("zone_mode".into(), Value::String("mapping".into()));
+        n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+        n.params.insert("col_edges".into(), serde_json::json!([]));
+        n.params.insert("row_edges".into(), serde_json::json!([]));
+        n.params.insert("zone_maps".into(), serde_json::json!([
+            {"f":0,"z":0,"in":["tz_touch"],"out":["midi:cc:1:20"],"midi_on": 100},
+        ]));
+        let finger = |on: bool| {
+            let mut m: BusMap = BusMap::default();
+            m.insert(("pad".into(), "touch1_active".into()), Signal::Bool(on));
+            m.insert(("pad".into(), "touch1_x".into()), Signal::Float(0.0));
+            m.insert(("pad".into(), "touch1_y".into()), Signal::Float(0.0));
+            m
+        };
+        let mut state = HashMap::new();
+        let mut c = BusMap::default();
+        for _ in 0..3 {
+            c.clear();
+            eval_touch_zones_map_node(&n, 1, &finger(true), &mut c, &mut state, 0.016);
+        }
+        assert_eq!(get(&c, "touchmap:1", "midi:cc:1:20"), Some(Signal::Float(100.0 / 127.0)), "{c:?}");
+        assert!(c.contains_key(&("touchmap:1".to_string(), "__midi_out__:midi:cc:1:20".to_string())));
+        for _ in 0..3 {
+            c.clear();
+            eval_touch_zones_map_node(&n, 1, &finger(false), &mut c, &mut state, 0.016);
+        }
+        assert_eq!(get(&c, "touchmap:1", "midi:cc:1:20"), Some(Signal::Float(0.0)), "lifted, the off level");
+    }
+
+    #[test]
+    fn a_midi_note_triggers_a_map_action() {
+        let mut n = node(1, "module.map_action");
+        n.params.insert("_automap_device_id".into(), Value::String("midi_in:0".into()));
+        n.params.insert("mappings".into(), serde_json::json!([{ "in": ["midi:note:1:60"] }]));
+        let mut dev = BusMap::default();
+        dev.insert(("midi_in:0".to_string(), "midi:note:1:60".to_string()), Signal::Bool(true));
+        let out = eval_map_action_node(&n, 1, &dev, &BusMap::default(), &mut HashMap::new(), 0.016);
+        assert_eq!(out.first().copied().flatten(), Some(Signal::Bool(true)), "{out:?}");
+        let out = eval_map_action_node(&n, 1, &BusMap::default(), &BusMap::default(), &mut HashMap::new(), 0.016);
+        assert_ne!(out.first().copied().flatten(), Some(Signal::Bool(true)));
+    }
+
+    // A Map Action row on a trackpad click takes its threshold on the press,
+    // and in the Analog mode its curve shapes the press.
+    #[test]
+    fn a_map_action_row_goes_by_a_clicks_press() {
+        let run = |card: serde_json::Value, press: f32| {
+            let mut n = node(1, "module.map_action");
+            n.params.insert("_automap_device_id".into(), Value::String("pad".into()));
+            n.params.insert("mappings".into(), serde_json::json!([card]));
+            let mut dev = BusMap::default();
+            dev.insert(("pad".to_string(), "btn_touchpad".to_string()), Signal::Bool(false));
+            dev.insert(("pad".to_string(), "touch1_pressure".to_string()), Signal::Float(press));
+            eval_map_action_node(&n, 1, &dev, &BusMap::default(), &mut HashMap::new(), 0.016)
+        };
+        let gate = serde_json::json!({ "in": ["btn_touchpad"], "threshold": 0.5 });
+        assert_eq!(run(gate.clone(), 0.4).first().copied().flatten(), Some(Signal::Bool(false)));
+        assert_eq!(run(gate, 0.6).first().copied().flatten(), Some(Signal::Bool(true)), "no click needed");
+        let analog = serde_json::json!({ "in": ["btn_touchpad"], "mode": "analog", "curve": [[0.0, 0.0], [1.0, 0.5]] });
+        let v = run(analog, 0.8).get(1).copied().flatten().map(|s| s.as_float()).unwrap_or(-1.0);
+        assert!((v - 0.4).abs() < 1e-3, "the press through the curve: {v}");
+    }
+}
+
+#[cfg(test)]
+mod automap_curve_tests {
+    use super::*;
+    use crate::graph::SinkTarget;
+
+    const PAD: &str = "sdl:dualsense:0";
+    const VIRT: &str = "virtual.xinput:0";
+    /// Halves its input: a straight line from (0,0) to (1,0.5).
+    const HALF: [[f64; 2]; 2] = [[0.0, 0.0], [1.0, 0.5]];
+
+    fn canonical_pins() -> Vec<String> {
+        automap::ALL_PINS.iter().map(|p| p.id.to_string()).collect()
+    }
+
+    fn node(uid: usize, module_id: &str) -> NodeSnap {
+        NodeSnap {
+            node_uid: uid,
+            module_id: module_id.to_string(),
+            params: HashMap::new(),
+            n_outputs: 0,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    /// An AutoMap curve straight off the pad, reshaping `pin` with `HALF`.
+    fn curve(uid: usize, module_id: &str, pin: &str) -> NodeSnap {
+        let mut n = node(uid, module_id);
+        n.params.insert("_automap_device_id".into(), Value::String(PAD.into()));
+        n.params.insert(AUTOMAP_CURVE_PIN_PARAM.into(), Value::String(pin.into()));
+        n.params.insert("points".into(), serde_json::json!(HALF));
+        n.params.insert("biases".into(), serde_json::json!([0.0]));
+        n.n_outputs = 1;
+        n
+    }
+
+    fn sink(uid: usize, src: &str) -> NodeSnap {
+        let mut n = node(uid, "device.sink");
+        n.sink_target = Some(SinkTarget {
+            device_id: VIRT.to_string(),
+            pin_ids: canonical_pins(),
+            multi_sources: vec![Vec::new(); canonical_pins().len()],
+            automap_source: Some((src.to_string(), canonical_pins())),
+            automap_fallback_dev: Some(PAD.to_string()),
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        n
+    }
+
+    fn pad(lt: f32, stick: Vec2) -> BusMap {
+        let mut m = BusMap::default();
+        let mut put = |pin: &str, s: Signal| { m.insert((PAD.to_string(), pin.to_string()), s); };
+        put("left_trigger", Signal::Float(lt));
+        put("right_trigger", Signal::Float(0.6));
+        put("left_stick", Signal::Vec2(stick));
+        put("left_stick_x", Signal::Float(stick.x));
+        put("left_stick_y", Signal::Float(stick.y));
+        put("btn_south", Signal::Bool(true));
+        m
+    }
+
+    fn tick(nodes: Vec<NodeSnap>, sigs: &BusMap) -> TickOutput {
+        let graph = ProcessingGraph { nodes, ..Default::default() };
+        let mut state = HashMap::new();
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(sigs), 0.016, &mut out);
+        out
+    }
+
+    fn at_sink(out: &TickOutput, pin: &str) -> Option<Signal> {
+        out.sink_outputs.get(&(VIRT.to_string(), pin.to_string())).copied()
+    }
+
+    fn close(a: Option<Signal>, b: Signal) -> bool {
+        match (a, b) {
+            (Some(Signal::Float(x)), Signal::Float(y)) => (x - y).abs() < 1e-4,
+            (Some(Signal::Vec2(x)), Signal::Vec2(y)) => (x - y).length() < 1e-4,
+            _ => false,
+        }
+    }
+
+    // The picked trigger is curved; the other trigger and a button pass through.
+    #[test]
+    fn reshapes_the_picked_signal_and_passes_the_rest() {
+        let out = tick(
+            vec![curve(5, AUTOMAP_CURVE_ID, "left_trigger"), sink(6, "collector:5")],
+            &pad(0.8, Vec2::ZERO),
+        );
+        assert!(close(at_sink(&out, "left_trigger"), Signal::Float(0.4)), "{:?}", at_sink(&out, "left_trigger"));
+        assert!(close(at_sink(&out, "right_trigger"), Signal::Float(0.6)), "untouched");
+        assert_eq!(at_sink(&out, "btn_south"), Some(Signal::Bool(true)), "untouched");
+        // The body draws its live dot from these.
+        assert_eq!(out.last_inputs.get(&5), Some(&vec![Some(Signal::Float(0.8))]));
+        assert!(close(out.last_outputs.get(&5).and_then(|v| v[0]), Signal::Float(0.4)));
+    }
+
+    // A stick is shaped by its length, keeping its direction.
+    #[test]
+    fn a_stick_is_shaped_by_its_length() {
+        let out = tick(
+            vec![curve(5, AUTOMAP_CURVE_ID, "left_stick"), sink(6, "collector:5")],
+            &pad(0.0, Vec2::new(0.6, 0.8)),
+        );
+        assert!(close(at_sink(&out, "left_stick"), Signal::Vec2(Vec2::new(0.3, 0.4))), "{:?}", at_sink(&out, "left_stick"));
+    }
+
+    // The bus carries a stick twice — as a Vec2 and as two axes — and both
+    // views come out curved, whichever one was picked.
+    #[test]
+    fn a_stick_and_its_axes_stay_in_step() {
+        let key = |pin: &str| ("collector:5".to_string(), pin.to_string());
+        let mut c = BusMap::default();
+        eval_automap_curve_node(&curve(5, AUTOMAP_CURVE_ID, "left_stick"), 5,
+            &pad(0.0, Vec2::new(0.6, 0.8)), &mut c, &mut HashMap::new(), 0.016);
+        assert!(close(c.get(&key("left_stick_x")).copied(), Signal::Float(0.3)));
+        assert!(close(c.get(&key("left_stick_y")).copied(), Signal::Float(0.4)));
+
+        let mut c = BusMap::default();
+        eval_automap_curve_node(&curve(5, AUTOMAP_CURVE_ID, "left_stick_x"), 5,
+            &pad(0.0, Vec2::new(0.6, 0.8)), &mut c, &mut HashMap::new(), 0.016);
+        assert!(close(c.get(&key("left_stick_x")).copied(), Signal::Float(0.3)));
+        assert!(close(c.get(&key("left_stick")).copied(), Signal::Vec2(Vec2::new(0.3, 0.8))));
+    }
+
+    fn imu() -> BusMap {
+        let mut m = pad(0.0, Vec2::ZERO);
+        for (pin, v) in [("gyro_x", 0.2), ("gyro_y", -0.4), ("gyro_z", 0.8),
+                         ("accel_x", 0.1), ("accel_y", 0.3), ("accel_z", -0.5)] {
+            m.insert((PAD.to_string(), pin.to_string()), Signal::Float(v));
+        }
+        m
+    }
+
+    fn bus_value(c: &BusMap, pin: &str) -> Option<Signal> {
+        c.get(&("collector:5".to_string(), pin.to_string())).copied()
+    }
+
+    // Gyro picked whole: each axis is its own channel through the same curve
+    // (sign kept), the accelerometer passes through, and all three channels are
+    // reported for the body's dots.
+    #[test]
+    fn a_gyro_pick_curves_all_three_axes() {
+        for module in [AUTOMAP_CURVE_ID, AUTOMAP_TWOWAY_CURVE_ID] {
+            let mut c = BusMap::default();
+            let (ins, outs) = eval_automap_curve_node(&curve(5, module, "gyro"), 5,
+                &imu(), &mut c, &mut HashMap::new(), 0.016);
+            assert_eq!(ins.len(), 3, "{module}");
+            assert_eq!(outs.len(), 3, "{module}");
+            for (pin, want) in [("gyro_x", 0.1), ("gyro_y", -0.2), ("gyro_z", 0.4)] {
+                assert!(close(bus_value(&c, pin), Signal::Float(want)), "{module} {pin}: {:?}", bus_value(&c, pin));
+            }
+            for (pin, raw) in [("accel_x", 0.1), ("accel_y", 0.3), ("accel_z", -0.5)] {
+                assert!(close(bus_value(&c, pin), Signal::Float(raw)), "{module} {pin} untouched");
+            }
+        }
+    }
+
+    #[test]
+    fn an_accel_pick_leaves_the_gyro_alone() {
+        let mut c = BusMap::default();
+        eval_automap_curve_node(&curve(5, AUTOMAP_CURVE_ID, "accel"), 5,
+            &imu(), &mut c, &mut HashMap::new(), 0.016);
+        assert!(close(bus_value(&c, "accel_z"), Signal::Float(-0.25)));
+        assert!(close(bus_value(&c, "gyro_z"), Signal::Float(0.8)), "untouched");
+    }
+
+    // A touch point picked whole: X and Y are two channels through the curve;
+    // the other finger and the touch flag pass through.
+    #[test]
+    fn a_touch_pick_curves_its_x_and_y() {
+        let mut sigs = pad(0.0, Vec2::ZERO);
+        for (pin, v) in [("touch1_x", 0.6), ("touch1_y", -0.8), ("touch2_x", 0.4)] {
+            sigs.insert((PAD.to_string(), pin.to_string()), Signal::Float(v));
+        }
+        sigs.insert((PAD.to_string(), "touch1_active".to_string()), Signal::Bool(true));
+        let mut c = BusMap::default();
+        let (ins, _) = eval_automap_curve_node(&curve(5, AUTOMAP_CURVE_ID, "touch1"), 5,
+            &sigs, &mut c, &mut HashMap::new(), 0.016);
+        assert_eq!(ins.len(), 2);
+        assert!(close(bus_value(&c, "touch1_x"), Signal::Float(0.3)));
+        assert!(close(bus_value(&c, "touch1_y"), Signal::Float(-0.4)));
+        assert!(close(bus_value(&c, "touch2_x"), Signal::Float(0.4)), "the other finger is untouched");
+        assert_eq!(bus_value(&c, "touch1_active"), Some(Signal::Bool(true)));
+    }
+
+    // Until a signal is picked the node is a plain pass-through.
+    #[test]
+    fn nothing_picked_passes_everything_through() {
+        let mut n = curve(5, AUTOMAP_CURVE_ID, "");
+        n.params.remove(AUTOMAP_CURVE_PIN_PARAM);
+        let out = tick(vec![n, sink(6, "collector:5")], &pad(0.8, Vec2::ZERO));
+        assert!(close(at_sink(&out, "left_trigger"), Signal::Float(0.8)));
+        assert_eq!(out.last_inputs.get(&5), Some(&vec![None]));
+    }
+
+    // The two-way curve runs its rising lane on a fresh push, in Vec mode for a
+    // stick — decided by the stick itself, not by stored params, which keep
+    // whatever the curve had when it shaped a trigger.
+    #[test]
+    fn two_way_curve_on_a_stick() {
+        let mut n = curve(5, AUTOMAP_TWOWAY_CURVE_ID, "left_stick");
+        n.params.insert("vec_mode".into(), Value::Bool(false));
+        n.params.insert("absolute".into(), Value::Bool(false));
+        let out = tick(vec![n, sink(6, "collector:5")], &pad(0.0, Vec2::new(0.6, 0.8)));
+        assert!(close(at_sink(&out, "left_stick"), Signal::Vec2(Vec2::new(0.3, 0.4))), "{:?}", at_sink(&out, "left_stick"));
+        assert!(close(at_sink(&out, "left_trigger"), Signal::Float(0.0)), "untouched");
+    }
+}
+
+mod area_mapper_tests {
+    use super::*;
+    use crate::graph::SinkTarget;
+    use flexinput_core::area::{AreaLayout, BorderRef, DigitalMode, Gradient, Phase};
+    use serde_json::json;
+
+    #[test]
+    fn a_border_counts_as_crossed_once_the_point_has_settled_past_it() {
+        let mut st = [0.0; 3];
+        let dt = 0.004;
+        assert_eq!(area_border_crossed(Some(1), &mut st, dt), None, "landing isn't crossing");
+        assert_eq!(area_border_crossed(Some(1), &mut st, dt), None);
+        for _ in 0..2 {
+            assert_eq!(area_border_crossed(Some(2), &mut st, dt), None, "not settled yet");
+        }
+        assert_eq!(area_border_crossed(Some(2), &mut st, dt), Some((1, 2)));
+        assert_eq!(area_border_crossed(Some(2), &mut st, dt), None, "once");
+        // Jitter on the border never settles.
+        for _ in 0..10 {
+            assert_eq!(area_border_crossed(Some(3), &mut st, dt), None);
+            assert_eq!(area_border_crossed(Some(2), &mut st, dt), None);
+        }
+        // Lifting forgets the cell, so landing elsewhere crosses nothing.
+        assert_eq!(area_border_crossed(None, &mut st, dt), None);
+        for _ in 0..5 {
+            assert_eq!(area_border_crossed(Some(7), &mut st, dt), None);
+        }
+    }
+
+    /// Behind a Combiner, a touchpad's crossing reaches the pad being touched, and
+    /// stays there through a lift mid-pulse; the bus comes from the Combiner's key.
+    #[test]
+    fn a_haptic_behind_a_combiner_goes_to_the_pad_touched() {
+        const OTHER: &str = "sdl:xinput:1";
+        const STEAM: &str = "sdl:generic:steam";
+        let layout = AreaLayout::circle_ways(8);
+        let unit = |deg: f32| (dir(deg, 0.9).x, -dir(deg, 0.9).y);
+        let to = layout.locate_id(dir(90.0, 0.9).x, dir(90.0, 0.9).y);
+        let mut n = mapper(json!([]));
+        n.params.insert("_automap_device_id".into(), json!(OTHER));
+        n.params.insert("_automap_collector_id".into(), json!("combiner:9"));
+        n.params.insert("_upstream_device_ids".into(), json!([OTHER, STEAM]));
+        n.params.insert(AREA_INPUT_PARAM.into(), json!("touch2"));
+        n.params.insert(AREA_CELL_HAPTICS_PARAM.into(), json!({ to.to_string(): 1.0 }));
+
+        let mut state = HashMap::new();
+        let mut hits = Vec::new();
+        let frames = [(Some(0.0), 30), (Some(90.0), 25), (None, 60)];
+        for (deg, ticks) in frames {
+            for _ in 0..ticks {
+                let mut dev = BusMap::default();
+                dev.insert((OTHER.to_string(), "touch2_active".to_string()), Signal::Bool(false));
+                dev.insert((STEAM.to_string(), "touch2_active".to_string()), Signal::Bool(deg.is_some()));
+                let mut c = BusMap::default();
+                c.set_pin(&"combiner:9", &"touch2_active", Signal::Bool(deg.is_some()));
+                if let Some(d) = deg {
+                    let (x, y) = unit(d);
+                    c.set_pin(&"combiner:9", &"touch2_x", Signal::Float(x));
+                    c.set_pin(&"combiner:9", &"touch2_y", Signal::Float(y));
+                }
+                eval_area_mapper_node(&n, 5, &dev, &mut c, &mut state, DT);
+                for pad in [OTHER, STEAM] {
+                    if c.get_pin(&format!("{FEEDBACK_INJECT}{pad}"), &"tp_r_click").is_some() {
+                        hits.push(pad);
+                    }
+                }
+            }
+        }
+        assert!((35..=45).contains(&hits.len()), "one pulse, {} ticks", hits.len());
+        assert!(hits.iter().all(|p| *p == STEAM), "{hits:?}");
+    }
+
+    /// A cell's saved haptic reads back, tone or none, and what 0.16.6 saved still
+    /// reads as a click at that strength.
+    #[test]
+    fn a_cells_haptic_keeps_its_tone_and_reads_the_old_form() {
+        assert_eq!(CellHaptic::from_value(&json!(0.5)), Some(CellHaptic { strength: 0.5, tone: None }));
+        let toned = CellHaptic { strength: 0.25, tone: Some(CellTone { hz: 300.0, ms: 40.0, soft: 0.5 }) };
+        assert_eq!(CellHaptic::from_value(&toned.to_value()), Some(toned));
+        let plain = CellHaptic { strength: 0.25, tone: None };
+        assert_eq!(CellHaptic::from_value(&plain.to_value()), Some(plain));
+        assert_eq!(CellHaptic::from_value(&json!("nonsense")), None);
+    }
+
+    /// A cell with a tone sends its shape along with the click's pulse, and one
+    /// without sends none.
+    #[test]
+    fn a_crossing_carries_the_cells_tone() {
+        let layout = AreaLayout::circle_ways(8);
+        let (to, other) = (
+            layout.locate_id(dir(90.0, 0.9).x, dir(90.0, 0.9).y),
+            layout.locate_id(dir(270.0, 0.9).x, dir(270.0, 0.9).y),
+        );
+        let toned = CellHaptic { strength: 0.5, tone: Some(CellTone { hz: 300.0, ms: 40.0, soft: 0.5 }) };
+        let plain = CellHaptic { strength: 0.5, tone: None };
+        let mut n = mapper(json!([]));
+        n.params.insert(AREA_CELL_HAPTICS_PARAM.into(), json!({
+            to.to_string(): toned.to_value(), other.to_string(): plain.to_value(),
+        }));
+        let key = format!("{FEEDBACK_CLICK_TONE}{PAD}");
+        let mut state = HashMap::new();
+        for _ in 0..30 { run(&n, &stick(dir(0.0, 0.9)), &mut state); }
+
+        let mut seen = None;
+        for _ in 0..30 {
+            let (c, _) = run(&n, &stick(dir(90.0, 0.9)), &mut state);
+            if let Some(hz) = c.get_pin(&key, &"grip_l_click_hz") {
+                seen = Some((hz.as_float(), c.get_pin(&key, &"grip_l_click_soft").map(|s| s.as_float())));
+            }
+        }
+        assert_eq!(seen, Some((300.0, Some(0.5))));
+
+        for _ in 0..60 { run(&n, &stick(dir(0.0, 0.9)), &mut state); }
+        for _ in 0..60 {
+            let (c, _) = run(&n, &stick(dir(270.0, 0.9)), &mut state);
+            assert!(c.get_pin(&key, &"grip_l_click_hz").is_none(), "no tone of its own");
+        }
+    }
+
+    /// Crossing into a cell with a haptic pulses the pad's pin at its strength, for
+    /// the pulse's length; a crossing between cells without one stays quiet.
+    #[test]
+    fn crossing_into_a_haptic_cell_pulses_the_pad() {
+        let layout = AreaLayout::circle_ways(8);
+        let (a, b, c) = (
+            layout.locate_id(dir(0.0, 0.9).x, dir(0.0, 0.9).y),
+            layout.locate_id(dir(45.0, 0.9).x, dir(45.0, 0.9).y),
+            layout.locate_id(dir(90.0, 0.9).x, dir(90.0, 0.9).y),
+        );
+        let mut n = mapper(json!([]));
+        n.params.insert(AREA_CELL_HAPTICS_PARAM.into(), json!({ c.to_string(): 0.5 }));
+        let key = (format!("{FEEDBACK_INJECT}{PAD}"), "grip_l_click".to_string());
+        let mut state = HashMap::new();
+        let settle = 20; // ticks at DT, past the settling time
+        let tick = |v: Vec2, state: &mut _| run(&n, &stick(v), state).0;
+        let quiet = |v: Vec2, state: &mut _, what: &str| {
+            for _ in 0..settle {
+                assert!(!tick(v, state).contains_key(&key), "{what}");
+            }
+        };
+        quiet(dir(0.0, 0.9), &mut state, "at rest in the first cell");
+        assert_ne!(a, b);
+        quiet(dir(45.0, 0.9), &mut state, "neither cell has one");
+        let mut pulsed = 0;
+        let mut level = 0.0;
+        for _ in 0..200 {
+            if let Some(s) = tick(dir(90.0, 0.9), &mut state).get(&key) {
+                pulsed += 1;
+                level = s.as_float();
+            }
+        }
+        assert_eq!(level, 0.5);
+        assert!((35..=45).contains(&pulsed), "about the pulse's length: {pulsed} ticks");
+    }
+
+    const PAD: &str = "sdl:dualsense:0";
+    const VIRT: &str = "virtual.xinput:0";
+    const DT: f32 = 0.001;
+
+    fn mapper(cards: Value) -> NodeSnap {
+        let mut params = HashMap::new();
+        params.insert("_automap_device_id".to_string(), json!(PAD));
+        params.insert("zone_maps".to_string(), cards);
+        // These tests were written against the 8-way ring.
+        params.insert(AREA_LAYOUT_PARAM.to_string(), AreaLayout::circle_ways(8).to_value());
+        NodeSnap {
+            node_uid: 5,
+            module_id: AREA_MAPPER_ID.to_string(),
+            params,
+            n_outputs: 1,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    fn with_layout(mut n: NodeSnap, l: &AreaLayout) -> NodeSnap {
+        n.params.insert(AREA_LAYOUT_PARAM.into(), l.to_value());
+        n
+    }
+
+    fn stick(v: Vec2) -> BusMap {
+        let mut m = BusMap::default();
+        let mut put = |pin: &str, s: Signal| { m.insert((PAD.to_string(), pin.to_string()), s); };
+        put("left_stick", Signal::Vec2(v));
+        put("left_stick_x", Signal::Float(v.x));
+        put("left_stick_y", Signal::Float(v.y));
+        put("btn_south", Signal::Bool(true));
+        m
+    }
+
+    fn dir(deg: f32, r: f32) -> Vec2 {
+        let a = deg.to_radians();
+        Vec2::new(a.sin() * r, a.cos() * r)
+    }
+
+    /// One tick; returns the published bus and the live mirror.
+    fn run(
+        n: &NodeSnap,
+        sigs: &BusMap,
+        state: &mut HashMap<usize, NodeState>,
+    ) -> (BusMap, Vec<Option<Signal>>) {
+        let mut c = BusMap::default();
+        let out = eval_area_mapper_node(n, 5, sigs, &mut c, state, DT);
+        (c, out)
+    }
+
+    fn bus(c: &BusMap, pin: &str) -> Option<Signal> {
+        c.get(&("collector:5".to_string(), pin.to_string())).copied()
+    }
+
+    fn on(c: &BusMap, pin: &str) -> bool {
+        bus(c, pin).is_some_and(|s| s.as_bool())
+    }
+
+    /// Up (cell 1) → W, up-right (cell 2) → W + D, right (cell 3) → D.
+    fn wasd() -> Value {
+        json!([
+            { "z": 1, "in": ["area_in"], "out": ["key_w"] },
+            { "z": 2, "in": ["area_in"], "out": ["key_w", "key_d"] },
+            { "z": 3, "in": ["area_in"], "out": ["key_d"] },
+        ])
+    }
+
+    #[test]
+    fn the_cell_under_the_stick_drives_its_cards_and_the_stick_is_consumed() {
+        let n = mapper(wasd());
+        let mut st = HashMap::new();
+        let (c, _) = run(&n, &stick(dir(0.0, 0.9)), &mut st);
+        assert!(on(&c, "key_w") && !on(&c, "key_d"));
+        assert_eq!(bus(&c, "left_stick"), Some(Signal::Vec2(Vec2::ZERO)), "consumed");
+        assert_eq!(bus(&c, "left_stick_up"), Some(Signal::Bool(false)), "no cardinal leaks");
+        assert_eq!(bus(&c, "btn_south"), Some(Signal::Bool(true)), "everything else passes");
+
+        let (c, _) = run(&n, &stick(dir(45.0, 0.9)), &mut st);
+        assert!(on(&c, "key_w") && on(&c, "key_d"), "the diagonal holds both");
+
+        // Back to the centre (cell 0, unmapped): released, and written off
+        // since the pad never carries the keys.
+        let (c, _) = run(&n, &stick(Vec2::ZERO), &mut st);
+        assert_eq!(bus(&c, "key_w"), Some(Signal::Bool(false)));
+    }
+
+    #[test]
+    fn pass_source_keeps_the_stick_on_the_bus() {
+        let mut n = mapper(wasd());
+        n.params.insert(AREA_PASS_SOURCE_PARAM.into(), json!(true));
+        let (c, _) = run(&n, &stick(dir(0.0, 0.9)), &mut HashMap::new());
+        assert_eq!(bus(&c, "left_stick"), Some(Signal::Vec2(dir(0.0, 0.9))));
+        assert!(on(&c, "key_w"));
+    }
+
+    #[test]
+    fn the_mirror_carries_the_point_and_the_cell_weights() {
+        let n = mapper(wasd());
+        let (_, out) = run(&n, &stick(dir(90.0, 0.9)), &mut HashMap::new());
+        assert_eq!(out[0], None, "the AutoMap port");
+        assert!(matches!(out[1], Some(Signal::Vec2(p)) if (p - dir(90.0, 0.9)).length() < 1e-5));
+        assert_eq!(out[2..], [Some(Signal::Vec2(Vec2::new(3.0, 1.0)))]);
+    }
+
+    #[test]
+    fn a_gradient_ring_drives_an_analog_output_by_deflection() {
+        let mut l = AreaLayout::circle_ways(8);
+        l.set_gradient(BorderRef::Edge(0), Some(Gradient::with_width(0.4)), false);
+        // Ring edge 0.3 ± 0.2: up at radius 0.4 is 3/4 of the way out.
+        let n = with_layout(mapper(json!([{ "z": 1, "out": ["right_stick_up"] }])), &l);
+        let (c, _) = run(&n, &stick(dir(0.0, 0.4)), &mut HashMap::new());
+        let y = bus(&c, "right_stick_y").map(|s| s.as_float()).unwrap_or(0.0);
+        assert!((y - 0.75).abs() < 1e-3, "{y}");
+        assert_eq!(bus(&c, "right_stick"), Some(Signal::Vec2(Vec2::new(0.0, y))), "Vec2 kept in step");
+    }
+
+    /// A card by press, on a trackpad that reports one: its analog output
+    /// follows the press, and with a threshold its cell fires only once pressed
+    /// that hard.
+    #[test]
+    fn a_card_by_press_follows_the_trackpads_press() {
+        let mut n = mapper(json!([
+            { "z": 1, "out": ["right_trigger"], "by_press": true },
+            { "z": 1, "out": ["key_w"], "by_press": true, "threshold": 0.5 },
+        ]));
+        n.params.insert(AREA_INPUT_PARAM.into(), json!("touch1"));
+        let touch = |press: f32| {
+            let mut m = BusMap::default();
+            let mut put = |pin: &str, s: Signal| { m.insert((PAD.to_string(), pin.to_string()), s); };
+            // Up, well inside cell 1.
+            put("touch1_active", Signal::Bool(true));
+            put("touch1_x", Signal::Float(0.0));
+            put("touch1_y", Signal::Float(0.9));
+            put("touch1_pressure", Signal::Float(press));
+            m
+        };
+        let mut st = HashMap::new();
+        let (c, _) = run(&n, &touch(0.3), &mut st);
+        let rt = bus(&c, "right_trigger").map(|s| s.as_float()).unwrap_or(0.0);
+        assert!((rt - 0.3).abs() < 1e-3, "{rt}");
+        assert!(!on(&c, "key_w"), "short of its threshold");
+        let (c, _) = run(&n, &touch(0.7), &mut st);
+        assert!(on(&c, "key_w"));
+    }
+
+    /// Two keys across an Alternate PWM gradient take turns: never both on,
+    /// and each on for its weight's share of the time.
+    #[test]
+    fn alternate_pwm_cells_take_turns() {
+        let mut l = AreaLayout::circle_ways(8);
+        let mut g = Gradient::with_width(0.1);
+        g.period_ms = 50.0;
+        // Cut 1 sits at 67.5°, between up-right (2) and right (3).
+        l.set_gradient(BorderRef::Cut { band: 1, cut: 1 }, Some(g), false);
+        let n = with_layout(mapper(json!([
+            { "z": 2, "out": ["key_w"] },
+            { "z": 3, "out": ["key_d"] },
+        ])), &l);
+        // A quarter of the band toward right: up-right 0.25, right 0.75.
+        let p = dir(67.5 + 0.025 * 360.0, 0.9);
+        let mut st = HashMap::new();
+        let (mut w_on, mut d_on) = (0, 0);
+        for _ in 0..500 {
+            let (c, _) = run(&n, &stick(p), &mut st);
+            let (w, d) = (on(&c, "key_w"), on(&c, "key_d"));
+            assert!(!(w && d), "alternating cells never overlap");
+            w_on += w as i32;
+            d_on += d as i32;
+        }
+        // 1/4 and 3/4 of the time, within the f32 phase clock's drift.
+        assert!((w_on - 125).abs() <= 8 && (d_on - 375).abs() <= 8, "w {w_on} d {d_on}");
+    }
+
+    #[test]
+    fn independent_pwm_and_threshold_follow_their_border() {
+        let mut l = AreaLayout::circle_ways(8);
+        let mut g = Gradient::with_width(0.1);
+        g.phase = Phase::Independent;
+        g.period_ms = 50.0;
+        l.set_gradient(BorderRef::Cut { band: 1, cut: 1 }, Some(g.clone()), false);
+        let cards = json!([{ "z": 2, "out": ["key_w"] }, { "z": 3, "out": ["key_d"] }]);
+        let n = with_layout(mapper(cards.clone()), &l);
+        let p = dir(67.5 + 0.025 * 360.0, 0.9);
+        let mut st = HashMap::new();
+        let mut both = 0;
+        for _ in 0..500 {
+            let (c, _) = run(&n, &stick(p), &mut st);
+            both += (on(&c, "key_w") && on(&c, "key_d")) as i32;
+        }
+        assert!(both > 0, "independent clocks overlap");
+
+        g.digital = DigitalMode::Threshold;
+        g.threshold = 0.6;
+        l.set_gradient(BorderRef::Cut { band: 1, cut: 1 }, Some(g), false);
+        let n = with_layout(mapper(cards), &l);
+        let (c, _) = run(&n, &stick(p), &mut HashMap::new());
+        assert!(!on(&c, "key_w") && on(&c, "key_d"), "0.25 < 0.6 <= 0.75");
+    }
+
+    #[test]
+    fn enter_and_leave_pulse_once_per_crossing() {
+        let n = mapper(json!([
+            { "z": 1, "in": ["area_enter"], "out": ["key_e"], "window_ms": 20.0 },
+            { "z": 1, "in": ["area_leave"], "out": ["key_q"], "window_ms": 20.0 },
+        ]));
+        let mut st = HashMap::new();
+        let mut entered = 0;
+        for _ in 0..60 {
+            let (c, _) = run(&n, &stick(dir(0.0, 0.9)), &mut st);
+            entered += on(&c, "key_e") as i32;
+            assert!(!on(&c, "key_q"));
+        }
+        assert!((20..=21).contains(&entered), "a 20 ms pulse at 1 ms ticks, got {entered}");
+        let mut left = 0;
+        for _ in 0..60 {
+            let (c, _) = run(&n, &stick(dir(90.0, 0.9)), &mut st);
+            left += on(&c, "key_q") as i32;
+            assert!(!on(&c, "key_e"));
+        }
+        assert!((20..=21).contains(&left), "got {left}");
+    }
+
+    /// A whole-stick or mouse target in a cell gets the point itself, scaled
+    /// by the cell's share.
+    #[test]
+    fn a_cell_can_pass_the_point_on_as_a_stick_or_the_mouse() {
+        let n = mapper(json!([
+            { "z": 3, "out": ["right_stick"] },
+            { "z": 3, "out": ["mouse"] },
+        ]));
+        let p = dir(90.0, 0.8);
+        let (c, _) = run(&n, &stick(p), &mut HashMap::new());
+        assert_eq!(bus(&c, "right_stick"), Some(Signal::Vec2(p)));
+        assert_eq!(bus(&c, "right_stick_right"), Some(Signal::Bool(true)), "cardinals follow");
+        let m = match bus(&c, "mouse") { Some(Signal::Vec2(v)) => v, other => panic!("{other:?}") };
+        assert!((m - p * 0.03).length() < 1e-5, "{m:?}");
+        // Outside the cell: nothing written, the bus's own values stand.
+        let (c, _) = run(&n, &stick(dir(0.0, 0.8)), &mut HashMap::new());
+        assert_eq!(bus(&c, "mouse"), None);
+    }
+
+    #[test]
+    fn a_touchpad_maps_only_while_a_finger_is_down() {
+        let mut n = mapper(json!([
+            { "z": 1, "out": ["key_w"] },
+            { "z": 1, "in": ["area_leave"], "out": ["key_q"] },
+        ]));
+        n.params.insert(AREA_INPUT_PARAM.into(), json!("touch1"));
+        let touch = |active: bool| {
+            let mut m = BusMap::default();
+            // Top middle of the pad: +Y is up on the bus.
+            m.insert((PAD.to_string(), "touch1_x".to_string()), Signal::Float(0.0));
+            m.insert((PAD.to_string(), "touch1_y".to_string()), Signal::Float(0.95));
+            m.insert((PAD.to_string(), "touch1_active".to_string()), Signal::Bool(active));
+            m
+        };
+        let mut st = HashMap::new();
+        let (c, out) = run(&n, &touch(true), &mut st);
+        assert!(on(&c, "key_w"), "finger at the top");
+        assert_eq!(bus(&c, "touch1_active"), Some(Signal::Bool(false)), "consumed");
+        assert!(out[1].is_some());
+        let (c, out) = run(&n, &touch(false), &mut st);
+        assert!(!on(&c, "key_w"));
+        assert!(on(&c, "key_q"), "lifting leaves the cell");
+        assert_eq!(out[1], None, "no point while lifted");
+    }
+
+    #[test]
+    fn a_touch_gated_cell_needs_the_stick_touched() {
+        let mut n = mapper(json!([{ "z": 1, "out": ["key_w"] }]));
+        n.params.insert(AREA_TOUCH_CELLS_PARAM.into(), json!([1]));
+        let mut sigs = stick(dir(0.0, 0.9));
+        let (c, _) = run(&n, &sigs, &mut HashMap::new());
+        assert!(!on(&c, "key_w"), "not touched");
+        sigs.insert((PAD.to_string(), "left_stick_touch".to_string()), Signal::Bool(true));
+        let (c, _) = run(&n, &sigs, &mut HashMap::new());
+        assert!(on(&c, "key_w"));
+    }
+
+    /// A second layer acts on the same point: an outer ring holds Shift
+    /// whichever way the stick points, alongside the direction keys.
+    #[test]
+    fn layers_act_together() {
+        let mut n = mapper(json!([
+            { "z": 1, "out": ["key_w"] },
+            { "f": 1, "z": 1, "out": ["key_shift"] },
+        ]));
+        let ring = AreaLayout::circle_rings(0.8);
+        n.params.insert(AREA_LAYERS_PARAM.into(), json!([
+            { AREA_LAYOUT_PARAM: AreaLayout::circle_ways(8).to_value() },
+            { AREA_LAYOUT_PARAM: ring.to_value() },
+        ]));
+        n.params.insert(AREA_LAYER_LOADED_PARAM.into(), json!(0));
+        let (c, out) = run(&n, &stick(dir(0.0, 0.6)), &mut HashMap::new());
+        assert!(on(&c, "key_w") && !on(&c, "key_shift"), "walking");
+        let (c, _) = run(&n, &stick(dir(0.0, 0.95)), &mut HashMap::new());
+        assert!(on(&c, "key_w") && on(&c, "key_shift"), "running");
+        let (c, _) = run(&n, &stick(dir(200.0, 0.95)), &mut HashMap::new());
+        assert!(!on(&c, "key_w") && on(&c, "key_shift"), "running any way");
+        // The mirror tags each layer's cells.
+        assert!(out[2..].iter().any(|s| matches!(s, Some(Signal::Vec2(v)) if v.x as u32 == 1)));
+        let (_, out) = run(&n, &stick(dir(0.0, 0.95)), &mut HashMap::new());
+        assert!(out[2..].iter().any(|s| matches!(s, Some(Signal::Vec2(v)) if v.x as u32 == AREA_LAYER_STRIDE + 1)));
+    }
+
+    /// The loaded layer is read from the loaded keys, not its stored copy.
+    #[test]
+    fn the_loaded_layer_reads_the_live_keys() {
+        let mut n = mapper(json!([{ "f": 1, "z": 1, "out": ["key_shift"] }]));
+        n.params.insert(AREA_LAYERS_PARAM.into(), json!([
+            { AREA_LAYOUT_PARAM: AreaLayout::circle_ways(8).to_value() },
+            { AREA_LAYOUT_PARAM: AreaLayout::circle_ways(8).to_value() }, // stale
+        ]));
+        n.params.insert(AREA_LAYER_LOADED_PARAM.into(), json!(1));
+        n.params.insert(AREA_LAYOUT_PARAM.into(), AreaLayout::circle_rings(0.5).to_value());
+        let (c, _) = run(&n, &stick(dir(90.0, 0.7)), &mut HashMap::new());
+        assert!(on(&c, "key_shift"), "cell 1 is the outer ring in the live copy");
+    }
+
+    /// With the press mode locked, every card follows the global one.
+    #[test]
+    fn a_locked_press_mode_rules_every_card() {
+        let mut n = mapper(json!([{ "z": 1, "out": ["key_w"], "mode": "down" }]));
+        n.params.insert(AREA_PRESS_LOCK_PARAM.into(), json!(true));
+        n.params.insert(AREA_PRESS_MODE_PARAM.into(), json!("on_press"));
+        n.params.insert(AREA_PRESS_MS_PARAM.into(), json!(20.0));
+        let mut st = HashMap::new();
+        let mut held = 0;
+        for _ in 0..60 {
+            let (c, _) = run(&n, &stick(dir(0.0, 0.9)), &mut st);
+            held += on(&c, "key_w") as i32;
+        }
+        assert!((20..=21).contains(&held), "a 20 ms pulse, not a hold: {held}");
+    }
+
+    /// An analog layer pulses W and D by the stick's axes, ignoring borders.
+    #[test]
+    fn an_analog_layer_pulses_each_axis() {
+        let mut n = mapper(json!([
+            { "z": 1, "out": ["key_w"] },
+            { "z": 3, "out": ["key_d"] },
+        ]));
+        n.params.insert(AREA_LAYOUT_PARAM.into(), AreaLayout::circle_ways(4).to_value());
+        n.params.insert(AREA_LAYER_ANALOG_PARAM.into(), json!(true));
+        n.params.insert(AREA_LAYER_MS_PARAM.into(), json!(50.0));
+        n.params.insert(AREA_LAYER_MIX_PARAM.into(), json!("keys"));
+        n.params.insert(AREA_LAYER_PULSE_PARAM.into(), json!("pwm"));
+        // Up 30° to the right, full deflection: W ≈ 0.87, D = 0.5.
+        let p = dir(30.0, 1.0);
+        let mut st = HashMap::new();
+        let (mut w, mut d) = (0, 0);
+        for _ in 0..1000 {
+            let (c, _) = run(&n, &stick(p), &mut st);
+            w += on(&c, "key_w") as i32;
+            d += on(&c, "key_d") as i32;
+        }
+        assert!((w - 866).abs() <= 25 && (d - 500).abs() <= 25, "w {w} d {d}");
+    }
+
+    /// The lengths of each run of presses (ms at the 1 ms test tick).
+    fn press_runs(states: &[bool]) -> Vec<usize> {
+        let mut runs = Vec::new();
+        let mut cur = 0;
+        for &on in states {
+            if on {
+                cur += 1;
+            } else if cur > 0 {
+                runs.push(cur);
+                cur = 0;
+            }
+        }
+        runs
+    }
+
+    fn analog_mapper(mix: &str, pulse: &str) -> NodeSnap {
+        let mut n = mapper(json!([
+            { "z": 1, "out": ["key_w"] },
+            { "z": 3, "out": ["key_d"] },
+        ]));
+        n.params.insert(AREA_LAYOUT_PARAM.into(), AreaLayout::circle_ways(4).to_value());
+        n.params.insert(AREA_LAYER_ANALOG_PARAM.into(), json!(true));
+        n.params.insert(AREA_LAYER_MIX_PARAM.into(), json!(mix));
+        n.params.insert(AREA_LAYER_PULSE_PARAM.into(), json!(pulse));
+        n.params.insert(AREA_LAYER_HOLD_PARAM.into(), json!(34.0));
+        n.params.insert(AREA_LAYER_FULL_PARAM.into(), json!(1.0));
+        n
+    }
+
+    /// With the game's ramp modelled, the game's own speed (simulated with
+    /// the same ramp) settles at the push — not stop-and-go — and every
+    /// press still lasts the minimum.
+    #[test]
+    fn a_modelled_ramp_holds_the_game_at_the_push() {
+        let mut n = analog_mapper("keys", "smooth");
+        n.params.insert(AREA_LAYER_RAMP_PARAM.into(), json!(300.0));
+        // Straight right, 40 % past the deadzone (0.3).
+        let p = Vec2::new(0.3 + 0.7 * 0.4, 0.0);
+        let mut st = HashMap::new();
+        let (mut v, mut sum, mut lo, mut hi) = (0.0f32, 0.0f32, 1.0f32, 0.0f32);
+        let mut d = Vec::new();
+        for t in 0..6000 {
+            let down = on(&run(&n, &stick(p), &mut st).0, "key_d");
+            d.push(down);
+            v = if down { (v + DT / 0.3).min(1.0) } else { (v - DT / 0.3).max(0.0) };
+            if t >= 1000 {
+                sum += v;
+                lo = lo.min(v);
+                hi = hi.max(v);
+            }
+        }
+        let avg = sum / 5000.0;
+        assert!((avg - 0.4).abs() < 0.03, "game speed {avg}");
+        assert!(lo > 0.2 && hi < 0.6, "the game never stops: {lo}..{hi}");
+        assert!(press_runs(&d[1000..]).iter().all(|r| *r >= 34));
+    }
+
+    /// The full zone and the midpoint shape the push.
+    #[test]
+    fn the_full_zone_and_midpoint_shape_the_push() {
+        let mut n = analog_mapper("keys", "smooth");
+        n.params.insert(AREA_LAYER_FULL_PARAM.into(), json!(0.8));
+        // Past the full radius: D held throughout.
+        let mut st = HashMap::new();
+        for _ in 0..500 {
+            assert!(on(&run(&n, &stick(Vec2::new(0.85, 0.0)), &mut st).0, "key_d"));
+        }
+        // Half at a quarter push: a quarter push holds half the time.
+        n.params.insert(AREA_LAYER_FULL_PARAM.into(), json!(1.0));
+        n.params.insert(AREA_LAYER_MID_PARAM.into(), json!(0.25));
+        let p = Vec2::new(0.3 + 0.7 * 0.25, 0.0);
+        let mut st = HashMap::new();
+        let held = (0..3000).filter(|_| on(&run(&n, &stick(p), &mut st).0, "key_d")).count();
+        assert!((held as f32 / 3000.0 - 0.5).abs() < 0.03, "{held}");
+    }
+
+    /// Smooth pulses: the duty holds, and no press or gap is under the
+    /// minimum — a light push gives short presses far apart, not slivers.
+    #[test]
+    fn smooth_pulses_keep_every_press_long_enough() {
+        let n = analog_mapper("keys", "smooth");
+        // Straight right, 20 % past the deadzone (0.3): D at 0.2.
+        let p = Vec2::new(0.3 + 0.7 * 0.2, 0.0);
+        let mut st = HashMap::new();
+        let d: Vec<bool> = (0..3000).map(|_| on(&run(&n, &stick(p), &mut st).0, "key_d")).collect();
+        let duty = d.iter().filter(|x| **x).count() as f32 / d.len() as f32;
+        assert!((duty - 0.2).abs() < 0.02, "duty {duty}");
+        let runs = press_runs(&d);
+        assert!(runs.len() >= 10 && runs.iter().all(|r| *r >= 34), "{runs:?}");
+        // Letting go releases at once.
+        let (c, _) = run(&n, &stick(Vec2::ZERO), &mut st);
+        assert!(!on(&c, "key_d"));
+    }
+
+    /// By direction, a full push between W and the diagonal never lets go of
+    /// W — it only adds D for its share of the time.
+    #[test]
+    fn a_direction_mix_steers_without_stopping() {
+        let n = analog_mapper("direction", "smooth");
+        let p = dir(30.0, 1.0);
+        let mut st = HashMap::new();
+        let (mut w, mut d) = (Vec::new(), Vec::new());
+        for _ in 0..3000 {
+            let (c, _) = run(&n, &stick(p), &mut st);
+            w.push(on(&c, "key_w"));
+            d.push(on(&c, "key_d"));
+        }
+        assert!(w.iter().all(|x| *x), "W held throughout");
+        let duty = d.iter().filter(|x| **x).count() as f32 / d.len() as f32;
+        assert!((duty - 2.0 / 3.0).abs() < 0.03, "D duty {duty}");
+        assert!(press_runs(&d).iter().all(|r| *r >= 34));
+        // Fixed PWM by direction: the same shares within one period.
+        let mut n = analog_mapper("direction", "pwm");
+        n.params.insert(AREA_LAYER_MS_PARAM.into(), json!(60.0));
+        let mut st = HashMap::new();
+        let mut dd = 0;
+        for _ in 0..3000 {
+            let (c, _) = run(&n, &stick(p), &mut st);
+            assert!(on(&c, "key_w"));
+            dd += on(&c, "key_d") as i32;
+        }
+        assert!((dd - 2000).abs() <= 60, "D {dd}");
+    }
+
+    #[test]
+    fn a_sink_behind_the_mapper_reads_the_mapped_bus() {
+        let pins: Vec<String> = automap::ALL_PINS.iter().map(|p| p.id.to_string()).collect();
+        let mut sink = mapper(json!([]));
+        sink.node_uid = 6;
+        sink.module_id = "device.sink".into();
+        sink.sink_target = Some(SinkTarget {
+            device_id: VIRT.to_string(),
+            pin_ids: pins.clone(),
+            multi_sources: vec![Vec::new(); pins.len()],
+            automap_source: Some(("collector:5".to_string(), pins.clone())),
+            automap_fallback_dev: Some(PAD.to_string()),
+            feedback_sources: Vec::new(),
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        let graph = ProcessingGraph { nodes: vec![mapper(json!([{ "z": 1, "out": ["btn_north"] }])), sink], ..Default::default() };
+        let mut out = TickOutput::default();
+        eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::from(&stick(dir(0.0, 0.9))), DT, &mut out);
+        let at = |pin: &str| out.sink_outputs.get(&(VIRT.to_string(), pin.to_string())).copied();
+        assert_eq!(at("btn_north"), Some(Signal::Bool(true)));
+        assert_eq!(at("left_stick"), Some(Signal::Vec2(Vec2::ZERO)));
+        assert!(out.last_outputs.get(&5).is_some_and(|v| v.len() == 3), "the live mirror");
+    }
+}
+
+#[cfg(test)]
+mod gate_interp_tests {
+    use super::*;
+
+    fn interp() -> HashMap<String, serde_json::Value> {
+        [("interpolate".to_string(), serde_json::Value::Bool(true))].into_iter().collect()
+    }
+
+    fn v2(x: f32, y: f32) -> Option<Signal> { Some(Signal::Vec2(Vec2::new(x, y))) }
+
+    #[test]
+    fn selector_interpolates_vec2_inputs() {
+        let ins = [Some(Signal::Float(0.25)), v2(0.0, 0.0), v2(1.0, -1.0), v2(1.0, 1.0)];
+        // 3 inputs → pos = 0.25 · 2 = 0.5, halfway between in_0 and in_1.
+        assert_eq!(eval_pure("module.selector", 0, &ins, &interp(), 1), v2(0.5, -0.5));
+        let ins = [Some(Signal::Float(0.75)), ins[1], ins[2], ins[3]];
+        assert_eq!(eval_pure("module.selector", 0, &ins, &interp(), 1), v2(1.0, 0.0));
+    }
+
+    #[test]
+    fn selector_vec2_beside_unwired_reads_centred() {
+        let ins = [Some(Signal::Float(0.5)), v2(1.0, 1.0), None];
+        assert_eq!(eval_pure("module.selector", 0, &ins, &interp(), 1), v2(0.5, 0.5));
+    }
+
+    #[test]
+    fn selector_float_interp_unchanged() {
+        let ins = [Some(Signal::Float(0.5)), Some(Signal::Float(0.0)), Some(Signal::Float(1.0))];
+        assert_eq!(eval_pure("module.selector", 0, &ins, &interp(), 1), Some(Signal::Float(0.5)));
+    }
+
+    #[test]
+    fn split_crossfades_vec2_input() {
+        let ins = [Some(Signal::Float(0.25)), v2(1.0, -1.0)];
+        // 2 outputs → pos = 0.25: out_0 gets 75 %, out_1 25 %.
+        assert_eq!(eval_pure("module.split", 0, &ins, &interp(), 2), v2(0.75, -0.75));
+        assert_eq!(eval_pure("module.split", 1, &ins, &interp(), 2), v2(0.25, -0.25));
+    }
+}
+
+#[cfg(test)]
+mod twoway_curve_tests {
+    use super::*;
+    use serde_json::json;
+
+    const DT: f32 = 0.001;
+
+    /// The trigger setup that motivated the tracker: a short pulse at the top of
+    /// a pull (peak at 2 %), nothing across the ~10 % resistance shelf, then a
+    /// shortened ramp; the down lane stays at zero until 84 %.
+    fn pulse_curve(band_pct: f64) -> HashMap<String, Value> {
+        let mut p = HashMap::new();
+        p.insert("points".into(), json!([[0.0, 0.0], [0.02, 1.0], [0.07, 0.0], [0.27, 0.0], [1.0, 1.0]]));
+        p.insert("biases".into(), json!([0.0, 0.0, 0.0, 0.0]));
+        p.insert("points_dn".into(), json!([[0.0, 0.0], [0.84, 0.0], [1.0, 1.0]]));
+        p.insert("biases_dn".into(), json!([0.0, 0.0]));
+        p.insert("hysteresis_pct".into(), json!(band_pct));
+        p.insert("interp_ms".into(), json!(0.0));
+        p
+    }
+
+    fn run(params: &HashMap<String, Value>, state: &mut NodeState, xs: &[f32]) -> Vec<f32> {
+        xs.iter().map(|&x| {
+            match compute_twoway_response_curve(&[Some(Signal::Float(x))], state, params, DT)[0] {
+                Some(Signal::Float(f)) => f,
+                other => panic!("{other:?}"),
+            }
+        }).collect()
+    }
+
+    fn ramp(from: f32, to: f32, steps: usize) -> Vec<f32> {
+        (1..=steps).map(|i| from + (to - from) * i as f32 / steps as f32).collect()
+    }
+
+    /// Jitter of up to ±`amp` around `at` — the trigger's noise.
+    fn jitter(at: f32, amp: f32, n: usize) -> Vec<f32> {
+        (0..n).map(|i| at + amp * [0.0, 1.0, -0.75, 0.5, -1.0, 0.25][i % 6]).collect()
+    }
+
+    #[test]
+    fn a_short_pull_pulses_once_and_the_release_stays_silent() {
+        let p = pulse_curve(1.5);
+        let mut st = NodeState::default();
+        run(&p, &mut st, &[0.0; 20]);
+        let pull = run(&p, &mut st, &ramp(0.0, 0.10, 20));
+        assert!(pull.iter().cloned().fold(0.0, f32::max) > 0.5, "pulse on the pull: {pull:?}");
+        assert!(pull.last().unwrap().abs() < 1e-6, "silent on the shelf");
+        let shelf = run(&p, &mut st, &jitter(0.10, 0.008, 60));
+        assert!(shelf.iter().all(|v| v.abs() < 1e-6), "shelf noise: {shelf:?}");
+        let release = run(&p, &mut st, &ramp(0.10, 0.0, 20));
+        assert!(release.iter().all(|v| v.abs() < 1e-6), "no pulse on release: {release:?}");
+        // Resting noise must stay under the band (1.2 % peak to peak here) —
+        // noise wider than the band at rest re-fires the pulse.
+        let rest = run(&p, &mut st, &jitter(0.006, 0.006, 60));
+        assert!(rest.iter().all(|v| v.abs() < 1e-6), "rest noise below the band: {rest:?}");
+    }
+
+    // Even a release so fast it lands inside the pulse in one sample: the old
+    // detector read the UP curve there on its way to switching.
+    #[test]
+    fn a_release_that_jumps_into_the_pulse_zone_stays_silent() {
+        let p = pulse_curve(1.5);
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.10, 20));
+        let out = run(&p, &mut st, &[0.03, 0.01, 0.0]);
+        assert!(out.iter().all(|v| v.abs() < 1e-6), "{out:?}");
+    }
+
+    // Noise smaller than the band never moves the output, on any slope.
+    #[test]
+    fn noise_inside_the_band_holds_the_output() {
+        let mut p = HashMap::new();
+        p.insert("hysteresis_pct".into(), json!(2.0));
+        p.insert("interp_ms".into(), json!(0.0));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.5, 50));
+        // The held point climbs to the noise's top within the first swing,
+        // then never moves again.
+        let held = run(&p, &mut st, &jitter(0.5, 0.008, 120));
+        assert!(held[2..].iter().all(|v| (v - 0.508).abs() < 1e-6), "{held:?}");
+    }
+
+    // A reversal is caught however slowly it comes: the band is measured from
+    // the held point, not over a time window.
+    #[test]
+    fn a_slow_reversal_still_switches_lanes() {
+        let mut p = HashMap::new();
+        p.insert("points_dn".into(), json!([[0.0, 0.0], [1.0, 0.0]]));
+        p.insert("biases_dn".into(), json!([0.0]));
+        p.insert("hysteresis_pct".into(), json!(1.0));
+        p.insert("interp_ms".into(), json!(0.0));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.5, 50));
+        let fall = run(&p, &mut st, &ramp(0.5, 0.48, 2000));
+        assert!((fall[0] - 0.5).abs() < 1e-6, "held at first");
+        assert!(fall.last().unwrap().abs() < 1e-6, "down lane after 2 % back: {:?}", fall.last());
+    }
+
+    // A lane switch blends from what was emitted, never from the old lane read
+    // at the new input.
+    #[test]
+    fn interp_blends_from_the_emitted_output() {
+        let mut p = pulse_curve(1.5);
+        p.insert("interp_ms".into(), json!(10.0));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.10, 20));
+        let out = run(&p, &mut st, &[0.03, 0.02, 0.01, 0.0]);
+        assert!(out.iter().all(|v| v.abs() < 1e-6), "{out:?}");
+    }
+
+    // A band wider than the pulse's peak: without "Start on Up" a pull from rest
+    // gets nothing until it clears the band (by then past the peak), with it
+    // the pulse fires from the first sample — and the band still guards the
+    // release.
+    #[test]
+    fn start_on_up_skips_the_band_on_a_pull_from_rest() {
+        let mut p = pulse_curve(4.0);
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.10, 0.0, 20));
+        let pull = run(&p, &mut st, &ramp(0.0, 0.10, 20));
+        assert!(pull[..8].iter().all(|v| v.abs() < 1e-6), "held inside the band: {pull:?}");
+        assert!(pull.iter().cloned().fold(0.0, f32::max) < 0.6, "peak missed: {pull:?}");
+
+        p.insert("hyst_start_up".into(), json!(true));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.10, 0.0, 20));
+        let pull = run(&p, &mut st, &ramp(0.0, 0.10, 20));
+        assert!(pull[0] > 0.2, "on the Up curve from the first sample: {pull:?}");
+        assert!(pull.iter().cloned().fold(0.0, f32::max) > 0.9, "full pulse: {pull:?}");
+        let release = run(&p, &mut st, &ramp(0.10, 0.0, 20));
+        assert!(release.iter().all(|v| v.abs() < 1e-6), "release still silent: {release:?}");
+    }
+
+    // Away from rest "Start on Up" changes nothing: a re-press from mid-travel
+    // still has to clear the band.
+    #[test]
+    fn start_on_up_only_applies_at_rest() {
+        let mut p = HashMap::new();
+        p.insert("points_dn".into(), json!([[0.0, 0.0], [1.0, 0.0]]));
+        p.insert("biases_dn".into(), json!([0.0]));
+        p.insert("hysteresis_pct".into(), json!(2.0));
+        p.insert("interp_ms".into(), json!(0.0));
+        p.insert("hyst_start_up".into(), json!(true));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.5, 50));
+        run(&p, &mut st, &ramp(0.5, 0.3, 20));
+        let repress = run(&p, &mut st, &[0.31, 0.315, 0.33]);
+        assert!(repress[..2].iter().all(|v| v.abs() < 1e-6), "inside the band: {repress:?}");
+        assert!((repress[2] - 0.33).abs() < 1e-6, "past it: {repress:?}");
+    }
+
+    // "Down" guards only the release: a press flips to Up at once, while a
+    // release has to clear the band. "Up" is the mirror.
+    #[test]
+    fn hyst_dir_guards_one_movement_only() {
+        let mut p = HashMap::new();
+        p.insert("points_dn".into(), json!([[0.0, 0.0], [1.0, 0.0]]));
+        p.insert("biases_dn".into(), json!([0.0]));
+        p.insert("hysteresis_pct".into(), json!(2.0));
+        p.insert("interp_ms".into(), json!(0.0));
+
+        p.insert("hyst_dir".into(), json!("down"));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.5, 50));
+        let rel = run(&p, &mut st, &[0.49, 0.47]);
+        assert!((rel[0] - 0.5).abs() < 1e-6 && rel[1].abs() < 1e-6, "release guarded: {rel:?}");
+        let press = run(&p, &mut st, &[0.471]);
+        assert!((press[0] - 0.471).abs() < 1e-6, "press instant: {press:?}");
+
+        p.insert("hyst_dir".into(), json!("up"));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.5, 50));
+        let rel = run(&p, &mut st, &[0.499]);
+        assert!(rel[0].abs() < 1e-6, "release instant: {rel:?}");
+        let press = run(&p, &mut st, &[0.51, 0.52]);
+        assert!(press[0].abs() < 1e-6 && (press[1] - 0.52).abs() < 1e-6, "press guarded: {press:?}");
+    }
+
+    // A Hyst graph with no band near rest and a wide one from the shelf on: a
+    // pull from a rest that never quite reaches 0 still catches the whole
+    // pulse, while shelf noise wider than any flat band that small is held.
+    #[test]
+    fn a_hyst_graph_varies_the_band_over_the_input() {
+        let mut p = pulse_curve(0.5);
+        // Y 0.4 = 4 % (the graph's top is TWOWAY_HYST_MAX_PCT = 10 %).
+        p.insert("hyst_points".into(), json!([[0.0, 0.0], [0.04, 0.0], [0.06, 0.4], [1.0, 0.4]]));
+        p.insert("hyst_biases".into(), json!([0.0, 0.0, 0.0]));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.10, 0.006, 20));
+        run(&p, &mut st, &jitter(0.006, 0.002, 30));
+        let pull = run(&p, &mut st, &ramp(0.006, 0.10, 47));
+        assert!(pull.iter().cloned().fold(0.0, f32::max) > 0.95, "full pulse: {pull:?}");
+        let shelf = run(&p, &mut st, &jitter(0.10, 0.015, 60));
+        assert!(shelf.iter().all(|v| v.abs() < 1e-6), "3 % shelf noise held: {shelf:?}");
+        let release = run(&p, &mut st, &ramp(0.10, 0.0, 20));
+        assert!(release.iter().all(|v| v.abs() < 1e-6), "release silent: {release:?}");
+    }
+
+    // One dot is no graph: the flat `hysteresis_pct` band applies.
+    #[test]
+    fn a_single_hyst_dot_defers_to_the_value() {
+        let mut p = pulse_curve(2.0);
+        p.insert("hyst_points".into(), json!([[0.0, 0.9]]));
+        let h = TwowayHyst::from_params(&p, true);
+        assert!((h.band_at(0.5) - 0.02).abs() < 1e-6);
+        assert!((h.band_for(true, 0.5) - 0.02).abs() < 1e-6);
+    }
+
+    /// A pull the way a pad reports it: the input steps every `report_ms`,
+    /// the engine ticks at 1 kHz in between.
+    fn reported(xs: &[f32], report_ms: usize) -> Vec<f32> {
+        xs.iter().flat_map(|&x| std::iter::repeat_n(x, report_ms)).collect()
+    }
+
+    // A 4 ms report rate stepping 1.5 % → 3.5 % straddles the 2 % peak: no
+    // report reads it. Peak hold puts the peak out anyway, for its hold time.
+    #[test]
+    fn peak_hold_catches_a_peak_between_reports() {
+        let mut p = pulse_curve(0.5);
+        p.insert("hyst_start_up".into(), json!(true));
+        let steps = reported(&[0.0, 0.015, 0.035, 0.06, 0.09, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10], 4);
+
+        let mut st = NodeState::default();
+        let out = run(&p, &mut st, &steps);
+        assert!(out.iter().cloned().fold(0.0, f32::max) < 0.8, "no hold, peak lost: {out:?}");
+
+        p.insert("peak_hold_ms".into(), json!(20.0));
+        let mut st = NodeState::default();
+        let out = run(&p, &mut st, &steps);
+        let full = out.iter().filter(|v| (**v - 1.0).abs() < 1e-4).count();
+        assert!((20..=22).contains(&full), "full peak held ~20 ms: {full} ticks, {out:?}");
+        assert!(out.last().unwrap().abs() < 1e-6, "then the shelf's 0");
+    }
+
+    // A release drops a held peak at once.
+    #[test]
+    fn a_release_cancels_peak_hold() {
+        let mut p = pulse_curve(0.5);
+        p.insert("hyst_start_up".into(), json!(true));
+        p.insert("peak_hold_ms".into(), json!(50.0));
+        let mut st = NodeState::default();
+        let out = run(&p, &mut st, &reported(&[0.0, 0.015, 0.035], 4));
+        assert!((out.last().unwrap() - 1.0).abs() < 1e-4, "held: {out:?}");
+        let rel = run(&p, &mut st, &reported(&[0.02, 0.0], 4));
+        assert!(rel.iter().all(|v| v.abs() < 1e-6), "release silent: {rel:?}");
+    }
+
+    // A press from a rest that never got under "Start on Up"'s threshold has to
+    // clear the band — 4 % here, past the 2 % peak. The sweep from the low it
+    // came up from still catches the pulse.
+    #[test]
+    fn peak_hold_catches_the_pulse_on_a_press_that_clears_the_band() {
+        let mut p = pulse_curve(4.0);
+        p.insert("peak_hold_ms".into(), json!(20.0));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &reported(&[0.10, 0.05, 0.006, 0.006, 0.006], 4));
+        let out = run(&p, &mut st, &reported(&[0.006, 0.03, 0.06, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10], 4));
+        let full = out.iter().filter(|v| (**v - 1.0).abs() < 1e-4).count();
+        assert!(full >= 20, "full pulse held: {full} ticks, {out:?}");
+    }
+
+    // The trap the zero-band zone set: a slow release, jittering ±0.4 % at 4 ms
+    // reports through the pulse zone. With a flat band over the jitter it never
+    // flips back to Up, held peaks or not.
+    #[test]
+    fn a_jittery_release_through_the_pulse_zone_never_retriggers() {
+        let mut p = pulse_curve(1.5);
+        p.insert("hyst_start_up".into(), json!(true));
+        p.insert("peak_hold_ms".into(), json!(20.0));
+        let mut st = NodeState::default();
+        run(&p, &mut st, &reported(&(0..=25).map(|i| i as f32 * 0.004).collect::<Vec<_>>(), 4));
+        run(&p, &mut st, &[0.10; 100]);
+        let rel: Vec<f32> = (0..50)
+            .map(|i| (0.10 - i as f32 * 0.002 + [0.0, 0.004, -0.003, 0.002][i % 4]).max(0.0))
+            .collect();
+        let out = run(&p, &mut st, &reported(&rel, 4));
+        assert!(out.iter().all(|v| v.abs() < 1e-6), "{out:?}");
+    }
+
+    // By default peaks are held on the press only: down a sloped Down curve a
+    // release follows it at once; "both" holds there too.
+    #[test]
+    fn peak_hold_is_press_only_by_default() {
+        let mut p = HashMap::new();
+        p.insert("hysteresis_pct".into(), json!(1.0));
+        p.insert("interp_ms".into(), json!(0.0));
+        p.insert("peak_hold_ms".into(), json!(20.0));
+        let release = |p: &HashMap<String, Value>| {
+            let mut st = NodeState::default();
+            run(p, &mut st, &ramp(0.0, 0.8, 80));
+            run(p, &mut st, &reported(&[0.7, 0.6, 0.5], 4))
+        };
+        let out = release(&p);
+        assert!((out.last().unwrap() - 0.5).abs() < 1e-6, "follows the release: {out:?}");
+        p.insert("peak_hold_dir".into(), json!("both"));
+        let out = release(&p);
+        assert!(*out.last().unwrap() > 0.55, "held on the way down: {out:?}");
+    }
+
+    // The UI gets one Vec2(held, lane) per channel after the inputs.
+    #[test]
+    fn live_inputs_carry_the_tracker() {
+        let p = pulse_curve(1.5);
+        let mut st = NodeState::default();
+        run(&p, &mut st, &ramp(0.0, 0.10, 20));
+        run(&p, &mut st, &[0.09]);
+        let live = twoway_live_inputs(&[Some(Signal::Float(0.09))], Some(&st));
+        assert_eq!(live.len(), 2);
+        match live[1] {
+            Some(Signal::Vec2(v)) => { assert!((v.x - 0.10).abs() < 1e-6); assert_eq!(v.y, 1.0); }
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod imu_input_tests {
+    use super::*;
+
+    const PAD: &str = "sdl:dualsense:0";
+    const KEY: &str = "remap:2";
+
+    fn remapper(card: serde_json::Value) -> NodeSnap {
+        let mut params = HashMap::new();
+        params.insert("_automap_device_id".to_string(), Value::String(PAD.into()));
+        params.insert("mappings".to_string(), serde_json::json!([card]));
+        NodeSnap {
+            node_uid: 2,
+            module_id: "module.remapper".to_string(),
+            params,
+            n_outputs: 1,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    /// A pad lying flat, turning at `yaw_dps` (right positive).
+    fn turning(yaw_dps: f32) -> BusMap {
+        let mut m = BusMap::default();
+        for (pin, v) in [
+            ("gyro_x", 0.0), ("gyro_y", 0.0), ("gyro_z", yaw_dps / 2000.0),
+            ("accel_x", 0.0), ("accel_y", 0.0), ("accel_z", 1.0 / 8.0),
+            ("btn_south", 0.0),
+        ] {
+            let sig = if pin == "btn_south" { Signal::Bool(false) } else { Signal::Float(v) };
+            m.insert((PAD.to_string(), pin.to_string()), sig);
+        }
+        m
+    }
+
+    fn run(snap: &NodeSnap, sigs: &BusMap,
+           state: &mut HashMap<usize, NodeState>) -> BusMap {
+        let mut c = BusMap::default();
+        eval_remapper_node(snap, 2, sigs, &mut c, state, 0.004);
+        c
+    }
+
+    fn out(c: &BusMap, pin: &str) -> Option<Signal> {
+        c.get(&(KEY.to_string(), pin.to_string())).copied()
+    }
+
+    // The point of these inputs: a card reading the gyro fires, and the gyro
+    // goes on down the wire untouched — so a gyro-to-mouse after this Remapper
+    // on the same AutoMap port keeps working.
+    #[test]
+    fn an_imu_card_fires_and_the_gyro_passes_through() {
+        let snap = remapper(serde_json::json!({ "in": ["imu_gyro_yaw_right"], "out": ["key_space"] }));
+        let mut state = HashMap::new();
+        // Under half the default 360 °/s: not yet.
+        let c = run(&snap, &turning(120.0), &mut state);
+        assert_eq!(out(&c, "key_space"), Some(Signal::Bool(false)));
+        let c = run(&snap, &turning(270.0), &mut state);
+        assert_eq!(out(&c, "key_space"), Some(Signal::Bool(true)));
+        assert_eq!(out(&c, "gyro_z"), Some(Signal::Float(270.0 / 2000.0)), "the gyro is read, not consumed");
+        assert_eq!(out(&c, "accel_z"), Some(Signal::Float(1.0 / 8.0)));
+        assert!(c.keys().all(|(_, pin)| !pin.starts_with("imu_")), "the derived pins stay in the node");
+        // The other way is the other pin.
+        let c = run(&snap, &turning(-270.0), &mut state);
+        assert_eq!(out(&c, "key_space"), Some(Signal::Bool(false)));
+    }
+
+    // Range and threshold are the card's: 100% at 90 °/s, pressed past 50%.
+    #[test]
+    fn the_card_range_and_threshold_set_the_line() {
+        let snap = remapper(serde_json::json!({
+            "in": ["imu_gyro_yaw_right"], "out": ["key_space"],
+            "imu_range_gyro": 90.0, "threshold": 0.5,
+        }));
+        let mut state = HashMap::new();
+        let c = run(&snap, &turning(30.0), &mut state);
+        assert_eq!(out(&c, "key_space"), Some(Signal::Bool(false)));
+        let c = run(&snap, &turning(60.0), &mut state);
+        assert_eq!(out(&c, "key_space"), Some(Signal::Bool(true)));
+    }
+
+    // A two-sided axis on an Analog card steers both ways.
+    #[test]
+    fn a_two_sided_axis_steers_both_ways() {
+        let snap = remapper(serde_json::json!({
+            "in": ["imu_gyro_yaw"], "out": ["right_stick_right"], "mode": "analog",
+        }));
+        let mut state = HashMap::new();
+        let x = |c: &BusMap| out(c, "right_stick_x").map(|s| s.as_float());
+        let c = run(&snap, &turning(180.0), &mut state);
+        assert!((x(&c).unwrap() - 0.5).abs() < 1e-3, "{:?}", x(&c));
+        let c = run(&snap, &turning(-180.0), &mut state);
+        assert!((x(&c).unwrap() + 0.5).abs() < 1e-3, "{:?}", x(&c));
+    }
+
+    #[test]
+    fn imu_inputs_count_as_analog() {
+        assert!(pin_is_analog_input("imu_tilt_left"));
+        assert!(pin_is_analog_input("imu_accel_fb"));
+        assert!(card_allows_analog_mode(&serde_json::json!({ "in": ["imu_gyro_pitch_up"] })));
+        assert!(!pin_is_analog_input("gyro_x"), "the raw bus pin isn't a card input");
+    }
+}
+
+#[cfg(test)]
+mod stick_direction_output_tests {
+    use super::*;
+
+    const PAD: &str = "sdl:dualsense:0";
+
+    fn remapper(card: serde_json::Value) -> NodeSnap {
+        let mut params = HashMap::new();
+        params.insert("_automap_device_id".to_string(), Value::String(PAD.into()));
+        params.insert("mappings".to_string(), serde_json::json!([card]));
+        NodeSnap {
+            node_uid: 2,
+            module_id: "module.remapper".to_string(),
+            params,
+            n_outputs: 1,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    fn south(down: bool) -> BusMap {
+        let mut m = BusMap::default();
+        m.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(down));
+        for (pin, sig) in [("left_stick_x", Signal::Float(0.0)), ("left_stick_y", Signal::Float(0.0)),
+                           ("left_stick", Signal::Vec2(Vec2::ZERO))] {
+            m.insert((PAD.to_string(), pin.to_string()), sig);
+        }
+        m
+    }
+
+    // A button chosen onto a stick direction pushes that stick, in the
+    // default (Normal) press mode as in Analog.
+    #[test]
+    fn a_button_onto_a_stick_direction_pushes_the_stick() {
+        for mode in [None, Some("analog")] {
+            let mut card = serde_json::json!({ "in": ["btn_south"], "out": ["left_stick_up"] });
+            if let Some(m) = mode { card["mode"] = serde_json::json!(m); }
+            let snap = remapper(card);
+            let mut state = HashMap::new();
+            let mut c = BusMap::default();
+            eval_remapper_node(&snap, 2, &south(true), &mut c, &mut state, 0.004);
+            let y = c.get(&("remap:2".to_string(), "left_stick_y".to_string())).map(|s| s.as_float());
+            let v = c.get(&("remap:2".to_string(), "left_stick".to_string())).copied();
+            assert_eq!(y, Some(1.0), "{mode:?}: axis");
+            assert_eq!(v, Some(Signal::Vec2(Vec2::new(0.0, 1.0))), "{mode:?}: Vec2");
+        }
+    }
+
+    fn stick(v: Vec2) -> BusMap {
+        let mut m = BusMap::default();
+        for (pin, sig) in [("left_stick_x", Signal::Float(v.x)), ("left_stick_y", Signal::Float(v.y)),
+                           ("left_stick", Signal::Vec2(v)),
+                           ("right_stick_x", Signal::Float(0.0)), ("right_stick_y", Signal::Float(0.0)),
+                           ("right_stick", Signal::Vec2(Vec2::ZERO))] {
+            m.insert((PAD.to_string(), pin.to_string()), sig);
+        }
+        m
+    }
+
+    fn at(c: &BusMap, pin: &str) -> Option<Signal> {
+        c.get(&("remap:2".to_string(), pin.to_string())).copied()
+    }
+
+    // "Ctrl, 50 ms, C" off one button: C joins Ctrl 50 ms in, and each lets
+    // go its start after the button does.
+    #[test]
+    fn a_timed_output_plays_its_timeline() {
+        let snap = remapper(serde_json::json!({
+            "in": ["btn_south"], "out": ["key_lctrl", "key_c"], "out_gap": [0, 50],
+        }));
+        let mut state = HashMap::new();
+        let mut step = |down: bool| {
+            let mut c = BusMap::default();
+            eval_remapper_node(&snap, 2, &south(down), &mut c, &mut state, 0.01);
+            let on = |p: &str| c.get(&("remap:2".to_string(), p.to_string())) == Some(&Signal::Bool(true));
+            (on("key_lctrl"), on("key_c"))
+        };
+        assert_eq!(step(true), (true, false));
+        for _ in 1..5 { step(true); }
+        assert_eq!(step(true), (true, true), "50 ms in");
+        for _ in 6..10 { step(true); }
+        assert_eq!(step(false), (false, true), "Ctrl lets go with the button, C 50 ms later");
+        for _ in 11..15 { step(false); }
+        assert_eq!(step(false), (false, false));
+    }
+
+    // A whole stick onto the other whole stick moves it as it is, and the
+    // stick it was taken from goes quiet — axes, Vec2 and directions.
+    #[test]
+    fn a_whole_stick_moves_onto_another_and_leaves_its_own_quiet() {
+        let snap = remapper(serde_json::json!({ "in": ["left_stick"], "out": ["right_stick"], "mode": "analog" }));
+        let mut c = BusMap::default();
+        eval_remapper_node(&snap, 2, &stick(Vec2::new(0.6, -0.3)), &mut c, &mut HashMap::new(), 0.004);
+        assert_eq!(at(&c, "right_stick"), Some(Signal::Vec2(Vec2::new(0.6, -0.3))));
+        assert_eq!(at(&c, "right_stick_x").map(|s| s.as_float()), Some(0.6));
+        assert_eq!(at(&c, "left_stick"), Some(Signal::Vec2(Vec2::ZERO)));
+        assert_eq!(at(&c, "left_stick_x").map(|s| s.as_float()), Some(0.0));
+        assert_eq!(at(&c, "left_stick_y").map(|s| s.as_float()), Some(0.0));
+        assert_eq!(at(&c, "left_stick_right"), Some(Signal::Bool(false)));
+    }
+
+    // A whole stick onto a button: pushed any way past half (no threshold),
+    // or past the card's line.
+    #[test]
+    fn a_whole_stick_presses_a_button_however_it_is_pushed() {
+        let snap = remapper(serde_json::json!({ "in": ["left_stick"], "out": ["btn_east"] }));
+        let mut state = HashMap::new();
+        let east = |v: Vec2, state: &mut HashMap<usize, NodeState>| {
+            let mut c = BusMap::default();
+            eval_remapper_node(&snap, 2, &stick(v), &mut c, state, 0.004);
+            at(&c, "btn_east")
+        };
+        assert_eq!(east(Vec2::new(0.2, 0.2), &mut state), Some(Signal::Bool(false)));
+        assert_eq!(east(Vec2::new(-0.5, -0.5), &mut state), Some(Signal::Bool(true)), "a diagonal counts");
+        assert!(pin_is_analog_input("left_stick"));
+    }
+}
+
+#[cfg(test)]
+mod abs_range_tests {
+    use super::*;
+
+    // Abs reads a magnitude: the ↑ ends set the ranges and the ↓ ends — greyed
+    // out in the UI under Abs — change nothing.
+    #[test]
+    fn abs_curves_ignore_the_lower_ends() {
+        let id = [[0.0, 0.0], [1.0, 1.0]];
+        let a = apply_curve(0.5, &id, &[0.0], true, -1.0, 1.0, -1.0, 1.0, 0.0);
+        let b = apply_curve(0.5, &id, &[0.0], true, -4.0, 1.0, -9.0, 1.0, 0.0);
+        assert!((a - b).abs() < 1e-6, "{a} vs {b}");
+        assert!((apply_curve(-0.25, &id, &[0.0], true, -4.0, 0.5, 0.0, 2.0, 0.0) + 1.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod average_window_tests {
+    use super::*;
+
+    /// Feed `input(t)` for `secs` at `rate`; the last output.
+    fn run(params: &HashMap<String, Value>, rate: f32, secs: f32, input: impl Fn(f32) -> f32) -> f32 {
+        let mut state = NodeState::default();
+        let dt = 1.0 / rate;
+        let mut out = 0.0;
+        for i in 0..(secs * rate).round() as u32 {
+            let inputs = [Some(Signal::Float(input(i as f32 * dt)))];
+            let r = compute_average(&inputs, &mut state, params, dt);
+            out = r[0].unwrap().as_float();
+        }
+        out
+    }
+
+    /// The bug: a window counted in ticks lasted 4x longer at 500 Hz than at
+    /// 2 kHz. A step 5 ms before the end must read the same at every rate.
+    #[test]
+    fn the_window_is_time_whatever_the_sample_rate() {
+        let params = HashMap::from([("window_ms".to_string(), Value::from(20.0))]);
+        let step = |t: f32| if t >= 0.095 { 1.0 } else { 0.0 };
+        for rate in [500.0, 1000.0, 2000.0, 8000.0] {
+            let got = run(&params, rate, 0.1, step);
+            assert!((got - 0.25).abs() < 0.06, "{rate} Hz: {got}");
+        }
+    }
+
+    /// A patch saved with a tick count reads as it did at the rate it was
+    /// authored for: 10 ticks at 2 kHz, 5 ms.
+    #[test]
+    fn a_saved_tick_count_reads_at_the_authored_rate() {
+        let legacy = HashMap::from([("buf_size".to_string(), Value::from(10.0))]);
+        assert_eq!(average_window_ms(&legacy), 5.0);
+        assert_eq!(average_window_ms(&HashMap::new()), 5.0);
+        let both = HashMap::from([
+            ("buf_size".to_string(), Value::from(10.0)),
+            ("window_ms".to_string(), Value::from(40.0)),
+        ]);
+        assert_eq!(average_window_ms(&both), 40.0);
+    }
+
+    /// A window shorter than a tick is that one tick, not an empty average.
+    #[test]
+    fn a_window_under_one_tick_passes_the_input() {
+        let params = HashMap::from([("window_ms".to_string(), Value::from(0.5))]);
+        // Five ticks at 2 ms: the last input is t = 8 ms, unaveraged.
+        assert!((run(&params, 500.0, 0.01, |t| t) - 0.008).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod skip_display_tests {
+    use super::*;
+
+    fn gain_to_sink() -> ProcessingGraph {
+        let node = |uid, module: &str| NodeSnap {
+            node_uid: uid,
+            module_id: module.to_string(),
+            params: HashMap::new(),
+            n_outputs: 1,
+            input_sources: vec![],
+            device_id: None,
+            output_pin_ids: vec![],
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        };
+        let mut scope = node(2, "display.oscilloscope");
+        scope.input_sources = vec![Some((0, 0))];
+        scope.n_outputs = 0;
+        let mut src = node(1, "device.source");
+        src.device_id = Some("pad".into());
+        src.output_pin_ids = vec!["left_trigger".into()];
+        let mut sink = node(3, "device.sink");
+        sink.n_outputs = 0;
+        sink.sink_target = Some(crate::graph::SinkTarget {
+            device_id: "virt".into(),
+            pin_ids: vec!["left_trigger".into()],
+            multi_sources: vec![vec![(0, 0)]],
+            automap_source: None,
+            automap_fallback_dev: None,
+            feedback_sources: vec![],
+            is_self_sink: false,
+            digital_trigger_bridge: false,
+            compiled: Default::default(),
+        });
+        ProcessingGraph { nodes: vec![src, scope, sink], ..Default::default() }
+    }
+
+    /// The UI publishes a new snapshot only when this says it differs.
+    #[test]
+    fn a_graph_compares_by_content_not_by_what_a_tick_worked_out() {
+        let graph = gain_to_sink();
+        let fresh = gain_to_sink();
+        assert!(graph == fresh);
+        // Ticking fills the caches of one and not the other.
+        eval_graph_tick(&graph, &mut HashMap::new(), &flexinput_core::SigMap::default(), 0.001, &mut TickOutput::default());
+        assert!(graph == fresh, "caches don't count");
+
+        let mut param = gain_to_sink();
+        param.nodes[0].params.insert("deadzone".into(), serde_json::json!(0.2));
+        assert!(graph != param, "a parameter does");
+        let mut wire = gain_to_sink();
+        wire.nodes[2].sink_target.as_mut().unwrap().multi_sources = vec![vec![]];
+        assert!(graph != wire, "a wire does");
+        let mut reset = gain_to_sink();
+        reset.nodes[1].aux_f32_override = Some(vec![0.0]);
+        assert!(graph != reset, "a one-shot state reset does");
+    }
+
+    #[test]
+    fn a_skipped_tick_still_drives_the_sinks_and_the_scopes() {
+        let graph = gain_to_sink();
+        let sigs: flexinput_core::SigMap = [(("pad".to_string(), "left_trigger".to_string()), Signal::Float(0.5))]
+            .into_iter().collect();
+        let (mut shown, mut skipped) = (TickOutput::default(), TickOutput::default());
+        skipped.skip_display = true;
+        eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.001, &mut shown);
+        eval_graph_tick(&graph, &mut HashMap::new(), &sigs, 0.001, &mut skipped);
+
+        assert_eq!(flexinput_core::SigMap::from(&skipped.sink_outputs), flexinput_core::SigMap::from(&shown.sink_outputs));
+        assert!(!shown.sink_outputs.is_empty());
+        assert_eq!(skipped.scope_samples, shown.scope_samples);
+        assert!(!shown.scope_samples.is_empty());
+
+        assert!(!shown.last_outputs.is_empty() && !shown.last_inputs.is_empty());
+        assert!(skipped.last_outputs.is_empty(), "{:?}", skipped.last_outputs);
+        assert!(skipped.last_inputs.is_empty());
+        assert!(skipped.outputs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod has_changed_tests {
+    use super::*;
+
+    /// One tick: [changed, increased, decreased].
+    fn tick(ns: &mut NodeState, params: &HashMap<String, Value>, s: Option<Signal>) -> [bool; 3] {
+        let out = compute_has_changed(&[s], ns, params);
+        [0, 1, 2].map(|i| out[i] == Some(Signal::Bool(true)))
+    }
+
+    fn band(pct: f64) -> HashMap<String, Value> {
+        [("hysteresis_pct".to_string(), serde_json::json!(pct))].into_iter().collect()
+    }
+
+    const QUIET: [bool; 3] = [false, false, false];
+    const UP: [bool; 3] = [true, true, false];
+    const DOWN: [bool; 3] = [true, false, true];
+    const MOVED: [bool; 3] = [true, false, false];
+
+    #[test]
+    fn with_no_band_every_change_counts() {
+        let f = |v| Some(Signal::Float(v));
+        for params in [HashMap::new(), band(0.0)] {
+            let mut ns = NodeState::default();
+            assert_eq!(tick(&mut ns, &params, f(0.5)), MOVED, "the first value is a change");
+            assert_eq!(tick(&mut ns, &params, f(0.5)), QUIET);
+            assert_eq!(tick(&mut ns, &params, f(0.5001)), UP);
+            assert_eq!(tick(&mut ns, &params, f(0.5)), DOWN);
+        }
+    }
+
+    #[test]
+    fn noise_inside_the_band_stays_quiet_and_leaving_it_fires_once() {
+        let f = |v| Some(Signal::Float(v));
+        let p = band(5.0); // ±0.05
+        let mut ns = NodeState::default();
+        assert_eq!(tick(&mut ns, &p, f(0.5)), MOVED);
+        for noise in [0.53, 0.47, 0.549, 0.451, 0.5] {
+            assert_eq!(tick(&mut ns, &p, f(noise)), QUIET, "{noise}");
+        }
+        assert_eq!(tick(&mut ns, &p, f(0.56)), UP);
+        // The band now sits around what it reacted to, not where it started.
+        assert_eq!(tick(&mut ns, &p, f(0.52)), QUIET);
+        assert_eq!(tick(&mut ns, &p, f(0.50)), DOWN);
+    }
+
+    #[test]
+    fn a_slow_drift_inside_the_band_adds_up() {
+        let p = band(5.0);
+        let mut ns = NodeState::default();
+        tick(&mut ns, &p, Some(Signal::Float(0.0)));
+        let fired: Vec<usize> = (1..=30)
+            .filter(|&i| tick(&mut ns, &p, Some(Signal::Float(i as f32 * 0.02))) == UP)
+            .collect();
+        assert_eq!(fired, [3, 6, 9, 12, 15, 18, 21, 24, 27, 30], "each time it clears the band");
+    }
+
+    #[test]
+    fn a_vector_moves_by_its_distance_in_any_direction() {
+        let v = |x, y| Some(Signal::Vec2(Vec2::new(x, y)));
+        let p = band(5.0);
+        let mut ns = NodeState::default();
+        tick(&mut ns, &p, v(0.5, 0.0));
+        assert_eq!(tick(&mut ns, &p, v(0.53, 0.03)), QUIET);
+        // Round the circle at one length: it moved, but got no longer or shorter.
+        assert_eq!(tick(&mut ns, &p, v(0.0, 0.5)), MOVED);
+    }
+
+    #[test]
+    fn a_band_never_hides_a_bool_a_new_type_or_a_lost_signal() {
+        let p = band(100.0);
+        let mut ns = NodeState::default();
+        let b = |v| Some(Signal::Bool(v));
+        tick(&mut ns, &p, b(false));
+        assert_eq!(tick(&mut ns, &p, b(true)), UP);
+        assert_eq!(tick(&mut ns, &p, b(false)), DOWN);
+        assert_eq!(tick(&mut ns, &p, Some(Signal::Float(0.0)))[0], true, "a new type is a change");
+
+        // Gone and back reads as a first value, as it does with no band.
+        assert_eq!(tick(&mut ns, &p, None), QUIET);
+        assert_eq!(tick(&mut ns, &p, Some(Signal::Float(0.0))), MOVED);
+    }
+}
+
+#[cfg(test)]
+mod sample_hold_tests {
+    use super::*;
+
+    fn bare_node() -> NodeSnap {
+        NodeSnap {
+            node_uid: 1,
+            module_id: "module.sample_hold".to_string(),
+            params: HashMap::new(),
+            n_outputs: 1,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    fn sample_hold(mode: &str) -> NodeSnap {
+        let mut n = bare_node();
+        n.params.insert("mode".to_string(), serde_json::json!(mode));
+        n
+    }
+
+    fn sh_tick(n: &NodeSnap, ns: &mut NodeState, input: Option<Signal>, gate: bool) -> Option<Signal> {
+        let inputs = [input, Some(Signal::Bool(gate))];
+        compute_node(n, &inputs, ns, &BusMap::default(), &BusMap::default(), 0.001)[0]
+    }
+
+    #[test]
+    fn sample_mode_takes_the_input_on_each_rising_edge_only() {
+        let n = sample_hold("sample");
+        let mut ns = NodeState::default();
+        let f = |v| Some(Signal::Float(v));
+
+        assert_eq!(sh_tick(&n, &mut ns, f(0.2), false), f(0.0), "nothing sampled yet");
+        assert_eq!(sh_tick(&n, &mut ns, f(0.3), true), f(0.3), "rising edge samples");
+        assert_eq!(sh_tick(&n, &mut ns, f(0.4), true), f(0.3), "still high: no new sample");
+        assert_eq!(sh_tick(&n, &mut ns, f(0.5), false), f(0.3), "falling edge: no new sample");
+        assert_eq!(sh_tick(&n, &mut ns, f(0.6), true), f(0.6), "next cycle samples again");
+    }
+
+    #[test]
+    fn hold_mode_follows_the_input_and_freezes_while_the_gate_is_high() {
+        let n = sample_hold("hold");
+        let mut ns = NodeState::default();
+        let f = |v| Some(Signal::Float(v));
+
+        assert_eq!(sh_tick(&n, &mut ns, f(0.2), false), f(0.2), "gate low: follows");
+        assert_eq!(sh_tick(&n, &mut ns, f(0.3), true), f(0.3), "frozen where the gate flipped");
+        assert_eq!(sh_tick(&n, &mut ns, f(0.4), true), f(0.3), "stays frozen");
+        assert_eq!(sh_tick(&n, &mut ns, f(0.5), false), f(0.5), "gate low: follows again");
+    }
+
+    #[test]
+    fn sample_hold_keeps_the_type_of_any_signal() {
+        for s in [
+            Signal::Bool(true),
+            Signal::Int(7),
+            Signal::Float(0.5),
+            Signal::Vec2(Vec2::new(0.5, -0.5)),
+            Signal::Vec4(glam::Vec4::new(0.1, 0.2, 0.3, 0.4)),
+        ] {
+            for mode in ["sample", "hold"] {
+                let n = sample_hold(mode);
+                let mut ns = NodeState::default();
+                sh_tick(&n, &mut ns, Some(s), true);
+                assert_eq!(sh_tick(&n, &mut ns, Some(s.zeroed()), true), Some(s), "{mode}");
+            }
+            let mut ns = NodeState::default();
+            assert_eq!(sh_tick(&sample_hold("sample"), &mut ns, Some(s), false), Some(s.zeroed()));
+        }
+    }
+
+    #[test]
+    fn sample_hold_edge_inputs() {
+        let n = sample_hold("sample");
+        let mut ns = NodeState::default();
+
+        // A mode-less node (fresh from the palette) is in Sample mode.
+        let mut fresh = NodeState::default();
+        assert_eq!(sh_tick(&bare_node(), &mut fresh, Some(Signal::Float(0.2)), false), Some(Signal::Float(0.0)));
+
+        // An analog gate crosses at 0.5, and an unwired one never fires.
+        let bus = BusMap::default();
+        let run = |ns: &mut NodeState, i: f32, g: Option<Signal>| {
+            compute_node(&n, &[Some(Signal::Float(i)), g], ns, &bus, &bus, 0.001)[0]
+        };
+        assert_eq!(run(&mut ns, 0.1, Some(Signal::Float(0.4))), Some(Signal::Float(0.0)));
+        assert_eq!(run(&mut ns, 0.2, Some(Signal::Float(0.6))), Some(Signal::Float(0.2)));
+        assert_eq!(run(&mut ns, 0.3, None), Some(Signal::Float(0.2)));
+
+        // No input emits nothing, and the held value is back when the input is.
+        assert_eq!(sh_tick(&n, &mut ns, None, false), None);
+        assert_eq!(sh_tick(&n, &mut ns, Some(Signal::Float(0.9)), false), Some(Signal::Float(0.2)));
+
+        // Rewired to another type mid-hold: the output takes the new type.
+        assert_eq!(sh_tick(&n, &mut ns, Some(Signal::Bool(false)), false), Some(Signal::Bool(false)));
+        let v = Signal::Vec2(Vec2::ONE);
+        assert_eq!(sh_tick(&n, &mut ns, Some(v), false), Some(v.zeroed()));
+    }
+}
+
+#[cfg(test)]
+mod bound_flick_tests {
+    use super::*;
+    use flexinput_core::macros::SIGS_NS;
+    use std::collections::HashMap;
+
+    const UID: usize = 31;
+    const DT: f32 = 0.001;
+    const FLICK: &str = "flick:mouse:90:50";
+
+    fn node(uid: usize, module_id: &str) -> NodeSnap {
+        NodeSnap {
+            node_uid: uid,
+            module_id: module_id.to_string(),
+            params: HashMap::new(),
+            n_outputs: 3,
+            input_sources: Vec::new(),
+            device_id: None,
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        }
+    }
+
+    fn target() -> NodeSnap {
+        let mut snap = node(UID, "processing.rws");
+        snap.params.insert("flick_target".into(), serde_json::json!(true));
+        snap.params.insert("scale".into(), serde_json::json!(2.0));
+        snap
+    }
+
+    /// One tick with these flick pins held by cards last tick: the outputs
+    /// (Mouse, Stick, Flick), plus what's left of them in `state`.
+    fn tick(snap: &NodeSnap, state: &mut HashMap<usize, NodeState>, held: &[&str]) -> [glam::Vec2; 3] {
+        let carry = state.entry(MACRO_CARRY_UID).or_default();
+        carry.macro_prev.clear();
+        for pin in held {
+            carry.macro_prev.insert((SIGS_NS.to_string(), pin.to_string()), Signal::Bool(true));
+        }
+        let mut c = BusMap::default();
+        let out = eval_rws_node(snap, UID, &[], &mut c, state, DT);
+        [0, 1, 2].map(|i| match out[i] {
+            Some(Signal::Vec2(v)) => v,
+            _ => glam::Vec2::ZERO,
+        })
+    }
+
+    /// Sum one output over `ticks`, a held press the whole time.
+    fn total(snap: &NodeSnap, state: &mut HashMap<usize, NodeState>, held: &[&str], which: usize, ticks: usize) -> f32 {
+        (0..ticks).map(|_| tick(snap, state, held)[which].x).sum()
+    }
+
+    #[test]
+    fn a_mouse_flick_turns_its_angle_through_scale_over_its_time_once_per_press() {
+        let snap = target();
+        let mut state = HashMap::new();
+        let first = tick(&snap, &mut state, &[FLICK])[0].x;
+        assert!((first - 90.0 * 2.0 * DT / 0.05).abs() < 1e-2, "paid out evenly over its 50 ms: {first}");
+        let rest = total(&snap, &mut state, &[FLICK], 0, 200);
+        assert!((first + rest - 180.0).abs() < 1e-2, "90° at scale 2, held or not: {}", first + rest);
+        assert!(state[&UID].rws_turns.is_empty(), "and over");
+        assert_eq!(total(&snap, &mut state, &[], 0, 5), 0.0, "letting go does nothing");
+        assert!((total(&snap, &mut state, &[FLICK], 0, 200) - 180.0).abs() < 1e-2, "pressed again, it turns again");
+    }
+
+    // A flick is a real rotation: like the flick stick's, RWS doesn't scale it.
+    #[test]
+    fn rws_does_not_scale_a_flick() {
+        let mut snap = target();
+        snap.params.insert("rws".into(), serde_json::json!(3.0));
+        let mut state = HashMap::new();
+        assert!((total(&snap, &mut state, &[FLICK], 0, 100) - 180.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn with_no_time_of_its_own_it_takes_the_modules_flick_smoothing() {
+        let mut snap = target();
+        snap.params.insert("flick_smooth_ms".into(), serde_json::json!(200.0));
+        let mut state = HashMap::new();
+        let first = tick(&snap, &mut state, &["flick:mouse:-90"])[0].x;
+        assert!((first + 90.0 * 2.0 * DT / 0.2).abs() < 1e-2, "to the left, over 200 ms: {first}");
+        // No smoothing is all at once.
+        snap.params.insert("flick_smooth_ms".into(), serde_json::json!(0.0));
+        let mut state = HashMap::new();
+        assert!((tick(&snap, &mut state, &["flick:mouse:45"])[0].x - 90.0).abs() < 1e-3);
+    }
+
+    // The checkbox is the whole gate: not ticked, the pin moves nothing.
+    #[test]
+    fn a_module_not_set_as_target_ignores_flicks() {
+        let mut snap = target();
+        snap.params.remove("flick_target");
+        let mut state = HashMap::new();
+        assert_eq!(total(&snap, &mut state, &[FLICK], 0, 100), 0.0);
+        assert!(state[&UID].rws_turns.is_empty());
+    }
+
+    // A stick sets a rate, capped at full tilt: 90° at 360°/s can't take the
+    // 50 ms asked, so it takes 250 ms — and still turns 90°.
+    #[test]
+    fn a_stick_flick_is_capped_by_stick_rate_and_still_lands() {
+        let mut snap = target();
+        snap.params.insert("stick_out_dps".into(), serde_json::json!(360.0));
+        let mut state = HashMap::new();
+        let pin = "flick:stick:90:50";
+        let mut defl = Vec::new();
+        for _ in 0..400 {
+            defl.push(tick(&snap, &mut state, &[pin])[1].x);
+        }
+        assert!(defl.iter().all(|d| *d <= 1.0), "never past full tilt");
+        assert!((defl[0] - 1.0).abs() < 1e-3, "owed more than it can carry: full tilt, {}", defl[0]);
+        let turned: f32 = defl.iter().map(|d| d * 360.0 * DT).sum();
+        assert!((turned - 90.0).abs() < 0.01, "conserved: {turned}");
+        let held_for = defl.iter().filter(|d| **d > 0.0).count();
+        assert!((249..=252).contains(&held_for), "for 90/360 s: {held_for} ticks");
+    }
+
+    // A slower time than the stick's limit is a smaller push rather than a
+    // full-tilt burst.
+    #[test]
+    fn a_slow_stick_flick_pushes_gently() {
+        let mut snap = target();
+        snap.params.insert("stick_out_dps".into(), serde_json::json!(360.0));
+        let mut state = HashMap::new();
+        let d = tick(&snap, &mut state, &["flick:stick:90:1000"])[1].x;
+        assert!((d - 0.25).abs() < 1e-3, "90°/s of a 360°/s stick: {d}");
+    }
+
+    // The aim keeps its share of the stick; the flick takes what's left and is
+    // owed the rest, so nothing clips away.
+    #[test]
+    fn a_stick_flick_shares_the_stick_with_the_aim_without_losing_any() {
+        let mut snap = target();
+        snap.params.insert("stick_out_dps".into(), serde_json::json!(360.0));
+        let mut state: HashMap<usize, NodeState> = HashMap::new();
+        let carry = state.entry(MACRO_CARRY_UID).or_default();
+        carry.macro_prev.insert((SIGS_NS.to_string(), "flick:stick:90:50".to_string()), Signal::Bool(true));
+        let rate = 180.0 / GYRO_REF_DPS;
+        let inputs = [Some(Signal::Vec2(glam::Vec2::new(rate, 0.0)))];
+        let mut sum = 0.0;
+        for _ in 0..1000 {
+            let mut c = BusMap::default();
+            let out = eval_rws_node(&snap, UID, &inputs, &mut c, &mut state, DT);
+            let Some(Signal::Vec2(v)) = out[1] else { panic!("stick output") };
+            assert!(v.x <= 1.0 + 1e-5);
+            sum += v.x * 360.0 * DT;
+        }
+        assert!((sum - (90.0 + 180.0)).abs() < 0.05, "a second of 180°/s aim plus the 90°: {sum}");
+    }
+
+    // A wired Flick pin of the same kind carries it, instead of the main output;
+    // of the other kind it changes nothing.
+    #[test]
+    fn it_takes_a_wired_flick_pin_of_its_kind() {
+        let mut snap = target();
+        snap.params.insert("_rws_flick_out_wired".into(), serde_json::json!(true));
+        let mut state = HashMap::new();
+        let v = tick(&snap, &mut state, &["flick:mouse:90:1"]);
+        assert_eq!(v[0].x, 0.0, "not on Mouse as well");
+        assert!((v[2].x - 180.0).abs() < 1e-3, "on the Flick pin: {}", v[2].x);
+
+        let mut state = HashMap::new();
+        let v = tick(&snap, &mut state, &["flick:stick:45:1"]);
+        assert!(v[1].x > 0.0, "the pin is the mouse's here, so a stick flick uses Stick");
+        assert_eq!(v[2].x, 0.0);
+
+        snap.params.insert("flick_output".into(), serde_json::json!("stick"));
+        let mut state = HashMap::new();
+        let v = tick(&snap, &mut state, &["flick:stick:45:1"]);
+        assert_eq!(v[1].x, 0.0);
+        assert!(v[2].x > 0.0, "the pin is the stick's now");
+    }
+
+    // "Flick On" is the flick stick's mode shift; a press of a bound flick is
+    // deliberate and goes through.
+    #[test]
+    fn flick_on_off_does_not_stop_a_bound_flick() {
+        let snap = target();
+        let mut state: HashMap<usize, NodeState> = HashMap::new();
+        let carry = state.entry(MACRO_CARRY_UID).or_default();
+        carry.macro_prev.insert((SIGS_NS.to_string(), FLICK.to_string()), Signal::Bool(true));
+        let inputs = [None, None, Some(Signal::Bool(false))];
+        let mut c = BusMap::default();
+        let out = eval_rws_node(&snap, UID, &inputs, &mut c, &mut state, DT);
+        assert!(matches!(out[0], Some(Signal::Vec2(v)) if v.x > 0.0));
+    }
+
+    // A calibration sweep measures the game from this module alone.
+    #[test]
+    fn a_sweep_drops_turns_in_flight() {
+        let mut snap = target();
+        let mut state = HashMap::new();
+        tick(&snap, &mut state, &[FLICK]);
+        snap.params.insert("cal_measure".into(), serde_json::json!("yaw"));
+        assert_eq!(tick(&snap, &mut state, &[FLICK])[0].x, 0.0);
+        assert!(state[&UID].rws_turns.is_empty());
+    }
+
+    // Overlapping turns add up, and each lands whole.
+    #[test]
+    fn two_turns_run_side_by_side() {
+        let snap = target();
+        let mut state = HashMap::new();
+        let a = "flick:mouse:90:50";
+        let b = "flick:mouse:-45:100";
+        let mut sum = tick(&snap, &mut state, &[a])[0].x;
+        sum += total(&snap, &mut state, &[a, b], 0, 300);
+        assert!((sum - 90.0).abs() < 1e-2, "(90 - 45) at scale 2: {sum}");
+    }
+
+    // The whole route, through a real tick: a Remapper card's flick reaches the
+    // target, and only through the macro namespace, never the bus.
+    #[test]
+    fn a_remapper_card_starts_a_turn_on_the_target_through_a_tick() {
+        const DEV: &str = "gilrs:switch_pro:0";
+        let mut card = node(1, "module.remapper");
+        card.params.insert("_automap_device_id".into(), Value::String(DEV.into()));
+        card.params.insert("mappings".into(), serde_json::json!([{ "in": ["btn_south"], "out": [FLICK] }]));
+        let graph = ProcessingGraph { nodes: vec![target(), card], ..Default::default() };
+        let mut state = HashMap::new();
+        let mut run = |down: bool| {
+            let mut sigs = BusMap::default();
+            sigs.insert((DEV.to_string(), "btn_south".to_string()), Signal::Bool(down));
+            let mut out = TickOutput::default();
+            eval_graph_tick(&graph, &mut state, &flexinput_core::SigMap::from(&sigs), DT, &mut out);
+            assert!(out.sink_outputs.iter().all(|((_, p), _)| !p.starts_with("flick:")), "not a bus pin");
+            state[&UID].rws_turns.len()
+        };
+        assert_eq!(run(false), 0);
+        assert_eq!(run(false), 0);
+        assert_eq!(run(true), 0, "the card pressed it this tick; the target reads it next");
+        assert_eq!(run(true), 1, "one turn started");
+        for _ in 0..20 {
+            assert!(run(true) <= 1, "held: no more start");
+        }
+    }
+
+    // Every card module's publish gate is this one test.
+    #[test]
+    fn a_flick_pin_routes_like_a_macro_target() {
+        assert!(is_macro_style_target(FLICK));
+        assert!(!is_bus_out_pin(FLICK));
+        assert!(is_bus_out_pin("mouse_left"), "and a plain pin is untouched");
+    }
+}

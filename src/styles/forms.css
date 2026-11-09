@@ -1,0 +1,268 @@
+.tab-bar {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.tab-button {
+  flex: 1;
+  min-width: 140px;
+  text-align: center;
+}
+
+.pill-tab {
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-mid);
+  padding: 0.38rem 0.72rem;
+  font-weight: 750;
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, color 0.2s ease, background-color 0.2s ease;
+}
+
+.pill-tab:hover:not(.active) {
+  border-color: var(--border-strong);
+  background: var(--bg-btn-hover);
+  color: var(--text-strong);
+}
+
+.pill-tab.active {
+  border: 1px solid var(--accent);
+  color: var(--text-strong);
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-input));
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.mode-toggle {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.mode-toggle.secondary {
+  margin-top: 0.75rem;
+}
+
+.mode-toggle .pill-tab {
+  flex: 1;
+  text-align: center;
+}
+
+.app-select {
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+  background: var(--bg-input);
+  color: var(--text-strong);
+  padding: 0.34rem 0.55rem;
+  font-family: inherit;
+}
+
+.flex-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.flex-inputs label {
+  flex: 1;
+  min-width: 120px;
+  display: flex;
+  flex-direction: column;
+  font-weight: 600;
+  color: var(--text-strong);
+}
+
+.label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+
+.inline-helper {
+  margin: 0;
+  padding: 0;
+  line-height: 1;
+}
+
+.flex-inputs input:not([type='range']) {
+  margin-top: 0.35rem;
+  padding: 0.38rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+  background: var(--bg-input);
+  color: var(--text-strong);
+  font-size: 1rem;
+  font-weight: 600;
+  box-sizing: border-box;
+}
+
+.flex-inputs input:not([type='range']):focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  outline: none;
+}
+
+.flex-inputs select {
+  margin-top: 0.35rem;
+  padding: 0.38rem 0.55rem;
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+  background: var(--bg-input);
+  color: var(--text-strong);
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-sizing: border-box;
+}
+
+.flex-inputs select.app-select {
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+  background: var(--bg-input);
+  color: var(--text-strong);
+  font-size: 0.85rem;
+  font-weight: 600;
+  appearance: auto;
+}
+
+.sensitivity-shift-row select {
+  border-radius: 6px;
+  border: 1px solid var(--border-1);
+  background: var(--bg-input);
+  color: var(--text-strong);
+  padding: 0.4rem 0.75rem;
+  font-weight: 600;
+}
+
+.sensitivity-shift-row {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.flex-inputs select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  outline: none;
+}
+
+input[type=number]::-webkit-outer-spin-button,
+input[type=number]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type=number] {
+  -moz-appearance: textfield;
+}
+
+.flex-inputs input[type=range] {
+  margin-top: 0.4rem;
+  accent-color: var(--accent);
+}
+
+:where(.primary-btn, .secondary-btn, .ghost-btn, .danger-btn) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.42rem;
+  min-height: 2.1rem;
+  padding: 0.38rem 0.82rem;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.15;
+  transition:
+    transform 0.14s ease,
+    border-color 0.18s ease,
+    background-color 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.22s ease,
+    opacity 0.18s ease;
+}
+
+:where(.primary-btn, .secondary-btn, .ghost-btn, .danger-btn):hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+:where(.primary-btn, .secondary-btn, .ghost-btn, .danger-btn):active:not(:disabled) {
+  transform: translateY(0);
+}
+
+:where(.primary-btn, .secondary-btn, .ghost-btn, .danger-btn):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.primary-btn {
+  border-color: color-mix(in srgb, var(--accent) 48%, #ffffff 16%);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent-primary) 88%, #ffffff 12%), color-mix(in srgb, var(--accent) 84%, #0b1016 16%));
+  color: var(--btn-primary-text);
+  box-shadow:
+    0 10px 22px color-mix(in srgb, var(--accent) 22%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+.primary-btn:hover:not(:disabled) {
+  box-shadow:
+    0 12px 26px color-mix(in srgb, var(--accent) 28%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22);
+  filter: saturate(1.05) brightness(1.03);
+}
+
+.secondary-btn {
+  border-color: color-mix(in srgb, var(--border-1) 88%, var(--accent) 12%);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--bg-btn) 94%, #ffffff 6%), color-mix(in srgb, var(--bg-input) 96%, transparent));
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 var(--inset-highlight);
+}
+
+.secondary-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: color-mix(in srgb, var(--bg-btn-hover) 88%, var(--accent) 12%);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent),
+    inset 0 1px 0 var(--inset-highlight);
+}
+
+.ghost-btn {
+  border-color: color-mix(in srgb, var(--border-1) 58%, transparent);
+  background: transparent;
+  color: var(--text-mid);
+}
+
+.ghost-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border-1));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-btn-hover));
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 0 var(--inset-highlight);
+}
+
+.danger-btn {
+  border-color: var(--danger-border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--danger-bg) 78%, var(--bg-btn) 22%), color-mix(in srgb, var(--danger-bg) 94%, transparent));
+  color: var(--danger-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.danger-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger-border) 88%, #ffffff 12%);
+  background: color-mix(in srgb, var(--danger-bg) 84%, var(--bg-btn-hover) 16%);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger-border) 26%, transparent);
+}
+
+:where(.primary-btn, .secondary-btn, .ghost-btn, .danger-btn):disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+  transform: none;
+  filter: none;
+}

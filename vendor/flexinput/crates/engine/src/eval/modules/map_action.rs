@@ -1,0 +1,179 @@
+//! The Map Action evaluator — a single mapping row without the Remapper's
+//! full pin table.
+
+use super::*;
+
+/// Evaluate a Map Action node — shared by the top-level and sub-patch loops.
+/// Returns the 2-element output vec [Bool gate, Float analog]. `uid` is the
+/// publishing id (snap.node_uid at top level, namespaced uid in a sub-patch);
+/// it keys the per-node `state`.
+pub(crate) fn eval_map_action_node(
+    snap: &NodeSnap,
+    uid: usize,
+    dev_sigs: &BusMap,
+    collector_sigs: &BusMap,
+    state: &mut HashMap<usize, NodeState>,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+            let dev_id = snap.params.get("_automap_device_id").and_then(|v| v.as_str()).unwrap_or("");
+            let collector_id = snap.params.get("_automap_collector_id").and_then(|v| v.as_str()).unwrap_or("");
+            let mappings = snap.params.get("mappings").and_then(|v| v.as_array()).map(|a| a.as_slice()).unwrap_or(&[]);
+            // Snapshot upstream values for every canonical pin once.
+            let mut upstream: PinSigs = PinSigs::default();
+            upstream.fill_canonical(collector_sigs.view(collector_id), dev_sigs.view(dev_id));
+            // MIDI pins are dynamic (never in ALL_PINS): take whatever the bus
+            // carries, so a note or a knob can trigger an action.
+            fill_upstream_midi(collector_id, dev_id, collector_sigs, dev_sigs, &mut upstream);
+            // A processed Vec2 on the collector is authoritative over raw axes.
+            vec2_authoritative_axis_fill(&mut upstream, collector_id, &collector_sigs);
+            // Derive synthetic pins (stick cardinals + touchpad variants)
+            derive_stick_cardinals(&mut upstream);
+            // Touchpad handling mirrors Remapper's behaviour (click accumulation)
+            let touch_click = upstream.get("btn_touchpad").map(|s| s.as_bool()).unwrap_or(false);
+            let zone_of_x = |x: f32| -> usize {
+                if x < -1.0/3.0 { 0 } else if x > 1.0/3.0 { 2 } else { 1 }
+            };
+            let mut touch_only = [false; 3];
+            for (xpin, apin) in [("touch1_x","touch1_active"), ("touch2_x","touch2_active")] {
+                let active = upstream.get(apin).map(|s| s.as_bool()).unwrap_or(false);
+                if !active { continue; }
+                let x = upstream.get(xpin).map(|s| sig_scalar(*s)).unwrap_or(0.0);
+                touch_only[zone_of_x(x)] = true;
+            }
+            // Click-variant zones are stored in per-node state; reuse NodeState aux_f32
+            let ns = state.entry(uid).or_insert_with(NodeState::default);
+            if ns.aux_f32.len() < 3 { ns.aux_f32.resize(3, 0.0); }
+            if !touch_click {
+                ns.aux_f32[0] = 0.0; ns.aux_f32[1] = 0.0; ns.aux_f32[2] = 0.0;
+            } else {
+                for (xpin, apin) in [("touch1_x","touch1_active"), ("touch2_x","touch2_active")] {
+                    let active = upstream.get(apin).map(|s| s.as_bool()).unwrap_or(false);
+                    if !active { continue; }
+                    let x = upstream.get(xpin).map(|s| sig_scalar(*s)).unwrap_or(0.0);
+                    ns.aux_f32[zone_of_x(x)] = 1.0;
+                }
+            }
+            let click_zone = [ ns.aux_f32[0] > 0.5, ns.aux_f32[1] > 0.5, ns.aux_f32[2] > 0.5 ];
+            let any_zone = click_zone[0] || click_zone[1] || click_zone[2];
+            if touch_click { touch_only = [false;3]; }
+            upstream.insert("touchpad_left",   Signal::Bool(click_zone[0]));
+            upstream.insert("touchpad_center", Signal::Bool(click_zone[1]));
+            upstream.insert("touchpad_right",  Signal::Bool(click_zone[2]));
+            upstream.insert("touchpad_any",    Signal::Bool(touch_click && any_zone));
+            upstream.insert("touch_left",      Signal::Bool(touch_only[0]));
+            upstream.insert("touch_center",    Signal::Bool(touch_only[1]));
+            upstream.insert("touch_right",     Signal::Bool(touch_only[2]));
+
+            let read_upstream = |pin_id: &str| -> Option<Signal> { upstream.get(pin_id).copied() };
+
+            // Mappings may be in legacy Array<String> form (chord only, mode=down)
+            // or in the new Object form `{ in, mode, window_ms, sustain }`.
+            //
+            // Output signal kind depends on which mode(s) are present:
+            //   - All-digital mappings → emit Bool ("any active").
+            //   - Any analog mapping present → emit Float (max magnitude
+            //     across all active analog mappings, falling back to 1.0
+            //     when only a digital mapping is active so digital triggers
+            //     still drive Float-consuming wires at full deflection).
+            let ns_map = state.entry(uid).or_insert_with(NodeState::default);
+            let mut any_trigger = false;
+            let mut any_analog_present = false;
+            let mut max_analog_mag: f32 = 0.0;
+            for (i, m) in mappings.iter().enumerate() {
+                // Legacy array form is a bare pin list, so it carries none of
+                // the press options and takes their defaults.
+                let (in_pins, press) = if let Some(arr) = m.as_array() {
+                    let pins: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                    (pins, PressParams::DEFAULT)
+                } else {
+                    let pins: Vec<&str> = m.get("in").and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                        .unwrap_or_default();
+                    (pins, PressParams::from_card(m))
+                };
+                if in_pins.is_empty() { continue; }
+                // The card's curve and threshold, as on a Remapper card.
+                let shape = MappingShape::from_card(m);
+                if press.is_analog() {
+                    any_analog_present = true;
+                    // Combo gate (same as Remapper): all non-cardinal pins
+                    // held AND any cardinal contributing a non-zero mag.
+                    // Track the strongest cardinal magnitude for Float out.
+                    let mut has_cardinal = false;
+                    let mut any_cardinal_active = false;
+                    let mut all_buttons_held = true;
+                    let mut local_max: f32 = 0.0;
+                    let mut has_value = false;
+                    for p in &in_pins {
+                        // Stick directions: ANY deflected is enough (opposite
+                        // ones can't all be held). Every other analog input — a
+                        // trigger, a knob, a note — must be active, as a button
+                        // must be held; each still sets the magnitude.
+                        if analog_axis_for_cardinal(p).is_none() {
+                            if let Some(v) = shape.in_value(&upstream, p) {
+                                if v == 0.0 { all_buttons_held = false; }
+                                let v = shape.shaped(v.abs());
+                                if v > local_max { local_max = v; }
+                                has_value = true;
+                                continue;
+                            }
+                        }
+                        if let Some(v) = shape.in_value(&upstream, p) {
+                            has_cardinal = true;
+                            let mag = shape.shaped(v.abs());
+                            if mag > 0.0 { any_cardinal_active = true; }
+                            if mag > local_max { local_max = mag; }
+                        } else if !read_upstream(p).map(|s| s.as_bool()).unwrap_or(false) {
+                            all_buttons_held = false;
+                        }
+                    }
+                    let active = all_buttons_held && (!has_cardinal || any_cardinal_active);
+                    // For pure-button analog (no cardinal), magnitude defaults
+                    // to 1.0 while gated so the Float output reads full.
+                    let mag = if !active {
+                        0.0
+                    } else if has_cardinal || has_value { local_max } else { 1.0 };
+                    // out_analog: pure magnitude (max across active mappings).
+                    if mag > max_analog_mag { max_analog_mag = mag; }
+                    // out (Bool): freq-modulated tap train / PWM (Hold) / ×2
+                    // (Turbo) driven by the magnitude, so a digital destination
+                    // reflects how far the input is pushed.
+                    let slots = press_state_get(ns_map, i);
+                    if press.analog_pulse(mag, slots, dt) {
+                        any_trigger = true;
+                    }
+                    continue;
+                }
+                // All-cardinal chords on a single stick can't be
+                // simultaneously held — use the gesture-visited bitmap so
+                // half-circles and full sweeps complete the combo. Mirrors
+                // Remapper's digital path.
+                // An input with a threshold counts once its shaped value
+                // reaches it — a trackpad click by its press — else when held.
+                let pin_on = |p: &str| shape.analog_gate(&upstream, p)
+                    .unwrap_or_else(|| read_upstream(p).map(|s| s.as_bool()).unwrap_or(false));
+                let raw_held = match (gesture_required_bits(&in_pins), shape.threshold) {
+                    (Some(required), None) => {
+                        let buttons_held = in_pins.iter().all(|p| gesture_pin_to_bit(p).is_some() || pin_on(p));
+                        let visited = gesture_state_get(ns_map, i);
+                        buttons_held && gesture_tick(required, visited, &upstream)
+                    }
+                    _ => in_pins.iter().all(|p| pin_on(p)),
+                };
+                let held = press.gate(raw_held, press_state_get(ns_map, i), dt);
+                if held { any_trigger = true; }
+            }
+
+            // Two outputs: out (Bool gate/tap-train) + out_analog (Float mag).
+            // out_analog falls back to 1.0 when only digital mappings drove the
+            // gate so a Float-consuming wire still sees full deflection.
+            let analog_mag = if max_analog_mag > 0.0 {
+                max_analog_mag
+            } else if any_trigger && !any_analog_present { 1.0 } else { max_analog_mag };
+            // Hand the per-tick pin snapshot's key Strings back for the next tick.
+            return vec![
+                Some(Signal::Bool(any_trigger)),
+                Some(Signal::Float(analog_mag.clamp(0.0, 1.0))),
+            ];
+}
+

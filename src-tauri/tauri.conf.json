@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Motion Studio",
+  "version": "0.15.2",
+  "identifier": "io.hotuns.motionstudio",
+  "build": {
+    "beforeDevCommand": "npm run engine:dev && npm run dev:web",
+    "devUrl": "http://127.0.0.1:1435",
+    "beforeBuildCommand": "npm run engine:build && npm run build:web",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Motion Studio",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 680
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:1435 ws://127.0.0.1:1435"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "resources/": "resources/",
+      "drivers/": "drivers/",
+      "../licenses/": "licenses/",
+      "../examples/": "examples/",
+      "../docs/peripheral-feedback-and-touch.md": "docs/peripheral-feedback-and-touch.md",
+      "../docs/controller-shortcuts.md": "docs/controller-shortcuts.md",
+      "../docs/jsm-import.md": "docs/jsm-import.md"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "displayLanguageSelector": true
+      }
+    }
+  }
+}

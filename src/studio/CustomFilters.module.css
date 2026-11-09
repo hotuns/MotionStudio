@@ -1,0 +1,22 @@
+.root { grid-column: 1 / -1; min-width: 0; border: 1px solid var(--border-1); border-radius: 9px; background: var(--bg-2); padding: 16px; }
+.root > summary { cursor: pointer; color: var(--text-strong); font-weight: 600; }
+.root p, .hint { color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+.toolbar, .card, .actions, .editorTools, .parameter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar { justify-content: space-between; margin: 16px 0; }
+.stage { margin-top: 18px; }.stage h4 { margin: 0 0 8px; font-size: 12px; color: var(--text-mid); }
+.card { padding: 12px; margin-top: 8px; border: 1px solid var(--border-1); border-radius: 7px; background: var(--bg-input); }
+.identity { flex: 1; min-width: 150px; }.identity label { display: flex; gap: 8px; align-items: center; }.identity input { accent-color: var(--accent); }.identity strong { overflow-wrap: anywhere; font-size: 12px; font-weight: 500; }
+.status { display: block; font-size: 10px; color: var(--text-muted); margin: 6px 0 0 22px; }.status[data-fault='true'], .error { color: var(--danger-text,#c55252); }
+.actions button { font-size: 11px; padding: 5px 8px; min-height: 30px; }
+dialog.editor { width: min(1000px,calc(100vw - 40px)); }
+.editor :global(.studio-dialog-heading) > h2 { margin: 24px 24px 8px; }
+.fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 12px 0; }.fields label { display: grid; gap: 6px; font-size: 12px; }
+.fields input, .fields select, .parameter input, .editorTools select { min-width: 0; width: 100%; box-sizing: border-box; color: var(--text-strong); background: var(--bg-input); border: 1px solid var(--border-1); border-radius: 5px; padding: 8px; font: inherit; }
+.editorTools { justify-content: space-between; margin: 12px 0; }.editorTools select { width: auto; max-width: 100%; font-size: 12px; }
+.code { width: 100%; box-sizing: border-box; min-height: 260px; resize: vertical; padding: 12px; border: 1px solid var(--border-1); border-radius: 7px; background: var(--bg-input); color: var(--text-strong); font: 12px/1.65 Consolas,'Cascadia Code',monospace; tab-size: 4; white-space: pre; }
+.code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.parameters { margin: 16px 0; }.parameters h4 { margin: 0 0 8px; font-size: 12px; }.parameter { margin: 6px 0; flex-wrap: nowrap; }.parameter input { flex: 1; }.parameter button { flex-shrink: 0; }
+.error { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.preview { border-top: 1px solid var(--border-1); margin-top: 16px; padding-top: 14px; }.preview svg { display: block; width: 100%; height: 180px; background: var(--bg-input); border: 1px solid var(--border-1); border-radius: 7px; }
+.legend { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin: 9px 0; font-size: 11px; color: var(--text-muted); }.legend span::before { content: ''; display: inline-block; vertical-align: middle; width: 18px; height: 2px; margin-right: 6px; background: var(--text-muted); }.legend span:last-child::before { background: var(--accent); }
+@media(max-width:700px) { .fields { grid-template-columns: 1fr; }.card { align-items: flex-start; }.actions { width: 100%; } }

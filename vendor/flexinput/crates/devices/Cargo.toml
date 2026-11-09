@@ -1,0 +1,23 @@
+[package]
+name = "flexinput-devices"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+
+[lib]
+path = "src/headless.rs"
+
+[features]
+default = []
+
+[dependencies]
+flexinput-core.workspace = true
+glam.workspace = true
+gilrs = "0.10"
+hidapi = "2"
+sdl3 = { version = "=0.20.0", default-features = false, features = ["hidapi"] }
+sdl3-sys = { version = "=0.7.1", default-features = false }
+puffin.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging"] }

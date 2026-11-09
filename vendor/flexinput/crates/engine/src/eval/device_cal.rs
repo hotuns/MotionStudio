@@ -1,0 +1,1128 @@
+//! Per-device calibration: deadzones, radial stick scaling, trigger
+//! ranges, gyro/accel orientation and sign correction.
+//!
+//! `preprocess_dev_sigs` is the funnel every physical device signal passes
+//! through before any node sees it, so a mapping never has to know which
+//! pad produced a value.
+
+use super::*;
+
+/// Stick pin IDs — deadzone applies only here, not to triggers/gyro/accel/buttons.
+pub(crate) fn is_stick_pin(pin_id: &str) -> bool {
+    matches!(pin_id,
+        "left_stick" | "right_stick"
+        | "left_stick_x" | "left_stick_y"
+        | "right_stick_x" | "right_stick_y"
+    )
+}
+
+/// IMU pin IDs — gyro multiplier scales these.
+pub(crate) fn is_gyro_pin(pin_id: &str) -> bool {
+    matches!(pin_id, "gyro_x" | "gyro_y" | "gyro_z")
+}
+
+/// Mouse-delta pin IDs — mouse_sensitivity scales these.
+pub(crate) fn is_mouse_pin(pin_id: &str) -> bool {
+    matches!(pin_id, "mouse" | "mouse_x" | "mouse_y")
+}
+
+/// Number of angular buckets in the per-stick radial correction profile.
+/// 72 buckets = 5° each — matches the calibration UI's edge-tracking
+/// resolution so we never lose detail through resampling.
+pub const STICK_RADIAL_BUCKETS: usize = 72;
+
+/// Default stick deadzone applied when a `device.source` node omits the
+/// `deadzone` param OR no source node exists for a device whose signals
+/// still reach AutoMap consumers (Remapper / Map Action / sink AutoMap).
+/// Must match the UI's `default_deadzone()` so every code path agrees.
+pub const DEFAULT_STICK_DEADZONE: f32 = 0.1;
+
+/// Per-device-source calibration applied before deadzone / gyro_multiplier.
+/// All fields are no-ops when uncalibrated (centers=0, scales=1, ranges=identity).
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceCal {
+    gyro_offset:   [f32; 3], // [x, y, z] — subtracted from gyro_x/y/z
+    accel_offset:  [f32; 3], // [x, y, z] — subtracted from accel_x/y/z
+    /// Per-axis output sign for gyro_{x,y,z}. +1.0 = pass-through, -1.0 = inverted.
+    gyro_sign:     [f32; 3],
+    /// Per-axis output sign for accel_{x,y,z}.
+    accel_sign:    [f32; 3],
+    /// 3×3 orientation matrix (row-major) applied to the (offset-removed)
+    /// gyro and accel vectors before per-axis sign flip. Compensates for
+    /// IMU chips that aren't perfectly aligned with the controller's body
+    /// axes (modded controllers, factory mount tilt). Identity = no-op.
+    orient_matrix: [f32; 9],
+    /// True if `orient_matrix` is non-identity and should be applied.
+    orient_active: bool,
+    /// Baseline pose for devices that report ABSOLUTE orientation, as a
+    /// quaternion (x,y,z,w). The published pin is measured against the world —
+    /// yaw is magnetic north on a Joy-Con 2 — which is not what a patch wants:
+    /// it wants rotation relative to however the user was holding the device
+    /// when they set it down. Captured flat during calibration, then removed
+    /// with `baseline⁻¹ · current`.
+    ///
+    /// Identity when uncalibrated, so the raw world pose passes through.
+    orient_baseline: [f32; 4],
+    orient_baseline_active: bool,
+    /// Noise-floor deadzone on the gyro TRIPLE's magnitude (post offset /
+    /// matrix / sign): |g| below this zeroes all three axes at once, so slow
+    /// diagonal rotations don't get per-axis steps. 0.0 = disabled. Effective
+    /// value = measured `gyro_noise_floor` × user `gyro_dz_width`, gated by
+    /// `gyro_dz_enabled` (all written by the Calibration window).
+    gyro_dz:  f32,
+    /// Dynamic accel deadzone: deviations from a per-device frozen baseline
+    /// below this emit the baseline (noise suppressed); larger deviations
+    /// re-anchor it, so the baseline follows real rotation with error
+    /// bounded by the floor. 0.0 = disabled.
+    accel_dz: f32,
+    lstick_center: [f32; 2], // subtracted from left_stick_{x,y}
+    rstick_center: [f32; 2],
+    /// Per-bucket radial scale: lstick_radial[i] = 1.0 / (mean stick radius
+    /// at angle bucket i). Applied to the centered (x, y) so the corrected
+    /// magnitude reaches 1.0 along every direction. STICK_RADIAL_BUCKETS
+    /// entries, indexed by `floor(angle / TAU * N)`.
+    lstick_radial: [f32; STICK_RADIAL_BUCKETS],
+    rstick_radial: [f32; STICK_RADIAL_BUCKETS],
+    // Trigger calibration: raw_min/raw_max define the usable range; output
+    // is renormalised to 0..1 across it. Defaults (0.0, 1.0) = no-op.
+    ltrig_range:   (f32, f32),
+    rtrig_range:   (f32, f32),
+    /// "Digital triggers" opt-in (device.source `digital_triggers` param).
+    /// When set, each analog trigger becomes a thresholded snap: it outputs
+    /// full deflection once the calibrated value crosses the per-side
+    /// digital threshold, else 0.0 (staying Float). The `btn_lt_dig` /
+    /// `btn_rt_dig` buttons are re-derived from the same threshold so the
+    /// pad's own early-firing L2/R2 flag no longer leaks through.
+    digital_triggers: bool,
+    /// Per-side digital threshold on the calibrated (0..1) trigger value.
+    /// Written by the Calibration window's yellow pin. Defaults to 0.5.
+    ltrig_threshold: f32,
+    rtrig_threshold: f32,
+    /// The band around its threshold a trigger's digital button holds steady
+    /// across (`trig_hysteresis`, Calibration window; the click goes by it too).
+    trig_hysteresis: f32,
+    /// How long, in seconds, a trigger stays under that band before its
+    /// digital button lets go (`trig_debounce_ms`; the click's too).
+    trig_debounce: f32,
+    /// The right stick's own deadzone (`deadzone_r`, Calibration window), when
+    /// it has one; `None` = the device's `deadzone` covers both sticks.
+    rstick_dz: Option<f32>,
+    /// The trackpads' calibration, left then right, when either has any.
+    trackpads: Option<[TrackpadCal; 2]>,
+}
+
+/// Default digital-trigger threshold, the Calibration window's too.
+pub(crate) const TRIG_DIGITAL_THRESHOLD_DEFAULT: f32 = flexinput_core::automap::TRIGGER_DIGITAL_THRESHOLD;
+
+pub(crate) const IDENTITY_M3: [f32; 9] = [
+    1.0, 0.0, 0.0,
+    0.0, 1.0, 0.0,
+    0.0, 0.0, 1.0,
+];
+
+/// Per-device frozen baseline for the dynamic accel noise-floor deadzone
+/// (see `DeviceCal::accel_dz`). Keyed by device id; entries are only touched
+/// while the feature is enabled, so a stale entry after a device swap just
+/// re-anchors on the first over-floor deviation.
+pub(crate) static ACCEL_DZ_BASELINE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, [f32; 3]>>> =
+    std::sync::OnceLock::new();
+
+/// Exponential ease out of a noise-floor deadzone border: 0 inside the
+/// border, then `1 − e^−((v−dz)/dz)` above it — ~63 % one border-width out,
+/// ~95 % three widths out. Keeps the exit from the deadzone snap-free while
+/// leaving fast motion effectively untouched. Shared by the gyro magnitude
+/// gate, the dynamic accel baseline, and the calibration scope's filtered
+/// view (which must match what the engine does).
+#[inline]
+pub fn gyro_dz_ease(v: f32, dz: f32) -> f32 {
+    if dz <= 0.0 { return 1.0; }
+    if v <= dz { return 0.0; }
+    1.0 - (-(v - dz) / dz).exp()
+}
+
+impl Default for DeviceCal {
+    fn default() -> Self {
+        Self {
+            gyro_offset:   [0.0; 3],
+            accel_offset:  [0.0; 3],
+            gyro_sign:     [1.0; 3],
+            accel_sign:    [1.0; 3],
+            orient_matrix: IDENTITY_M3,
+            orient_active: false,
+            // Identity quaternion, inactive: an uncalibrated device passes its
+            // world-referenced pose straight through.
+            orient_baseline: [0.0, 0.0, 0.0, 1.0],
+            orient_baseline_active: false,
+            gyro_dz:  0.0,
+            accel_dz: 0.0,
+            lstick_center: [0.0; 2],
+            rstick_center: [0.0; 2],
+            lstick_radial: [1.0; STICK_RADIAL_BUCKETS],
+            rstick_radial: [1.0; STICK_RADIAL_BUCKETS],
+            ltrig_range:   (0.0, 1.0),
+            rtrig_range:   (0.0, 1.0),
+            digital_triggers: false,
+            ltrig_threshold:  TRIG_DIGITAL_THRESHOLD_DEFAULT,
+            rtrig_threshold:  TRIG_DIGITAL_THRESHOLD_DEFAULT,
+            trig_hysteresis:  flexinput_core::automap::TRIGGER_HYSTERESIS,
+            trig_debounce:    flexinput_core::automap::trigger_debounce_secs(None),
+            rstick_dz: None,
+            trackpads: None,
+        }
+    }
+}
+
+pub(crate) fn read_arr3(params: &HashMap<String, Value>, key: &str) -> [f32; 3] {
+    params.get(key).and_then(|v| v.as_array()).and_then(|a| {
+        if a.len() < 3 { return None; }
+        Some([
+            a[0].as_f64()? as f32,
+            a[1].as_f64()? as f32,
+            a[2].as_f64()? as f32,
+        ])
+    }).unwrap_or([0.0; 3])
+}
+pub(crate) fn read_arr2(params: &HashMap<String, Value>, key: &str) -> [f32; 2] {
+    params.get(key).and_then(|v| v.as_array()).and_then(|a| {
+        if a.len() < 2 { return None; }
+        Some([a[0].as_f64()? as f32, a[1].as_f64()? as f32])
+    }).unwrap_or([0.0; 2])
+}
+pub(crate) fn read_radial(params: &HashMap<String, Value>, key: &str) -> [f32; STICK_RADIAL_BUCKETS] {
+    let mut out = [1.0_f32; STICK_RADIAL_BUCKETS];
+    let Some(arr) = params.get(key).and_then(|v| v.as_array()) else { return out; };
+    for i in 0..STICK_RADIAL_BUCKETS.min(arr.len()) {
+        if let Some(v) = arr[i].as_f64() { out[i] = v as f32; }
+    }
+    out
+}
+pub(crate) fn read_range(params: &HashMap<String, Value>, key_min: &str, key_max: &str) -> (f32, f32) {
+    let mn = params.get(key_min).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+    let mx = params.get(key_max).and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    (mn, mx)
+}
+
+pub(crate) fn read_sign3(params: &HashMap<String, Value>, key: &str) -> [f32; 3] {
+    let mut out = [1.0_f32; 3];
+    let Some(arr) = params.get(key).and_then(|v| v.as_array()) else { return out; };
+    for i in 0..3.min(arr.len()) {
+        if let Some(b) = arr[i].as_bool() {
+            out[i] = if b { -1.0 } else { 1.0 };
+        }
+    }
+    out
+}
+
+/// Read a 9-element float array (row-major Mat3) from params. Returns
+/// (matrix, active) where `active` is true if the matrix differs
+/// meaningfully from identity.
+pub(crate) fn read_orient_matrix(params: &HashMap<String, Value>, key: &str) -> ([f32; 9], bool) {
+    let Some(arr) = params.get(key).and_then(|v| v.as_array()) else {
+        return (IDENTITY_M3, false);
+    };
+    if arr.len() < 9 { return (IDENTITY_M3, false); }
+    let mut m = IDENTITY_M3;
+    for i in 0..9 {
+        if let Some(v) = arr[i].as_f64() { m[i] = v as f32; }
+    }
+    // Active if any element differs from identity by more than ~0.5°
+    // worth of rotation (≈ 0.01).
+    let mut active = false;
+    for i in 0..9 {
+        if (m[i] - IDENTITY_M3[i]).abs() > 0.01 { active = true; break; }
+    }
+    (m, active)
+}
+
+/// Apply a row-major 3×3 matrix to a 3-vector: `out = M · v`.
+#[inline]
+pub(crate) fn mat3_apply(m: &[f32; 9], v: [f32; 3]) -> [f32; 3] {
+    [
+        m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+        m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+        m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+    ]
+}
+
+pub(crate) fn load_device_cal(params: &HashMap<String, Value>) -> DeviceCal {
+    let (orient_matrix, orient_active) = read_orient_matrix(params, "gyro_orient_matrix");
+    // Absent or degenerate (zero-length) baselines are treated as "not
+    // calibrated" rather than normalised into something arbitrary — a
+    // zero quaternion would otherwise rotate every pose to garbage.
+    let baseline = params
+        .get("orientation_baseline")
+        .and_then(|v| v.as_array())
+        .filter(|a| a.len() == 4)
+        .map(|a| {
+            let mut q = [0.0f32; 4];
+            for (i, v) in a.iter().enumerate() {
+                q[i] = v.as_f64().unwrap_or(0.0) as f32;
+            }
+            q
+        })
+        .unwrap_or([0.0, 0.0, 0.0, 1.0]);
+    let baseline_active =
+        (baseline[0].powi(2) + baseline[1].powi(2) + baseline[2].powi(2) + baseline[3].powi(2))
+            .sqrt() > 0.5;
+    let dz_on = params.get("gyro_dz_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let dz_w  = params.get("gyro_dz_width").and_then(|v| v.as_f64()).unwrap_or(2.0) as f32;
+    let floor = |key: &str| -> f32 {
+        if !dz_on { return 0.0; }
+        (params.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 * dz_w).max(0.0)
+    };
+    DeviceCal {
+        gyro_offset:   read_arr3(params, "gyro_offset"),
+        accel_offset:  read_arr3(params, "accel_offset"),
+        gyro_sign:     read_sign3(params, "gyro_invert"),
+        accel_sign:    read_sign3(params, "accel_invert"),
+        orient_matrix,
+        orient_active,
+        orient_baseline: baseline,
+        orient_baseline_active: baseline_active,
+        gyro_dz:  floor("gyro_noise_floor"),
+        accel_dz: floor("accel_noise_floor"),
+        lstick_center: read_arr2(params, "lstick_center"),
+        rstick_center: read_arr2(params, "rstick_center"),
+        lstick_radial: read_radial(params, "lstick_radial"),
+        rstick_radial: read_radial(params, "rstick_radial"),
+        ltrig_range:   read_range(params, "ltrig_min", "ltrig_max"),
+        rtrig_range:   read_range(params, "rtrig_min", "rtrig_max"),
+        digital_triggers: params.get("digital_triggers").and_then(|v| v.as_bool()).unwrap_or(false),
+        ltrig_threshold: params.get("ltrig_digital_threshold").and_then(|v| v.as_f64())
+            .map(|v| v as f32).unwrap_or(TRIG_DIGITAL_THRESHOLD_DEFAULT),
+        rtrig_threshold: params.get("rtrig_digital_threshold").and_then(|v| v.as_f64())
+            .map(|v| v as f32).unwrap_or(TRIG_DIGITAL_THRESHOLD_DEFAULT),
+        trig_hysteresis: params.get("trig_hysteresis").and_then(|v| v.as_f64())
+            .map(|v| v as f32).unwrap_or(flexinput_core::automap::TRIGGER_HYSTERESIS),
+        trig_debounce: flexinput_core::automap::trigger_debounce_secs(
+            params.get("trig_debounce_ms").and_then(|v| v.as_f64()).map(|v| v as f32)),
+        rstick_dz: params.get("deadzone_r").and_then(|v| v.as_f64()).map(|v| v as f32),
+        trackpads: {
+            let pads = ["l", "r"].map(|side| TrackpadCal::from_params(params, side));
+            pads.iter().any(|p| !p.is_identity()).then_some(pads)
+        },
+    }
+}
+
+/// Scale a centered stick reading (x, y) so that the magnitude reaches 1.0
+/// along every direction, using a per-bucket radial scale profile. Buckets
+/// linearly-interpolate so the correction is smooth between sample angles.
+pub(crate) fn apply_stick_scale(x: f32, y: f32, profile: &[f32; STICK_RADIAL_BUCKETS]) -> (f32, f32) {
+    let r = (x * x + y * y).sqrt();
+    if r < 1e-5 { return (x, y); }
+    let theta = y.atan2(x); // -π..π
+    let norm = (theta / std::f32::consts::TAU + 1.0) % 1.0; // 0..1
+    let fpos = norm * STICK_RADIAL_BUCKETS as f32;
+    let i0 = fpos.floor() as usize % STICK_RADIAL_BUCKETS;
+    let i1 = (i0 + 1) % STICK_RADIAL_BUCKETS;
+    let t  = fpos - fpos.floor();
+    let s  = profile[i0] * (1.0 - t) + profile[i1] * t;
+    (x * s, y * s)
+}
+
+/// Renormalise a trigger reading from [raw_min, raw_max] to [0, 1] clamped.
+pub fn apply_trigger_range(v: f32, (mn, mx): (f32, f32)) -> f32 {
+    if (mx - mn).abs() < 1e-4 { return v; }
+    ((v - mn) / (mx - mn)).clamp(0.0, 1.0)
+}
+
+/// device.source per-pin post-processing pipeline:
+///   1. Calibration offsets / scales / ranges (from the node's params)
+///   2. Gyro multiplier (gyro pins only)
+///   3. Stick deadzone (stick pins only)
+///
+/// `imu_pre_applied` = true skips the per-pin offset+sign step for
+/// gyro/accel pins because `preprocess_dev_sigs` already did them
+/// together with the orientation-matrix transform.
+pub(crate) fn post_process_device_pin(
+    pin_id: &str,
+    sig: Signal,
+    dz: f32,
+    gm: f32,
+    cal: &DeviceCal,
+    imu_pre_applied: bool,
+) -> Signal {
+    // 1. Calibration. Offsets first, then optional axis sign flip.
+    let sig = match (pin_id, sig) {
+        ("gyro_x",  Signal::Float(v)) if !imu_pre_applied => Signal::Float((v - cal.gyro_offset[0])  * cal.gyro_sign[0]),
+        ("gyro_y",  Signal::Float(v)) if !imu_pre_applied => Signal::Float((v - cal.gyro_offset[1])  * cal.gyro_sign[1]),
+        ("gyro_z",  Signal::Float(v)) if !imu_pre_applied => Signal::Float((v - cal.gyro_offset[2])  * cal.gyro_sign[2]),
+        ("accel_x", Signal::Float(v)) if !imu_pre_applied => Signal::Float((v - cal.accel_offset[0]) * cal.accel_sign[0]),
+        ("accel_y", Signal::Float(v)) if !imu_pre_applied => Signal::Float((v - cal.accel_offset[1]) * cal.accel_sign[1]),
+        ("accel_z", Signal::Float(v)) if !imu_pre_applied => Signal::Float((v - cal.accel_offset[2]) * cal.accel_sign[2]),
+        // Absolute orientation, re-referenced to the captured baseline.
+        ("orientation", Signal::Vec4(v)) if cal.orient_baseline_active => {
+            let b = glam::Quat::from_xyzw(
+                cal.orient_baseline[0],
+                cal.orient_baseline[1],
+                cal.orient_baseline[2],
+                cal.orient_baseline[3],
+            )
+            .normalize();
+            let cur = glam::Quat::from_xyzw(v.x, v.y, v.z, v.w).normalize();
+            // `inverse * current`, so the result is the rotation FROM the
+            // baseline pose, and holding the device as it was when calibrated
+            // reads as identity.
+            let rel = (b.inverse() * cur).normalize();
+            Signal::Vec4(glam::Vec4::new(rel.x, rel.y, rel.z, rel.w))
+        }
+        ("left_stick_x", Signal::Float(v))  => Signal::Float(v - cal.lstick_center[0]),
+        ("left_stick_y", Signal::Float(v))  => Signal::Float(v - cal.lstick_center[1]),
+        ("right_stick_x", Signal::Float(v)) => Signal::Float(v - cal.rstick_center[0]),
+        ("right_stick_y", Signal::Float(v)) => Signal::Float(v - cal.rstick_center[1]),
+        ("left_stick",  Signal::Vec2(v)) => {
+            let cx = v.x - cal.lstick_center[0];
+            let cy = v.y - cal.lstick_center[1];
+            let (sx, sy) = apply_stick_scale(cx, cy, &cal.lstick_radial);
+            Signal::Vec2(Vec2::new(sx, sy))
+        }
+        ("right_stick", Signal::Vec2(v)) => {
+            let cx = v.x - cal.rstick_center[0];
+            let cy = v.y - cal.rstick_center[1];
+            let (sx, sy) = apply_stick_scale(cx, cy, &cal.rstick_radial);
+            Signal::Vec2(Vec2::new(sx, sy))
+        }
+        ("left_trigger",  Signal::Float(v)) => Signal::Float(apply_trigger_range(v, cal.ltrig_range)),
+        ("right_trigger", Signal::Float(v)) => Signal::Float(apply_trigger_range(v, cal.rtrig_range)),
+        (_, s) => s,
+    };
+
+    // 2 + 3. Gyro × multiplier, then stick deadzone — the right stick's own
+    // when it has one.
+    if is_stick_pin(pin_id) {
+        let dz = if pin_id.starts_with("right_") { cal.rstick_dz.unwrap_or(dz) } else { dz };
+        apply_deadzone(sig, dz)
+    } else if is_gyro_pin(pin_id) && (gm - 1.0).abs() > f32::EPSILON {
+        match sig {
+            Signal::Float(v) => Signal::Float(v * gm),
+            other => other,
+        }
+    } else {
+        sig
+    }
+}
+
+/// Build a copy of `dev_sigs` with each device.source node's calibration,
+/// deadzone and gyro_multiplier applied to its own device's pins. Called once
+/// at the top of `eval_graph_tick` so AutoMap (which reads dev_sigs directly)
+/// sees the same processed values as direct wires.
+/// Each `device.source`'s settings: read out of its JSON once per graph snapshot,
+/// where a tick used to parse them all again.
+#[derive(Clone)]
+pub struct DeviceParams {
+    /// Per device id: stick deadzone, gyro multiplier, calibration.
+    by_dev: HashMap<String, (f32, f32, DeviceCal)>,
+    /// A device's accel deadzone keeps a baseline that every run of the
+    /// preprocessing moves, and a snapped digital trigger lets go on a clock,
+    /// so neither can be skipped for a repeated input.
+    pub(crate) preprocessing_has_state: bool,
+}
+
+pub(crate) fn device_params(graph: &ProcessingGraph) -> &DeviceParams {
+    graph.device_params.get_or_init(|| {
+        let mut by_dev = HashMap::new();
+        for snap in &graph.nodes {
+            if snap.module_id != "device.source" { continue; }
+            let Some(dev_id) = snap.device_id.as_deref() else { continue; };
+            let dz = snap.params.get("deadzone").and_then(|v| v.as_f64())
+                .map(|v| v as f32).unwrap_or(DEFAULT_STICK_DEADZONE);
+            let gm = snap.params.get("gyro_multiplier").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let cal = load_device_cal(&snap.params);
+            by_dev.insert(dev_id.to_string(), (dz, gm, cal));
+        }
+        let preprocessing_has_state = by_dev.values()
+            .any(|(_, _, cal)| cal.accel_dz > 0.0 || cal.digital_triggers);
+        DeviceParams { by_dev, preprocessing_has_state }
+    })
+}
+
+thread_local! {
+    /// The IMU values of one preprocessing run, kept for the next one's tables.
+    static IMU_SCRATCH: std::cell::RefCell<BusMap> = std::cell::RefCell::new(BusMap::default());
+}
+
+#[cfg(test)]
+pub(crate) fn preprocess_dev_sigs<S: std::hash::BuildHasher>(
+    graph: &ProcessingGraph,
+    dev_sigs: &HashMap<(String, String), Signal, S>,
+) -> BusMap {
+    let mut out = BusMap::default();
+    preprocess_dev_sigs_into(graph, dev_sigs, &mut out, &mut DigitalTriggers::default(), 0.0);
+    out
+}
+
+/// Where each device's snapped digital triggers stand between ticks, left and
+/// right, for "Digital triggers" (see [`preprocess_dev_sigs_into`]).
+pub type DigitalTriggers = HashMap<String, [flexinput_core::automap::TriggerCrossing; 2]>;
+
+/// [`preprocess_dev_sigs`] into `out`, which must be empty: the tick hands in
+/// last tick's map, emptied by `recycle_keys`, so its table and key Strings are
+/// reused instead of rebuilt every tick. `snaps` carries the digital triggers
+/// from tick to tick, `dt` seconds apart.
+pub(crate) fn preprocess_dev_sigs_into<S: std::hash::BuildHasher>(
+    graph: &ProcessingGraph,
+    dev_sigs: &HashMap<(String, String), Signal, S>,
+    out: &mut BusMap,
+    snaps: &mut DigitalTriggers,
+    dt: f32,
+) {
+    let params = &device_params(graph).by_dev;
+    // Fallback for devices whose signals reach AutoMap consumers without a
+    // `device.source` node in the graph. Stick deadzone still applies (using
+    // the default) so analog stick→key / stick→button mappings don't pass raw
+    // sub-deadzone jitter through. gyro_multiplier stays at unity.
+    let default_entry = (DEFAULT_STICK_DEADZONE, 1.0_f32, DeviceCal::default());
+
+    // ── Pass 1: 3-axis matrix transform for gyro/accel triples ──────────────
+    //
+    // The orientation matrix needs all 3 axes at once, which the per-pin
+    // pipeline can't see. We collect each device's gyro/accel triples,
+    // apply offset → matrix → sign, and pre-write the corrected values
+    // into a side map that pass 2 reads from instead of the raw signal.
+    let mut imu_override: BusMap = IMU_SCRATCH.with(|s| std::mem::take(&mut *s.borrow_mut()));
+    for (dev_id, (_, _, cal)) in params {
+        let read_f = |pin: &str| -> Option<f32> {
+            dev_sigs.get_pin(&dev_id, &pin).and_then(|s| {
+                if let Signal::Float(v) = s { Some(*v) } else { None }
+            })
+        };
+        let gxyz = (read_f("gyro_x"), read_f("gyro_y"), read_f("gyro_z"));
+        if let (Some(gx), Some(gy), Some(gz)) = gxyz {
+            let v = [
+                gx - cal.gyro_offset[0],
+                gy - cal.gyro_offset[1],
+                gz - cal.gyro_offset[2],
+            ];
+            let v = if cal.orient_active { mat3_apply(&cal.orient_matrix, v) } else { v };
+            let mut out = [
+                v[0] * cal.gyro_sign[0],
+                v[1] * cal.gyro_sign[1],
+                v[2] * cal.gyro_sign[2],
+            ];
+            // Noise-floor deadzone: gate on the MAGNITUDE of the triple so a
+            // slow diagonal rotation never steps per axis. Below the floor
+            // the whole vector is noise → zero it (this is what stops the
+            // 3D-orientation drift and lean bias at rest). Crossing the
+            // border eases in exponentially over ~3 border-widths instead of
+            // snapping from 0 to the full value.
+            if cal.gyro_dz > 0.0 {
+                let mag = (out[0] * out[0] + out[1] * out[1] + out[2] * out[2]).sqrt();
+                let s = gyro_dz_ease(mag, cal.gyro_dz);
+                out = [out[0] * s, out[1] * s, out[2] * s];
+            }
+            imu_override.set_pin(&dev_id, "gyro_x", Signal::Float(out[0]));
+            imu_override.set_pin(&dev_id, "gyro_y", Signal::Float(out[1]));
+            imu_override.set_pin(&dev_id, "gyro_z", Signal::Float(out[2]));
+        }
+        let axyz = (read_f("accel_x"), read_f("accel_y"), read_f("accel_z"));
+        if let (Some(ax), Some(ay), Some(az)) = axyz {
+            let v = [
+                ax - cal.accel_offset[0],
+                ay - cal.accel_offset[1],
+                az - cal.accel_offset[2],
+            ];
+            let v = if cal.orient_active { mat3_apply(&cal.orient_matrix, v) } else { v };
+            let mut out = [
+                v[0] * cal.accel_sign[0],
+                v[1] * cal.accel_sign[1],
+                v[2] * cal.accel_sign[2],
+            ];
+            // Dynamic noise-floor deadzone: accel's "center" is gravity and
+            // moves with device rotation, so a fixed gate can't work. Hold a
+            // per-device baseline instead — deviations under the floor emit
+            // the baseline (noise suppressed at rest); past the border the
+            // baseline chases the reading with the same exponential ease as
+            // the gyro gate, so real rotation follows with no snap and error
+            // bounded by ~the floor.
+            if cal.accel_dz > 0.0 {
+                let map = ACCEL_DZ_BASELINE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+                let mut map = map.lock().unwrap();
+                let base = map.entry(dev_id.clone()).or_insert(out);
+                let d = ((out[0] - base[0]).powi(2)
+                    + (out[1] - base[1]).powi(2)
+                    + (out[2] - base[2]).powi(2))
+                    .sqrt();
+                let s = gyro_dz_ease(d, cal.accel_dz);
+                if s > 0.0 {
+                    for i in 0..3 { base[i] += (out[i] - base[i]) * s; }
+                }
+                out = *base;
+            }
+            imu_override.set_pin(&dev_id, "accel_x", Signal::Float(out[0]));
+            imu_override.set_pin(&dev_id, "accel_y", Signal::Float(out[1]));
+            imu_override.set_pin(&dev_id, "accel_z", Signal::Float(out[2]));
+        }
+    }
+
+    // ── Pass 2: per-pin pipeline ──────────────────────────────────────────────
+    let mut last: Option<(&str, &(f32, f32, DeviceCal))> = None;
+    for (key, sig) in dev_sigs.iter() {
+        let entry = match last {
+            Some((dev, entry)) if dev == key.0 => entry,
+            _ => params.get(&key.0).unwrap_or(&default_entry),
+        };
+        last = Some((&key.0, entry));
+        // Use the matrix-transformed value when this is a gyro/accel pin
+        // that we pre-processed; the per-pin function will still apply
+        // gyro_multiplier (gyro only) but skip its own offset + sign.
+        let src = imu_override.get(key).copied().unwrap_or(*sig);
+        let is_imu = matches!(key.1.as_str(),
+            "gyro_x" | "gyro_y" | "gyro_z" |
+            "accel_x" | "accel_y" | "accel_z");
+        out.set_pin(
+            &key.0,
+            &key.1,
+            post_process_device_pin(&key.1, src, entry.0, entry.1, &entry.2, is_imu),
+        );
+    }
+
+    // ── Pass 3: digital-trigger snap ────────────────────────────────────────
+    //
+    // When a device.source opted into "Digital triggers", its analog triggers
+    // become a thresholded snap: the calibrated (0..1) value outputs full
+    // deflection once it crosses the per-side digital threshold, else 0.0 —
+    // staying Float so Float-consuming wires (direct or AutoMap) still work.
+    // The matching digital buttons (`btn_lt_dig` / `btn_rt_dig`) are re-derived
+    // from the SAME threshold, so the pad's own early-firing L2/R2 flag no
+    // longer leaks through and the Calibration threshold actually takes effect.
+    //
+    // Applied at the source (not as the lowest-priority AutoMap-sink fallback
+    // used for digital-ONLY pads) because the user explicitly asked for this
+    // pad's real analog travel to read as digital everywhere downstream. Pads
+    // without an analog `left_trigger`/`right_trigger` (e.g. Switch Pro) have
+    // nothing to snap here and fall through to that sink-side bridge unchanged.
+    imu_override.clear();
+    IMU_SCRATCH.with(|s| *s.borrow_mut() = imu_override);
+    for (dev_id, (_, _, cal)) in params {
+        if !cal.digital_triggers { continue; }
+        if !snaps.contains_key(dev_id) {
+            snaps.insert(dev_id.clone(), Default::default());
+        }
+        let Some(crossing) = snaps.get_mut(dev_id) else { continue };
+        for (side, (analog_pin, dig_pin, thr, range)) in [
+            ("left_trigger",  "btn_lt_dig", cal.ltrig_threshold, cal.ltrig_range),
+            ("right_trigger", "btn_rt_dig", cal.rtrig_threshold, cal.rtrig_range),
+        ].into_iter().enumerate() {
+            let Some(Signal::Float(v)) = out.get_pin(dev_id, analog_pin).copied() else { continue };
+            // Down at the threshold from rest, up once under the band around it
+            // for the debounce, so an unsteady pull at the point doesn't flicker
+            // it (`TriggerCrossing::step`). A threshold at rest fires on any
+            // movement off it. The band is a share of the full travel, so on
+            // this calibrated value it's as much wider as the range is narrower.
+            use flexinput_core::automap::{trigger_band_width, trigger_edges};
+            let edges = trigger_edges(thr, (0.0, 1.0), trigger_band_width(cal.trig_hysteresis, range));
+            crossing[side].step(&edges, v, dt, cal.trig_debounce);
+            let over = crossing[side].down();
+            out.set_pin(dev_id, analog_pin, Signal::Float(if over { 1.0 } else { 0.0 }));
+            out.set_pin(&dev_id, &dig_pin, Signal::Bool(over));
+        }
+    }
+
+    // Stash each device's `gyro_multiplier` under a synthetic pin key so the
+    // Gyro 3DOF module can divide it back out of its orientation quaternion
+    // (keeping the 3D pose 1:1 while the multiplier still scales the 2D pointer
+    // output). "__gyro_mult" is not a real pin, so per-name pin lookups and the
+    // canonical pin lists never surface it.
+    for (dev_id, (_, gm, _)) in params {
+        out.set_pin(&dev_id, "__gyro_mult", Signal::Float(*gm));
+    }
+}
+
+pub(crate) fn apply_deadzone(sig: Signal, dz: f32) -> Signal {
+    if dz <= 0.0 { return sig; }
+    match sig {
+        Signal::Float(v) => {
+            let av = v.abs();
+            if av < dz { Signal::Float(0.0) }
+            else { Signal::Float(v.signum() * (av - dz) / (1.0 - dz).max(f32::EPSILON)) }
+        }
+        Signal::Vec2(v) => {
+            let len = v.length();
+            if len < dz { Signal::Vec2(Vec2::ZERO) }
+            else { Signal::Vec2(v / len * (len - dz) / (1.0 - dz).max(f32::EPSILON)) }
+        }
+        other => other,
+    }
+}
+
+// ── Trackpads ────────────────────────────────────────────────────────────────
+//
+// Where a thumb reaches on a trackpad depends on how it lies on it: held as in
+// play, a corner or two is out of reach. The Calibration window traces each
+// pad's edge as the thumb reaches it, and `tpad_{l,r}_radial` scales each
+// direction so that reach lands on the pad's square edge. Then the outer
+// deadzone reads the band inside the edge as the edge itself, and the offset
+// moves that frame in from the pad's grip side, where a thumb moving that way
+// slides off over the edge before it gets there: the left pad's to the right,
+// the right pad's to the left.
+
+/// The touch field pins of a pad's two trackpads (a Steam Controller's): x, y,
+/// contact, left then right.
+const TRACKPAD_FIELDS: [[&str; 3]; 2] = [
+    ["touch1_x", "touch1_y", "touch1_active"],
+    ["touch2_x", "touch2_y", "touch2_active"],
+];
+
+/// One trackpad's calibration (`tpad_{side}_*` on its device.source): each
+/// direction's scale out to the square edge, the outer deadzone, and how far the
+/// live square is moved off the grip side (`+` right), each a share of the pad's
+/// half width.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TrackpadCal {
+    pub radial: [f32; STICK_RADIAL_BUCKETS],
+    pub deadzone: f32,
+    pub shift: f32,
+}
+
+impl Default for TrackpadCal {
+    fn default() -> Self {
+        Self { radial: [1.0; STICK_RADIAL_BUCKETS], deadzone: 0.0, shift: 0.0 }
+    }
+}
+
+/// How wide the outer deadzone can be, and how far the offset can go.
+pub const TRACKPAD_DEADZONE_MAX: f32 = 0.4;
+pub const TRACKPAD_OFFSET_MAX: f32 = 0.4;
+
+impl TrackpadCal {
+    /// A side's (`"l"` / `"r"`) calibration as a device.source's params hold it.
+    pub fn from_params(params: &HashMap<String, Value>, side: &str) -> Self {
+        let share = |key: &str, max: f32| params.get(&format!("tpad_{side}_{key}"))
+            .and_then(|v| v.as_f64()).map_or(0.0, |v| (v as f32).clamp(0.0, max));
+        let offset = share("offset", TRACKPAD_OFFSET_MAX);
+        Self {
+            radial: read_radial(params, &format!("tpad_{side}_radial")),
+            deadzone: share("deadzone", TRACKPAD_DEADZONE_MAX),
+            shift: if side == "r" { -offset } else { offset },
+        }
+    }
+
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// A point on the pad (pad units, ±1, +y up) where calibration puts it,
+    /// still inside the pad.
+    pub fn calibrated(&self, x: f32, y: f32) -> Vec2 {
+        let (x, y) = apply_stick_scale(x, y, &self.radial);
+        Vec2::new(x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0))
+    }
+
+    /// The live square, inside the outer deadzone and moved by the offset: its
+    /// left, right, bottom and top on the calibrated pad. What lies past it reads
+    /// as the edge. Moved past the deadzone, it stops at the pad's far edge and
+    /// narrows from the grip side.
+    pub fn live(&self) -> [f32; 4] {
+        let reach = 1.0 - self.deadzone;
+        let left = (-reach + self.shift).max(-1.0);
+        let right = (reach + self.shift).min(1.0);
+        [left, right.max(left + 0.2), -reach, reach]
+    }
+
+    /// A calibrated point through the outer deadzone and the offset: the live
+    /// square's centre reads as the middle, its sides as the edges.
+    pub fn deadzoned(&self, p: Vec2) -> Vec2 {
+        let [left, right, bottom, top] = self.live();
+        let centre = Vec2::new((left + right) * 0.5, (bottom + top) * 0.5);
+        let half = Vec2::new((right - left) * 0.5, (top - bottom) * 0.5);
+        ((p - centre) / half).clamp(Vec2::splat(-1.0), Vec2::ONE)
+    }
+}
+
+/// Apply each device.source's trackpad calibration to its touch fields, once per
+/// tick: the calibrated point through the deadzone and offset.
+pub(crate) fn filter_trackpads(graph: &ProcessingGraph, sigs: &mut BusMap) {
+    for (dev, (_, _, cal)) in &device_params(graph).by_dev {
+        let Some(pads) = &cal.trackpads else { continue };
+        for (pad, [px, py, pa]) in pads.iter().zip(TRACKPAD_FIELDS) {
+            if !matches!(sigs.get_pin(dev, pa), Some(Signal::Bool(true))) {
+                continue;
+            }
+            let (Some(Signal::Float(x)), Some(Signal::Float(y))) =
+                (sigs.get_pin(dev, px).copied(), sigs.get_pin(dev, py).copied()) else { continue };
+            let q = pad.deadzoned(pad.calibrated(x, y));
+            sigs.set_pin(dev, px, Signal::Float(q.x));
+            sigs.set_pin(dev, py, Signal::Float(q.y));
+        }
+    }
+}
+
+#[cfg(test)]
+mod trackpad_tests {
+    use super::*;
+
+    fn pad(radial: f32, deadzone: f32, shift: f32) -> TrackpadCal {
+        TrackpadCal { radial: [radial; STICK_RADIAL_BUCKETS], deadzone, shift }
+    }
+
+    fn close(a: Vec2, b: Vec2) -> bool {
+        (a - b).length() < 1e-5
+    }
+
+    #[test]
+    fn calibration_scales_the_reach_out_to_the_edge_and_no_further() {
+        let p = pad(1.25, 0.0, 0.0);
+        assert!(close(p.calibrated(0.8, 0.0), Vec2::new(1.0, 0.0)));
+        assert!(close(p.calibrated(0.4, -0.4), Vec2::new(0.5, -0.5)));
+        assert_eq!(p.calibrated(0.9, 0.0), Vec2::new(1.0, 0.0), "clamped to the pad");
+    }
+
+    #[test]
+    fn the_outer_deadzone_reads_its_band_as_the_edge() {
+        let p = pad(1.0, 0.2, 0.0);
+        assert_eq!(p.live(), [-0.8, 0.8, -0.8, 0.8]);
+        assert!(close(p.deadzoned(Vec2::new(0.4, 0.0)), Vec2::new(0.5, 0.0)));
+        assert_eq!(p.deadzoned(Vec2::new(0.9, -0.95)), Vec2::new(1.0, -1.0));
+    }
+
+    // The left pad's offset moves its frame right, away from its grip: the edge
+    // comes sooner that way, the middle moves with it, up and down stay put.
+    #[test]
+    fn the_offset_moves_the_frame_off_the_grip_side() {
+        let mut params = HashMap::new();
+        params.insert("tpad_l_offset".to_string(), Value::from(0.1));
+        params.insert("tpad_l_deadzone".to_string(), Value::from(0.2));
+        params.insert("tpad_r_offset".to_string(), Value::from(0.1));
+        let (l, r) = (TrackpadCal::from_params(&params, "l"), TrackpadCal::from_params(&params, "r"));
+        assert!(close(Vec2::from_slice(&l.live()[..2]), Vec2::new(-0.7, 0.9)), "{:?}", l.live());
+        assert!(close(l.deadzoned(Vec2::new(0.1, 0.0)), Vec2::ZERO), "the middle moved right");
+        assert_eq!(l.deadzoned(Vec2::new(-0.75, 0.0)).x, -1.0, "the grip side's edge sooner");
+        assert!(close(l.deadzoned(Vec2::new(0.1, 0.4)), Vec2::new(0.0, 0.5)));
+        // With no deadzone to move into, the far side stays at the pad's edge.
+        assert!(close(Vec2::from_slice(&r.live()[..2]), Vec2::new(-1.0, 0.9)), "{:?}", r.live());
+        assert!(close(r.deadzoned(Vec2::new(-1.0, 0.0)), Vec2::new(-1.0, 0.0)));
+        assert!(close(r.deadzoned(Vec2::new(0.9, 0.0)), Vec2::new(1.0, 0.0)));
+    }
+}
+
+// ── Stick rebound filter ─────────────────────────────────────────────────────
+//
+// A stick let go from a deflection springs back to the centre fast enough to
+// overshoot it: for a few tens of milliseconds it reads as pushed the OTHER way,
+// then settles. Anything reading direction sees that as a real input — a flick
+// stick turns back the way it came, a stick → key mapping taps the opposite key.
+//
+// Opt-in per device (`stick_rebound_enabled` on the device.source, window
+// `stick_rebound_ms`). A RELEASE is a stick that was held out (past
+// `REBOUND_HELD`) and is back at the centre — or already past it — within
+// `REBOUND_SNAP_S`: a spring return, far faster than a thumb steering through
+// the middle. For the window after a release, whatever lands on the far side
+// of the centre reads as the centre, and so does anything inside the centre
+// radius. Pushing back out the way it was released ends the window at once
+// (that's a real input); a push the other way that outlasts the window passes
+// as soon as the window ends.
+//
+// After the window the spring is still ringing, at a smaller amplitude: for
+// `REBOUND_SETTLE_X` windows more, a reading inside the centre radius still
+// reads as the centre. Anything past it is a real move — it passes, and ends
+// the settling.
+
+/// How far out a stick must be to count as held, so that springing back from
+/// there is a release.
+const REBOUND_HELD: f32 = 0.25;
+/// Back at the centre: inside this.
+const REBOUND_CENTRE: f32 = 0.15;
+/// A spring return gets from held to the centre within this long — a poll or
+/// two even on a 66 Hz Bluetooth pad. A thumb steering through the middle takes
+/// longer and is left alone.
+const REBOUND_SNAP_S: f64 = 0.035;
+/// The settling after the window, in windows.
+const REBOUND_SETTLE_X: f64 = 3.0;
+/// The window when a device has the filter on and no window of its own.
+pub const STICK_REBOUND_MS_DEFAULT: f32 = 40.0;
+
+/// One stick's rebound tracker.
+#[derive(Clone, Copy, Debug)]
+pub struct StickRebound {
+    /// Which way the stick was last held out (unit), and when.
+    held_dir: Vec2,
+    held_t: f64,
+    /// The release being filtered — the side it was let go from — when the
+    /// window ends, and when the settling after it ends.
+    release_dir: Vec2,
+    until: f64,
+    settle_until: f64,
+}
+
+impl Default for StickRebound {
+    fn default() -> Self {
+        Self {
+            held_dir: Vec2::ZERO,
+            held_t: f64::NEG_INFINITY,
+            release_dir: Vec2::ZERO,
+            until: f64::NEG_INFINITY,
+            settle_until: f64::NEG_INFINITY,
+        }
+    }
+}
+
+impl StickRebound {
+    /// Filter one reading `p` at time `t` (seconds) with a `window_s` window.
+    pub fn step(&mut self, p: Vec2, t: f64, window_s: f64) -> Vec2 {
+        let m = p.length();
+        if t < self.until {
+            if m >= REBOUND_HELD && p.dot(self.release_dir) > 0.0 {
+                // Pushed out again the way it was let go: real, and held anew.
+                self.until = f64::NEG_INFINITY;
+                self.settle_until = f64::NEG_INFINITY;
+                self.held_dir = p / m;
+                self.held_t = t;
+                return p;
+            }
+            if p.dot(self.release_dir) < 0.0 || m < REBOUND_CENTRE {
+                return Vec2::ZERO;
+            }
+            return p;
+        }
+        if t < self.settle_until {
+            if m < REBOUND_CENTRE {
+                return Vec2::ZERO;
+            }
+            // Out past the ringing: a real move.
+            self.settle_until = f64::NEG_INFINITY;
+        }
+        if m >= REBOUND_HELD {
+            self.held_dir = p / m;
+            self.held_t = t;
+            return p;
+        }
+        let sprang = t - self.held_t <= REBOUND_SNAP_S;
+        if sprang && (m < REBOUND_CENTRE || p.dot(self.held_dir) < 0.0) {
+            self.release_dir = self.held_dir;
+            self.until = t + window_s;
+            self.settle_until = self.until + window_s * REBOUND_SETTLE_X;
+            self.held_t = f64::NEG_INFINITY;
+            return Vec2::ZERO;
+        }
+        p
+    }
+}
+
+/// Every device's stick rebound trackers, and the clock they run on (f64: it
+/// runs for the life of the engine). Kept on the reserved carry entry's state.
+#[derive(Default)]
+pub struct StickReboundState {
+    clock: f64,
+    sticks: HashMap<(String, &'static str), StickRebound>,
+}
+
+/// Apply the rebound filter to the calibrated device signals, once per tick,
+/// for each device.source that has it on. Writes every form of a filtered stick
+/// (the Vec2 and its two axes) so no reader sees the bounce through another.
+pub(crate) fn filter_stick_rebound(
+    graph: &ProcessingGraph,
+    sigs: &mut BusMap,
+    st: &mut StickReboundState,
+    dt: f32,
+) {
+    st.clock += dt as f64;
+    let t = st.clock;
+    let mut done: HashSet<&str> = HashSet::new();
+    for snap in &graph.nodes {
+        if snap.module_id != "device.source" { continue; }
+        let Some(dev) = snap.device_id.as_deref() else { continue };
+        if !snap.params.get("stick_rebound_enabled").and_then(|v| v.as_bool()).unwrap_or(false) { continue; }
+        if !done.insert(dev) { continue; }
+        let ms = snap.params.get("stick_rebound_ms").and_then(|v| v.as_f64())
+            .map(|v| v as f32).unwrap_or(STICK_REBOUND_MS_DEFAULT).clamp(0.0, 1000.0);
+        let window_s = ms as f64 / 1000.0;
+        for stick in ["left_stick", "right_stick"] {
+            let key = |pin: String| (dev.to_string(), pin);
+            let vec_key = key(stick.to_string());
+            let (x_key, y_key) = (key(format!("{stick}_x")), key(format!("{stick}_y")));
+            let p = match sigs.get(&vec_key) {
+                Some(Signal::Vec2(v)) => *v,
+                _ => match (sigs.get(&x_key), sigs.get(&y_key)) {
+                    (Some(Signal::Float(x)), Some(Signal::Float(y))) => Vec2::new(*x, *y),
+                    _ => continue,
+                },
+            };
+            let r = st.sticks.entry((dev.to_string(), stick)).or_default();
+            let q = r.step(p, t, window_s);
+            if q != p {
+                if sigs.contains_key(&vec_key) { sigs.insert(vec_key, Signal::Vec2(q)); }
+                if sigs.contains_key(&x_key) { sigs.insert(x_key, Signal::Float(q.x)); }
+                if sigs.contains_key(&y_key) { sigs.insert(y_key, Signal::Float(q.y)); }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod stick_rebound_tests {
+    use super::*;
+
+    // 1 ms ticks: a stick held right, let go, overshooting left and settling.
+    fn run(r: &mut StickRebound, t: &mut f64, p: Vec2, ms: usize, window_s: f64) -> Vec<Vec2> {
+        (0..ms).map(|_| { *t += 0.001; r.step(p, *t, window_s) }).collect()
+    }
+
+    #[test]
+    fn a_spring_release_past_the_centre_reads_as_the_centre() {
+        let (mut r, mut t) = (StickRebound::default(), 0.0);
+        run(&mut r, &mut t, Vec2::new(1.0, 0.0), 100, 0.04);
+        // Let go: centre within a few ms, then the bounce to the left.
+        run(&mut r, &mut t, Vec2::new(0.05, 0.0), 5, 0.04);
+        let bounce = run(&mut r, &mut t, Vec2::new(-0.5, 0.05), 20, 0.04);
+        assert!(bounce.iter().all(|v| *v == Vec2::ZERO), "{bounce:?}");
+        // The window over, a stick still pushed left is a real input.
+        run(&mut r, &mut t, Vec2::new(-0.5, 0.0), 30, 0.04);
+        assert_eq!(r.step(Vec2::new(-0.5, 0.0), t + 0.001, 0.04), Vec2::new(-0.5, 0.0));
+    }
+
+    #[test]
+    fn the_ringing_after_the_window_settles_at_the_centre() {
+        let (mut r, mut t) = (StickRebound::default(), 0.0);
+        run(&mut r, &mut t, Vec2::new(1.0, 0.0), 100, 0.04);
+        run(&mut r, &mut t, Vec2::new(0.05, 0.0), 3, 0.04);
+        run(&mut r, &mut t, Vec2::new(-0.4, 0.0), 30, 0.04);
+        // Past the window, still ringing inside the centre, both ways.
+        for p in [Vec2::new(0.08, 0.0), Vec2::new(-0.06, 0.02), Vec2::new(0.03, 0.0)] {
+            let out = run(&mut r, &mut t, p, 20, 0.04);
+            assert!(out.iter().all(|v| *v == Vec2::ZERO), "{p:?} → {out:?}");
+        }
+        // A real move out of the centre passes, and ends the settling.
+        assert_eq!(run(&mut r, &mut t, Vec2::new(0.2, 0.0), 1, 0.04)[0], Vec2::new(0.2, 0.0));
+        assert_eq!(run(&mut r, &mut t, Vec2::new(0.05, 0.0), 1, 0.04)[0], Vec2::new(0.05, 0.0));
+    }
+
+    #[test]
+    fn a_slow_steer_through_the_centre_is_left_alone() {
+        let (mut r, mut t) = (StickRebound::default(), 0.0);
+        run(&mut r, &mut t, Vec2::new(0.8, 0.0), 50, 0.04);
+        // 200 ms to cross from held to the far side: a thumb, not a spring.
+        for i in 0..200 {
+            t += 0.001;
+            let x = 0.3 - 0.6 * (i as f32 / 200.0);
+            let p = Vec2::new(x, 0.0);
+            assert_eq!(r.step(p, t, 0.04), p, "at x={x}");
+        }
+    }
+
+    #[test]
+    fn pushing_back_out_the_same_way_passes_at_once() {
+        let (mut r, mut t) = (StickRebound::default(), 0.0);
+        run(&mut r, &mut t, Vec2::new(0.0, 1.0), 50, 0.04);
+        run(&mut r, &mut t, Vec2::ZERO, 3, 0.04);
+        let back = run(&mut r, &mut t, Vec2::new(0.0, 0.9), 5, 0.04);
+        assert!(back.iter().all(|v| *v == Vec2::new(0.0, 0.9)));
+    }
+
+    #[test]
+    fn every_form_of_the_stick_is_filtered_and_only_when_on() {
+        let mut snap = NodeSnap {
+            node_uid: 1,
+            module_id: "device.source".into(),
+            params: HashMap::new(),
+            n_outputs: 0,
+            input_sources: Vec::new(),
+            device_id: Some("pad".into()),
+            output_pin_ids: Vec::new(),
+            aux_f32_override: None,
+            sink_target: None,
+            inline_subgraph: None,
+        };
+        let sigs_at = |x: f32| -> BusMap {
+            [
+                (("pad".into(), "right_stick".into()), Signal::Vec2(Vec2::new(x, 0.0))),
+                (("pad".into(), "right_stick_x".into()), Signal::Float(x)),
+                (("pad".into(), "right_stick_y".into()), Signal::Float(0.0)),
+            ].into_iter().collect()
+        };
+        let drive = |graph: &ProcessingGraph| {
+            let mut st = StickReboundState::default();
+            for _ in 0..50 { filter_stick_rebound(graph, &mut sigs_at(1.0), &mut st, 0.001); }
+            filter_stick_rebound(graph, &mut sigs_at(0.0), &mut st, 0.001);
+            let mut bounce = sigs_at(-0.4);
+            filter_stick_rebound(graph, &mut bounce, &mut st, 0.001);
+            bounce
+        };
+        let off = drive(&ProcessingGraph { nodes: vec![snap.clone()], ..Default::default() });
+        assert_eq!(off[&("pad".to_string(), "right_stick_x".to_string())], Signal::Float(-0.4), "off by default");
+
+        snap.params.insert("stick_rebound_enabled".into(), Value::Bool(true));
+        let on = drive(&ProcessingGraph { nodes: vec![snap], ..Default::default() });
+        assert_eq!(on[&("pad".to_string(), "right_stick".to_string())], Signal::Vec2(Vec2::ZERO));
+        assert_eq!(on[&("pad".to_string(), "right_stick_x".to_string())], Signal::Float(0.0));
+        assert_eq!(on[&("pad".to_string(), "right_stick_y".to_string())], Signal::Float(0.0));
+    }
+}
+
+#[cfg(test)]
+mod orientation_baseline_tests {
+    use super::*;
+    use glam::{Quat, Vec4};
+
+    fn cal_with(baseline: Option<[f32; 4]>) -> DeviceCal {
+        let mut params: HashMap<String, Value> = HashMap::new();
+        if let Some(b) = baseline {
+            params.insert(
+                "orientation_baseline".into(),
+                serde_json::json!(b.iter().map(|v| *v as f64).collect::<Vec<_>>()),
+            );
+        }
+        load_device_cal(&params)
+    }
+
+    fn orient(cal: &DeviceCal, q: Quat) -> Quat {
+        match post_process_device_pin(
+            "orientation",
+            Signal::Vec4(Vec4::new(q.x, q.y, q.z, q.w)),
+            0.0,
+            1.0,
+            cal,
+            false,
+        ) {
+            Signal::Vec4(v) => Quat::from_xyzw(v.x, v.y, v.z, v.w),
+            other => panic!("expected Vec4, got {other:?}"),
+        }
+    }
+
+    /// An uncalibrated device must publish its world pose untouched. Silently
+    /// re-referencing it to identity would make a patch that never calibrated
+    /// look like it worked, then behave differently after calibration.
+    #[test]
+    fn without_a_baseline_the_pose_passes_through() {
+        let cal = cal_with(None);
+        let q = Quat::from_rotation_y(0.7);
+        let out = orient(&cal, q);
+        assert!((out.dot(q).abs() - 1.0).abs() < 1e-5, "{out:?} != {q:?}");
+    }
+
+    /// The headline behaviour: holding the device exactly as it was when
+    /// calibrated must read as identity — that is what "baseline" means.
+    #[test]
+    fn the_captured_pose_reads_as_identity() {
+        let q = Quat::from_rotation_z(1.2);
+        let cal = cal_with(Some([q.x, q.y, q.z, q.w]));
+        let out = orient(&cal, q);
+        assert!(
+            (out.dot(Quat::IDENTITY).abs() - 1.0).abs() < 1e-5,
+            "baseline pose should cancel to identity, got {out:?}"
+        );
+    }
+
+    /// Rotation FROM the baseline, not the baseline applied on top: capture
+    /// flat, turn 90°, and the output must be that 90° — not 90° plus whatever
+    /// the world offset happened to be.
+    #[test]
+    fn output_is_the_rotation_relative_to_the_baseline() {
+        let base = Quat::from_rotation_z(0.5);
+        let cal = cal_with(Some([base.x, base.y, base.z, base.w]));
+        let turn = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+        let out = orient(&cal, base * turn);
+        assert!((out.dot(turn).abs() - 1.0).abs() < 1e-5, "{out:?} != {turn:?}");
+    }
+
+    /// A zero-length baseline is not a rotation. Normalising it would produce
+    /// NaNs and send every downstream pose to garbage, so it must be treated as
+    /// "not calibrated" instead.
+    #[test]
+    fn a_degenerate_baseline_is_ignored_rather_than_normalised() {
+        let cal = cal_with(Some([0.0; 4]));
+        let q = Quat::from_rotation_x(0.3);
+        let out = orient(&cal, q);
+        assert!(out.is_finite(), "degenerate baseline produced {out:?}");
+        assert!((out.dot(q).abs() - 1.0).abs() < 1e-5);
+    }
+}

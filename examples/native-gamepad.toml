@@ -1,0 +1,10 @@
+# FlexInput AutoMap 自动映射标准按键、方向键、双摇杆、双扳机。
+# 输出需要 ViGEmBus。可将目标改为 "dualshock_4"。
+schema_version = 1
+name = "虚拟 Xbox 360"
+virtual_gamepad = "xbox_360"
+stick_deadzone = 0.12
+
+[gyro]
+enabled = false
+

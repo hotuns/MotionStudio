@@ -1,0 +1,1022 @@
+{
+  "repository": "https://github.com/x-iso/FlexInput",
+  "commit": "c69f53ad3bca4ed34ef5f2d63509addaa7c767be",
+  "version": "0.16.9",
+  "files": [
+    {
+      "path": "LICENSE",
+      "upstreamSha256": "36ee17196284116b0bd9890dbf99ab2a68e3f77a7c0953d24f1399d97fa95fa7",
+      "vendoredSha256": "36ee17196284116b0bd9890dbf99ab2a68e3f77a7c0953d24f1399d97fa95fa7",
+      "modified": false
+    },
+    {
+      "path": "crates/core/Cargo.toml",
+      "upstreamSha256": "4bff225ce282edbf679a9c679a74717f8394b0e708b38b3bdc7c5d51f451f8fe",
+      "vendoredSha256": "4bff225ce282edbf679a9c679a74717f8394b0e708b38b3bdc7c5d51f451f8fe",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/area.rs",
+      "upstreamSha256": "57acefef03f062f319cb6fe4195b6c3ad76233dd36981b19d54621f51b33447b",
+      "vendoredSha256": "57acefef03f062f319cb6fe4195b6c3ad76233dd36981b19d54621f51b33447b",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/automap.rs",
+      "upstreamSha256": "86803ff7e8167c4cb5186a63534b7a75243f9777adb00d522ee5384e903a40a2",
+      "vendoredSha256": "86803ff7e8167c4cb5186a63534b7a75243f9777adb00d522ee5384e903a40a2",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/busmap.rs",
+      "upstreamSha256": "290735eb2449f5d3f729fc383dd7eef3bf2a81044cfbaaaae077ca379c12ee72",
+      "vendoredSha256": "290735eb2449f5d3f729fc383dd7eef3bf2a81044cfbaaaae077ca379c12ee72",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/flick.rs",
+      "upstreamSha256": "df8b0c21a2c398cb71cd4b9f52a86569259622a68d9feda8ad8884e4741a5ddf",
+      "vendoredSha256": "df8b0c21a2c398cb71cd4b9f52a86569259622a68d9feda8ad8884e4741a5ddf",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/frames.rs",
+      "upstreamSha256": "103f4366741f7195e2d38be9f5647c4c3e82da08e105a6a7bc44ccadfcb8e49a",
+      "vendoredSha256": "103f4366741f7195e2d38be9f5647c4c3e82da08e105a6a7bc44ccadfcb8e49a",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/haptic_pcm.rs",
+      "upstreamSha256": "b5c757f601d20f01de2bfb7ec1800cebc4f1991c56f2b64e0bca084aa4df74d3",
+      "vendoredSha256": "b5c757f601d20f01de2bfb7ec1800cebc4f1991c56f2b64e0bca084aa4df74d3",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/imu.rs",
+      "upstreamSha256": "78d44e2e47c4fbec3557de6b4b23f34c2c59735b6e60569260091449412a2426",
+      "vendoredSha256": "78d44e2e47c4fbec3557de6b4b23f34c2c59735b6e60569260091449412a2426",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/lib.rs",
+      "upstreamSha256": "d25d17856f49417695b0d4c8cfd3e4d332c20090e4a2e034b2832ed02b86feb3",
+      "vendoredSha256": "bad5dcd93bbfc82b9d5df85ebb4720fc8b345b32fa346a94654be59c19522c15",
+      "modified": true
+    },
+    {
+      "path": "crates/core/src/macros.rs",
+      "upstreamSha256": "f4ab0f6f6473702f76542622b56d8e307b9f56e6e5c6894316464fa5b1f892da",
+      "vendoredSha256": "f4ab0f6f6473702f76542622b56d8e307b9f56e6e5c6894316464fa5b1f892da",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/media.rs",
+      "upstreamSha256": "1a9e233af5859317e01bf518eb2faef1837d5cffc69fcde143bc4e03f225887f",
+      "vendoredSha256": "1a9e233af5859317e01bf518eb2faef1837d5cffc69fcde143bc4e03f225887f",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/menu.rs",
+      "upstreamSha256": "f0f44f671a53acd7cd36c46d6b2b57e2d137b623873843ac7358aa21e5862ca8",
+      "vendoredSha256": "f0f44f671a53acd7cd36c46d6b2b57e2d137b623873843ac7358aa21e5862ca8",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/midi.rs",
+      "upstreamSha256": "46fa64d9e625b7dc1e6ba47da2bb0a9a6f968ec552ac32bd82f73dd8733f7f10",
+      "vendoredSha256": "46fa64d9e625b7dc1e6ba47da2bb0a9a6f968ec552ac32bd82f73dd8733f7f10",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/module.rs",
+      "upstreamSha256": "c14e605f14aa2ed3a385caea1c8d6370c79d5e5529cdc1c24976d79cbbe0f8c9",
+      "vendoredSha256": "c14e605f14aa2ed3a385caea1c8d6370c79d5e5529cdc1c24976d79cbbe0f8c9",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/own_virtual.rs",
+      "upstreamSha256": "86c4b66d2b28e4ccf718f8d45dde86e2f5d99d4383a6a5b2b590c11ddaee5281",
+      "vendoredSha256": "86c4b66d2b28e4ccf718f8d45dde86e2f5d99d4383a6a5b2b590c11ddaee5281",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/patch.rs",
+      "upstreamSha256": "f78b9783bab921d41e0e14d08f35f3a4ee0b07c9fa33495a4f0760e7168c8ec9",
+      "vendoredSha256": "f78b9783bab921d41e0e14d08f35f3a4ee0b07c9fa33495a4f0760e7168c8ec9",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/paths.rs",
+      "upstreamSha256": "336d5d24fd5a7b375fe971ee176f10bafcb6887da3305baf5d76b3b880acecf3",
+      "vendoredSha256": "336d5d24fd5a7b375fe971ee176f10bafcb6887da3305baf5d76b3b880acecf3",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/pinkey.rs",
+      "upstreamSha256": "220ecf1c96f7032632083328d3e454dd15f79ce7c753250182f4367aa48c1b1f",
+      "vendoredSha256": "220ecf1c96f7032632083328d3e454dd15f79ce7c753250182f4367aa48c1b1f",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/raw_pad.rs",
+      "upstreamSha256": "3ee67bac56d55c0ea078e5f1d60c8aa76d9f37e3b5b7cb764dcefd7f50d1cd97",
+      "vendoredSha256": "3ee67bac56d55c0ea078e5f1d60c8aa76d9f37e3b5b7cb764dcefd7f50d1cd97",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/sdl_db.rs",
+      "upstreamSha256": "28f793503b51b4fe05e2d50071f83215cd8364063b0231e5c072701fa1fba317",
+      "vendoredSha256": "28f793503b51b4fe05e2d50071f83215cd8364063b0231e5c072701fa1fba317",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/signal.rs",
+      "upstreamSha256": "eebe8190bf02ed2f0784fbf1184d0ac7460d3a3609609ddc5eb4e03f4adcb112",
+      "vendoredSha256": "eebe8190bf02ed2f0784fbf1184d0ac7460d3a3609609ddc5eb4e03f4adcb112",
+      "modified": false
+    },
+    {
+      "path": "crates/core/src/touchzones.rs",
+      "upstreamSha256": "8805697696e63c3010d0d1ea4c1c1ecfb5b59521f0693dd1b1a0998dc32e6052",
+      "vendoredSha256": "8805697696e63c3010d0d1ea4c1c1ecfb5b59521f0693dd1b1a0998dc32e6052",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/Cargo.toml",
+      "upstreamSha256": "8255d81d0f99f3fa433e8a897a928e1accf76a72241411a6fab086747b8b249b",
+      "vendoredSha256": "349e48cb6ccbda9f1ab09b500c2a5463afb907abd309c324e34ef2a469f26539",
+      "modified": true,
+      "patch": "Headless SDK entry/dependencies expose the original HrWaiter and pure curve/filter module; no GUI, provider thread or JSM interpreter."
+    },
+    {
+      "path": "crates/engine/src/eval/activation.rs",
+      "upstreamSha256": "df3820738330d9e85339b0e5e4a032dd9b296fa5b73102dd6263df0e4118aa85",
+      "vendoredSha256": "32cf02b766157f6668d6249dd3e2a6aed8315b0852185b1298686b912e185217",
+      "modified": true,
+      "upstreamGitBlob": "01478509933679693a2fac094d479bd3babe10d3",
+      "patch": "Expose an opaque PressGate over the original press-mode and turbo state machines. Correct double-press state 3 so a held second press does not expire with the recognition window. No separate Studio timing algorithm."
+    },
+    {
+      "path": "crates/engine/src/eval/combiner_motion.rs",
+      "upstreamSha256": "647858a6b9c41364f2a41521371c32b8083edd587cf0883310a089857a0a5cc8",
+      "vendoredSha256": "647858a6b9c41364f2a41521371c32b8083edd587cf0883310a089857a0a5cc8",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/compute.rs",
+      "upstreamSha256": "3ed24755ca0c32a1a19fdaee65f94eab6f89833d2e8a7a6ee3255c58f76d1843",
+      "vendoredSha256": "3ed24755ca0c32a1a19fdaee65f94eab6f89833d2e8a7a6ee3255c58f76d1843",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/config.rs",
+      "upstreamSha256": "e5434adb47a841cb6aee4f8f1a9c185faa27f5c292ca9e9e45da7182777cd27b",
+      "vendoredSha256": "33eb790bee69b97ddfd25cbde9dcae7a3c9ff423a719eed14d97c003ebcb6f8d",
+      "modified": true
+    },
+    {
+      "path": "crates/engine/src/eval/curves.rs",
+      "upstreamSha256": "4bbe7f8180198d0059d239d9ff52c239478a30c9148f8c37a0f4ed88f5274c98",
+      "vendoredSha256": "4bbe7f8180198d0059d239d9ff52c239478a30c9148f8c37a0f4ed88f5274c98",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/device_cal.rs",
+      "upstreamSha256": "0a7f3810f3150c47012dc0ddaed26324b83af28015baf46272022727973e53fe",
+      "vendoredSha256": "9c3e98f350e852c3f950e7200f371567efb5b7377b82f54c2bb0dd1b0ffc8136",
+      "modified": true,
+      "upstreamGitBlob": "8a3d6a1010c1c89189865094f6300bdca6126034",
+      "patch": "Expose StickRebound and the existing trigger range function to the headless adapter. The upstream algorithms are unchanged."
+    },
+    {
+      "path": "crates/engine/src/eval/feedback.rs",
+      "upstreamSha256": "fd62e13d596d85fb737a03197387c98bc3518ed77c332c03bf742030b5c03e07",
+      "vendoredSha256": "511d9d127e1f624f48a5573e04e8360ffd04fd251d646f0bb886e80f8443873a",
+      "modified": true
+    },
+    {
+      "path": "crates/engine/src/eval/midi_bus.rs",
+      "upstreamSha256": "8f0a45131ea3602790e8f6a4d0011e881720b170b18f052bc4c19d3154c59dfe",
+      "vendoredSha256": "8f0a45131ea3602790e8f6a4d0011e881720b170b18f052bc4c19d3154c59dfe",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/area_mapper.rs",
+      "upstreamSha256": "49327c6d63ab525d750d92aba29742f6b96ce5b3179b49f1fba10a950f504f6d",
+      "vendoredSha256": "49327c6d63ab525d750d92aba29742f6b96ce5b3179b49f1fba10a950f504f6d",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/automap_curve.rs",
+      "upstreamSha256": "5e7f3da474722a66f1a7485232b293a0dd48ad4144b7b77310467868448680a2",
+      "vendoredSha256": "5e7f3da474722a66f1a7485232b293a0dd48ad4144b7b77310467868448680a2",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/gyro3dof.rs",
+      "upstreamSha256": "65eeb29c3d092d7dfce35b59c248801fee16a8d58e8b34293bd75b3278bf23eb",
+      "vendoredSha256": "65eeb29c3d092d7dfce35b59c248801fee16a8d58e8b34293bd75b3278bf23eb",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/aim.rs",
+      "upstreamSha256": "481997db60aea3944217a537c89f4a238225b59706912062d273def7851aa299",
+      "vendoredSha256": "7dfd348406df3376f2e227c09b6bc41f926f3bc908dcf919e10ff76e54f71220",
+      "modified": true,
+      "notes": "Headless gyro sample timing with the original per-sample math and filter order."
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/analog.rs",
+      "upstreamSha256": "5507641cfc818588a30cced635ce178ab98581bfaaaa59b33f4646f6c9ab4895",
+      "vendoredSha256": "3bfb7492203160afc99917ebc02b59436bd5827e3408e54d2fde83df20c4280b",
+      "modified": true,
+      "notes": "Add a trigger-only headless entry point that calls the original analog state machine."
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/bind.rs",
+      "upstreamSha256": "e3aa525a046d1d50f7a66a427d503a119f284c67f615b9911fcec6f9694bad58",
+      "vendoredSha256": "e3aa525a046d1d50f7a66a427d503a119f284c67f615b9911fcec6f9694bad58",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/cal.rs",
+      "upstreamSha256": "c4f356b65ab900b824c3335eea30f2832d7e337aef267f4d67ca0d389c497554",
+      "vendoredSha256": "c4f356b65ab900b824c3335eea30f2832d7e337aef267f4d67ca0d389c497554",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/catalogue.rs",
+      "upstreamSha256": "fe3387904c0dcbd2834ecec08a4e019fab71514561a4ea6237d8c0c0305b8e44",
+      "vendoredSha256": "fe3387904c0dcbd2834ecec08a4e019fab71514561a4ea6237d8c0c0305b8e44",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/cc.rs",
+      "upstreamSha256": "77a0e23fe3be21d06b1a74880fbb409ecc9160fc32c1e0407137c8f5a0981a08",
+      "vendoredSha256": "77a0e23fe3be21d06b1a74880fbb409ecc9160fc32c1e0407137c8f5a0981a08",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/cursor.rs",
+      "upstreamSha256": "af997abf3b756042f57b780b5f8922a51c778b9147947b36404426151455b786",
+      "vendoredSha256": "af997abf3b756042f57b780b5f8922a51c778b9147947b36404426151455b786",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/eval.rs",
+      "upstreamSha256": "cb3e4b1a3f47aa314d7c2f00ace44fbec3c23af90c6598714789ae0859847e4d",
+      "vendoredSha256": "7dd0ab0a34553773b4cf5e250d3c3fb9ec7dfb7aad9fe89c219c440406c8d476",
+      "modified": true,
+      "notes": "Pass the host's per-sample interval to aiming and cache immutable Studio programs per node."
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/feedback.rs",
+      "upstreamSha256": "3d360f2beb527ccb23b6ef084db8d75d77bfe904a5e603e6443bb3858adc75ab",
+      "vendoredSha256": "3d360f2beb527ccb23b6ef084db8d75d77bfe904a5e603e6443bb3858adc75ab",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/help.rs",
+      "upstreamSha256": "91929f9d2721fcd589bfb6964556968c2ba92b52eda2e0365e6af6e66586b6d6",
+      "vendoredSha256": "91929f9d2721fcd589bfb6964556968c2ba92b52eda2e0365e6af6e66586b6d6",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/knobs.rs",
+      "upstreamSha256": "a17cd07aaddabc94d2fd88f7e07f3df6c7536e8bdbcb3179abf9cac6daad2a97",
+      "vendoredSha256": "a17cd07aaddabc94d2fd88f7e07f3df6c7536e8bdbcb3179abf9cac6daad2a97",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/midi.rs",
+      "upstreamSha256": "f3948bbb02719efdc7dc0d9f898d7a5a7a6315ff0eb6876a4c24a9f06b8e84e4",
+      "vendoredSha256": "f3948bbb02719efdc7dc0d9f898d7a5a7a6315ff0eb6876a4c24a9f06b8e84e4",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/mod.rs",
+      "upstreamSha256": "e317c5c110afcdbaa630e0ea9006b0c3bc3a0a944495997e5fe3afdd2907797e",
+      "vendoredSha256": "fbe17b56496610e068e61a8719f5915e6404d9cabd6f914c93f5566376dd1649",
+      "modified": true,
+      "notes": "Expose source naming, the existing curves, headless gyro timing and the trigger-only entry point."
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/motion.rs",
+      "upstreamSha256": "244fa1410c55b382a65de3ca843fa025a63edfa5e5fca04e03f24c81026b1169",
+      "vendoredSha256": "244fa1410c55b382a65de3ca843fa025a63edfa5e5fca04e03f24c81026b1169",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/names.rs",
+      "upstreamSha256": "99927eeedb862391325681ac0f99114949248e5a5579b382423b0a0618035554",
+      "vendoredSha256": "99927eeedb862391325681ac0f99114949248e5a5579b382423b0a0618035554",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/pad.rs",
+      "upstreamSha256": "066e1c56ad1e4f3b613beddda8f7e853f7d9b540b39627164c4942cc60d82afb",
+      "vendoredSha256": "066e1c56ad1e4f3b613beddda8f7e853f7d9b540b39627164c4942cc60d82afb",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/parse.rs",
+      "upstreamSha256": "415e0122148474b25606a34a0b09609afbbbc3b6a38a1e8ca3b49152b34275f6",
+      "vendoredSha256": "415e0122148474b25606a34a0b09609afbbbc3b6a38a1e8ca3b49152b34275f6",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/tests.rs",
+      "upstreamSha256": "4e5301a00d5c6ac38072b91f32e3663cd9ab6cc0c8390698a473f784dedf2a25",
+      "vendoredSha256": "4e5301a00d5c6ac38072b91f32e3663cd9ab6cc0c8390698a473f784dedf2a25",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/jsm/touch.rs",
+      "upstreamSha256": "e04e045a2d282b5ef67da3ff8c249f98bd26b4b7d7d08cb3423d6637280e9528",
+      "vendoredSha256": "e04e045a2d282b5ef67da3ff8c249f98bd26b4b7d7d08cb3423d6637280e9528",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/lean.rs",
+      "upstreamSha256": "b4d80a99fd43d805069d4f72ae92555357943cdce97f79dad889156b4c18830f",
+      "vendoredSha256": "b4d80a99fd43d805069d4f72ae92555357943cdce97f79dad889156b4c18830f",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/map_action.rs",
+      "upstreamSha256": "bdae89add148ef138673cb213af11f922a66a1b57e5f2b49243127e13a4dbaf1",
+      "vendoredSha256": "bdae89add148ef138673cb213af11f922a66a1b57e5f2b49243127e13a4dbaf1",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/menu.rs",
+      "upstreamSha256": "4ed4f2f9f45361f953f62b1f2b684baa566d3abe50605f384c4f299cfd8585c1",
+      "vendoredSha256": "4ed4f2f9f45361f953f62b1f2b684baa566d3abe50605f384c4f299cfd8585c1",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/mod.rs",
+      "upstreamSha256": "09db165887dde2c343b4b8f461af4f22acb0c747aa378cec8d77615aa8d7e2ce",
+      "vendoredSha256": "3bf7b0743f3f59108ddfb7c0a5a797516cb4edeb59ee3cade660d2ce79819302",
+      "modified": true,
+      "notes": "Compile JSM Config and expose its parser and trigger-only entry point in the headless evaluator."
+    },
+    {
+      "path": "crates/engine/src/eval/modules/remapper.rs",
+      "upstreamSha256": "640473eb9fc3d5e09c999e4b8bb974d0284165eba55ddd5ebeb999ce7086269b",
+      "vendoredSha256": "640473eb9fc3d5e09c999e4b8bb974d0284165eba55ddd5ebeb999ce7086269b",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/remapper_hold_back.rs",
+      "upstreamSha256": "b7044abf7fc53dde6aba264754af7eb4286097f3c1ceb3a716e71d5934eaa38a",
+      "vendoredSha256": "b7044abf7fc53dde6aba264754af7eb4286097f3c1ceb3a716e71d5934eaa38a",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/rws.rs",
+      "upstreamSha256": "fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96",
+      "vendoredSha256": "fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/shared.rs",
+      "upstreamSha256": "af15000332cf1576b3f7059c27073a8656c3f1a79914c2b81bf7c4aa50674491",
+      "vendoredSha256": "af15000332cf1576b3f7059c27073a8656c3f1a79914c2b81bf7c4aa50674491",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/stick_rotation.rs",
+      "upstreamSha256": "2e3b260a1b60a980b6e975695dc680b0b878ede0084a888c834268764c037ad9",
+      "vendoredSha256": "2e3b260a1b60a980b6e975695dc680b0b878ede0084a888c834268764c037ad9",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/modules/touch_zones.rs",
+      "upstreamSha256": "78b6ddcf96637d6fdef32ec0d700e5391f157206aa9caf237389d6405c16e43c",
+      "vendoredSha256": "78b6ddcf96637d6fdef32ec0d700e5391f157206aa9caf237389d6405c16e43c",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/publish.rs",
+      "upstreamSha256": "368a21de85b81dbdb86861399b02237b58141fb04d84f20dd0c45c3361054a47",
+      "vendoredSha256": "e0fe94d78ef66e6851c291ff8826aa3f70be9cb4033bc80ccc6761809ac5e3ef",
+      "modified": true
+    },
+    {
+      "path": "crates/engine/src/eval/registry.rs",
+      "upstreamSha256": "4303f849e83405d0f23defa89f18ae93c96d9597b4920c92efd7454547322b96",
+      "vendoredSha256": "909a08c07c5dc9d66453f02c3dc531c1216055d61657ac13ad5a315421cc8dde",
+      "modified": true,
+      "notes": "Register the original JSM node in the headless registry."
+    },
+    {
+      "path": "crates/engine/src/eval/tests.rs",
+      "upstreamSha256": "8bf6f65e56525fb1246f16adb61aff0e38f550a716aaf7eacfc722ab99dff46d",
+      "vendoredSha256": "8bf6f65e56525fb1246f16adb61aff0e38f550a716aaf7eacfc722ab99dff46d",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval/trackpad.rs",
+      "upstreamSha256": "f8c4edf723a12f9ec8e65435c0e16d5ec5a70e46a1e5042f90e13379bd5453e2",
+      "vendoredSha256": "f8c4edf723a12f9ec8e65435c0e16d5ec5a70e46a1e5042f90e13379bd5453e2",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/eval.rs",
+      "upstreamSha256": "84acf0ba3fdf4917dcb8b2846198c8745e17be073b50c2cef9dc8a2077b771dd",
+      "vendoredSha256": "44ae1b9dd4ef869342229ff01b4b68eebdfb46d5ad34761ff4b91b357e6673fd",
+      "modified": true
+    },
+    {
+      "path": "crates/engine/src/graph.rs",
+      "upstreamSha256": "e3d2be3a8a18a1dba008c2272f199f1af0f72d3607a475b99ecea04eda396373",
+      "vendoredSha256": "e3d2be3a8a18a1dba008c2272f199f1af0f72d3607a475b99ecea04eda396373",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/hr_timer.rs",
+      "upstreamSha256": "a457c787ceefd78108df569af47aa0c718ac035cadc0cb8264389f11c1e89da1",
+      "vendoredSha256": "a457c787ceefd78108df569af47aa0c718ac035cadc0cb8264389f11c1e89da1",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/lib.rs",
+      "upstreamSha256": "bdc4ec94adb3dd98b0b66a2f2fc563a099853fa07f4ab5fdc17ee115109b39bf",
+      "vendoredSha256": "bdc4ec94adb3dd98b0b66a2f2fc563a099853fa07f4ab5fdc17ee115109b39bf",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/router.rs",
+      "upstreamSha256": "60cb0205bd18d76dafd45955d02106c21d7f381f9dcc64259ca1806e5e9f9f30",
+      "vendoredSha256": "60cb0205bd18d76dafd45955d02106c21d7f381f9dcc64259ca1806e5e9f9f30",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/state.rs",
+      "upstreamSha256": "c663eedd9ac01c50c0e859f95019e6af78bd47d6babf997ace1b93091e99dc30",
+      "vendoredSha256": "5116dcffa8ad85125d9de1c4e1116ea936ebaa4cacec46d8d5fd20f7ff155c43",
+      "modified": true,
+      "notes": "Retain native JSM node state and consume the next sample timing."
+    },
+    {
+      "path": "crates/engine/src/thread.rs",
+      "upstreamSha256": "50125c37d272736aa9493d3d4e771463be4412a6de283b344198404e52bc3a4d",
+      "vendoredSha256": "50125c37d272736aa9493d3d4e771463be4412a6de283b344198404e52bc3a4d",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/thread_priority.rs",
+      "upstreamSha256": "449c46d78343704de5c4195d2f913c36eedbc239bfa647c9bbe11ec297537fb4",
+      "vendoredSha256": "449c46d78343704de5c4195d2f913c36eedbc239bfa647c9bbe11ec297537fb4",
+      "modified": false
+    },
+    {
+      "path": "crates/engine/src/headless.rs",
+      "vendoredSha256": "bd7e1f4d7b9d9d503e9c4dea61ccead1f0c1d13782f2e00cd7826bcf21fc9ad8",
+      "added": true,
+      "modified": true,
+      "patch": "Headless SDK entry/dependencies expose the original HrWaiter and pure curve/filter module; no GUI, provider thread or JSM interpreter.",
+      "notes": "Re-export the original curve implementation from the now-compiled JSM module."
+    },
+    {
+      "path": "crates/engine/build.rs",
+      "vendoredSha256": "8c69b895d45078cd72be3a7c88a1c77da9c726e6c3169437017a7e9f1287c129",
+      "added": true,
+      "modified": true
+    },
+    {
+      "path": "crates/engine/src/eval/modules/rws_calibration.rs",
+      "upstreamSha256": null,
+      "vendoredSha256": "48eb1dfa41657726262f8a753a5a525788b3396d6875c39e506ca5db8032aeaa",
+      "modified": true,
+      "origin": "Extracted unchanged Flick math from eval/modules/jsm/cal.rs; used by RWS only"
+    },
+    {
+      "path": "crates/hidmaestro/Cargo.toml",
+      "upstreamSha256": "d7e4f39709d134849d87261c717c6b6cf19a3530871bb8c415746341a2c73ce4",
+      "vendoredSha256": "6b4df851b291cd47bbf5344a638f29fc58ec5bfadece4f3bbbe965c7f7a94c87",
+      "modified": true,
+      "upstreamGitBlob": "e92e914b918ac0bb507e9187481947efb0ac5cb7",
+      "patch": "Headless native-output subset; excludes USB/IP and upstream helper binaries."
+    },
+    {
+      "path": "crates/hidmaestro/src/lib.rs",
+      "upstreamSha256": "a03ed20499f3a860a31b8232b8a89e51f8cbc146bdb6c6e06fc6f68878259a02",
+      "vendoredSha256": "a3561de49059ce0dc371f7b43106338eaa0b30e22ebfb73dd45b956db0d60a7c",
+      "upstreamGitBlob": "8293906cb963b56628f45820d26d44039c6bc79a",
+      "modified": true,
+      "patch": "Expose original helper client types needed to compile the original native virtual-device API; no server/driver startup added."
+    },
+    {
+      "path": "crates/hidmaestro/src/answers.rs",
+      "upstreamSha256": "ddc108f90003e1e07bcde5cfac531469c33a26db08932fd7551992c8346f2137",
+      "vendoredSha256": "ddc108f90003e1e07bcde5cfac531469c33a26db08932fd7551992c8346f2137",
+      "modified": false,
+      "upstreamGitBlob": "228a9336217786da566ec1a756fc1b2d03884173"
+    },
+    {
+      "path": "crates/hidmaestro/src/claims.rs",
+      "upstreamSha256": "b54a784cf11d9a198f8d8d1f6348b698111bec8234f44dfed2b006d28b2e3bf8",
+      "vendoredSha256": "b54a784cf11d9a198f8d8d1f6348b698111bec8234f44dfed2b006d28b2e3bf8",
+      "modified": false,
+      "upstreamGitBlob": "0aecf712970de169b298ac0e266ea31aa37c9bc2"
+    },
+    {
+      "path": "crates/hidmaestro/src/deploy.rs",
+      "upstreamSha256": "07977df5ec1aed2fbad78a2f80ea7e53d2f9e19d096c0a42bf45f57328ce29c6",
+      "vendoredSha256": "2e5e592721b6f8e17b39b235ac78cfc6e45f367677754cc241570cdbfd71b9aa",
+      "modified": true,
+      "upstreamGitBlob": "b476d790fc6980b7ee21729d7407abf5a1a4db51",
+      "patch": "Motion Studio reconciliation key and protected staging prefix. No reinstall or trust-removal entry exposed."
+    },
+    {
+      "path": "crates/hidmaestro/src/descriptor.rs",
+      "upstreamSha256": "a883f4a116a19f9e85ac016d160104991bb82cfde16aba8449da1a618f966c85",
+      "vendoredSha256": "a883f4a116a19f9e85ac016d160104991bb82cfde16aba8449da1a618f966c85",
+      "modified": false,
+      "upstreamGitBlob": "a2d1ee41e5a2353163cf5d87f29828bc1d6df7f3"
+    },
+    {
+      "path": "crates/hidmaestro/src/encode.rs",
+      "upstreamSha256": "f412e487ffd81a8d0f4d7bddbc23b30654ec4ee3c7dcf2f9fbbf5545b82e820a",
+      "vendoredSha256": "f412e487ffd81a8d0f4d7bddbc23b30654ec4ee3c7dcf2f9fbbf5545b82e820a",
+      "modified": false,
+      "upstreamGitBlob": "0115a3fc3ed5ffd183dee1956fc39229d63cb8a0"
+    },
+    {
+      "path": "crates/hidmaestro/src/identity.rs",
+      "upstreamSha256": "2d504c4370d25013f86802d5cd462d58ca408d8efc4296913f334172a66a500a",
+      "vendoredSha256": "79bc9614d0e9bdfccfabd7cf5e206209a3ac45711ed7b7db91aca38afb09ca25",
+      "modified": true,
+      "upstreamGitBlob": "0193495390129fac6d4144fbd538abd0a41891cb",
+      "patch": "Motion Studio identity prefix MS, separate from FlexInput FX."
+    },
+    {
+      "path": "crates/hidmaestro/src/install.rs",
+      "upstreamSha256": "673be976b0f739cb3346a27002356c8e5a575358318025156587eebca4fa7643",
+      "vendoredSha256": "673be976b0f739cb3346a27002356c8e5a575358318025156587eebca4fa7643",
+      "modified": false,
+      "upstreamGitBlob": "38eadf37d4805c2813115afd96ea12bd132dadf6"
+    },
+    {
+      "path": "crates/hidmaestro/src/orchestrator.rs",
+      "upstreamSha256": "059972cfb3833e7aafe0b5edf1ecf8415e738d20a13e1e1e2b1979093c27daba",
+      "vendoredSha256": "5fff93103924a032fc5ef4ff11979d9c26504f3c4d7186e61c1663790b34b928",
+      "modified": true,
+      "upstreamGitBlob": "2c06eed37fd2c241a9c5c368aed72deb2454f340",
+      "patch": "MotionStudioDeviceId ownership value, separate from FlexInput sweeps."
+    },
+    {
+      "path": "crates/hidmaestro/src/profile.rs",
+      "upstreamSha256": "d18b99a6c382b057f14fd7fbadbdacfd6283a1c0c107ea4d345f2f13a847995c",
+      "vendoredSha256": "d18b99a6c382b057f14fd7fbadbdacfd6283a1c0c107ea4d345f2f13a847995c",
+      "modified": false,
+      "upstreamGitBlob": "e20c684aaca8c5bbe9bd96225807040303f2d5be"
+    },
+    {
+      "path": "crates/hidmaestro/src/shm.rs",
+      "upstreamSha256": "aaf05818116fbb0f3c8dcf1b10775606c02f6d408dd95cb25ae19d7672e7be01",
+      "vendoredSha256": "613a9ea2fdbc29c573e2759216aab3ded70a4a67c72e72f27520ef425e735f91",
+      "modified": true,
+      "upstreamGitBlob": "63430fa11dee9a93b1184d0b10903e13ba33a7c4",
+      "patch": "Expose bounded delivery acknowledgement and driver release-frame registration."
+    },
+    {
+      "path": "crates/hidmaestro/src/signing.rs",
+      "upstreamSha256": "7ca7a8f7d913681f57e9ef5eef490fa4bfb6a39ddd2b004f3ef8d899b2e12ada",
+      "vendoredSha256": "bbbcf005deb3c7715cee0fbdb8bf2f1a2ef4a85994b159c900bc4fc15b7e8582",
+      "modified": true,
+      "upstreamGitBlob": "44309bf30b7d0ade046b2c58375d180ae36be3f7",
+      "patch": "Per-machine Motion Studio certificate name."
+    },
+    {
+      "path": "crates/hidmaestro/driver/HIDMaestro.dll",
+      "upstreamSha256": "6ae03e3495c81636a282ba391d372f563bb01c756d02cb03328d31ae96332a9c",
+      "vendoredSha256": "6ae03e3495c81636a282ba391d372f563bb01c756d02cb03328d31ae96332a9c",
+      "modified": false,
+      "upstreamGitBlob": "a2f82d0abc91e04ceba3ddb8a7646b2b92863d52"
+    },
+    {
+      "path": "crates/hidmaestro/driver/hidmaestro.inf",
+      "upstreamSha256": "8586e492ad8ec8fc2e31a11bef92beb03da4f0a5fd111f4401bea9ba03d8cc6c",
+      "vendoredSha256": "8586e492ad8ec8fc2e31a11bef92beb03da4f0a5fd111f4401bea9ba03d8cc6c",
+      "modified": false,
+      "upstreamGitBlob": "9f87c8da47fd7a121a04dec29fff55b75d033831"
+    },
+    {
+      "path": "crates/hidmaestro/driver/hidmaestro_xusb.inf",
+      "upstreamSha256": "8800a69629f521063fecf701e3ed373895e251cee620cad487583baf96a0824f",
+      "vendoredSha256": "8800a69629f521063fecf701e3ed373895e251cee620cad487583baf96a0824f",
+      "modified": false,
+      "upstreamGitBlob": "0de9392f1b9b86b9b5b9917364799c2b07a45a94"
+    },
+    {
+      "path": "crates/hidmaestro/driver/HMXInput.dll",
+      "upstreamSha256": "50980b4e102e05e9aa8e463226a8ed1da08ac62a5a7be806da64058d4670d3eb",
+      "vendoredSha256": "50980b4e102e05e9aa8e463226a8ed1da08ac62a5a7be806da64058d4670d3eb",
+      "modified": false,
+      "upstreamGitBlob": "665ece663514fa7dd3315f5110db2894d1992628"
+    },
+    {
+      "path": "crates/hidmaestro/driver/LICENSE",
+      "upstreamSha256": "1b637c35922ac7a519d208afb8b45e278597d896f7ff799eff375f0753470790",
+      "vendoredSha256": "1b637c35922ac7a519d208afb8b45e278597d896f7ff799eff375f0753470790",
+      "modified": false,
+      "upstreamGitBlob": "2575f6f73a0ab4d95420bb769a663678744f2593"
+    },
+    {
+      "path": "crates/hidmaestro/driver/README.md",
+      "upstreamSha256": "d0a74452a6a44ca9b2c81383f9fe0b407ef4133fae0761ad7e68ddb4a8e12622",
+      "vendoredSha256": "d0a74452a6a44ca9b2c81383f9fe0b407ef4133fae0761ad7e68ddb4a8e12622",
+      "modified": false,
+      "upstreamGitBlob": "0de9da63eb2a09b7426a0aa69f992dd3c40c6b09"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/consumer.json",
+      "upstreamSha256": "144fbf2946448ef8710e74407b51bb0112b6bb9333b86fd873f28bc87309025e",
+      "vendoredSha256": "144fbf2946448ef8710e74407b51bb0112b6bb9333b86fd873f28bc87309025e",
+      "modified": false,
+      "upstreamGitBlob": "38f841fcc7350b890a7ad3e6f067cebf0b4705d8"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/dualsense-edge.json",
+      "upstreamSha256": "2fa00a4c3bf27a78e4840b78bf673a3d7613361bf4b2257a69300fd3efe1704f",
+      "vendoredSha256": "2fa00a4c3bf27a78e4840b78bf673a3d7613361bf4b2257a69300fd3efe1704f",
+      "modified": false,
+      "upstreamGitBlob": "6306b0d1e4b2e5154c5581346ecc7a6385f862f8"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/dualsense.json",
+      "upstreamSha256": "b133efe7f4bd894fe997fb6de4ca3328b7e6c9247d19165e9a78b221c2c7f99c",
+      "vendoredSha256": "b133efe7f4bd894fe997fb6de4ca3328b7e6c9247d19165e9a78b221c2c7f99c",
+      "modified": false,
+      "upstreamGitBlob": "72873ee9f13402365cbb0b8a4ec9bd40b16f6726"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/dualshock-4-v2.json",
+      "upstreamSha256": "b8f587b749c43796e987848fd4aa681950bf5320727ba233c27142253bd169b2",
+      "vendoredSha256": "b8f587b749c43796e987848fd4aa681950bf5320727ba233c27142253bd169b2",
+      "modified": false,
+      "upstreamGitBlob": "8bd8084171fa9d82ac7af4e87c95b360295a6f42"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/keyboard.json",
+      "upstreamSha256": "2b50b93a5c4c727a2dade711c5264b882f588af2fe3024a9d1616deb2839be63",
+      "vendoredSha256": "2b50b93a5c4c727a2dade711c5264b882f588af2fe3024a9d1616deb2839be63",
+      "modified": false,
+      "upstreamGitBlob": "2fd3123b0a4c2d4ce840fdfba808d27bc5ef5a30"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/models/sony-dualsense-edge.json",
+      "upstreamSha256": "d16eefd2166354a8afe0bd957a903c776b53518a91dd893843db48267de5fb78",
+      "vendoredSha256": "d16eefd2166354a8afe0bd957a903c776b53518a91dd893843db48267de5fb78",
+      "modified": false,
+      "upstreamGitBlob": "577a979f27928d0710d9a4b74370e2a7ca96cc37"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/models/sony-dualsense.json",
+      "upstreamSha256": "8dd7eea070c88f262ae5ffd9a7d660f08cbc08338e2b47eb92733fb43218c6c7",
+      "vendoredSha256": "8dd7eea070c88f262ae5ffd9a7d660f08cbc08338e2b47eb92733fb43218c6c7",
+      "modified": false,
+      "upstreamGitBlob": "618f758121b136f1483931d8ed6a314cf3711963"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/models/sony-dualshock4.json",
+      "upstreamSha256": "e64b9882f061ca8cb3061bffad1c45e65e50c2b391199d862e05765603fd62d9",
+      "vendoredSha256": "e64b9882f061ca8cb3061bffad1c45e65e50c2b391199d862e05765603fd62d9",
+      "modified": false,
+      "upstreamGitBlob": "2b124e7581e7c84486ef0c829db0ba6bd6d9cec1"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/models/xusb-companion.json",
+      "upstreamSha256": "d47953f2df98c39defd45b1485fdce000c6c8b2d7a0cd195cb693f8df5f560ab",
+      "vendoredSha256": "d47953f2df98c39defd45b1485fdce000c6c8b2d7a0cd195cb693f8df5f560ab",
+      "modified": false,
+      "upstreamGitBlob": "6a349571666dfd905eeb9e5534637feacbc7b2f1"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/mouse.json",
+      "upstreamSha256": "064f8ded0d5adeafde14e358481f1073f5f5197e2693296d7b677fd1be56647e",
+      "vendoredSha256": "064f8ded0d5adeafde14e358481f1073f5f5197e2693296d7b677fd1be56647e",
+      "modified": false,
+      "upstreamGitBlob": "c76baea9c58974aef1307592988cb5452f818061"
+    },
+    {
+      "path": "crates/hidmaestro/profiles/xbox360.json",
+      "upstreamSha256": "82333f1a632ad705e41173c2a8b696f0328fec3cfb303f0522d429b1b39713a6",
+      "vendoredSha256": "82333f1a632ad705e41173c2a8b696f0328fec3cfb303f0522d429b1b39713a6",
+      "modified": false,
+      "upstreamGitBlob": "905aa80adcc4a30ff76459d9ceebd1e67953a0e9"
+    },
+    {
+      "path": "crates/virtual/src/keymouse_hm.rs",
+      "upstreamSha256": "a74fd443f8c80fb9b3e44b1e0832dc1a03f5ba167be1a85468d012ae058939b0",
+      "vendoredSha256": "a74fd443f8c80fb9b3e44b1e0832dc1a03f5ba167be1a85468d012ae058939b0",
+      "modified": false,
+      "upstreamGitBlob": "3cfc1a4c279dc1ba82c174321f7e1bca90c0d55b",
+      "referenceOnly": true
+    },
+    {
+      "path": "crates/ui/src/app/threads.rs",
+      "upstreamSha256": "b538d9ef9b1b6ab583509142ae1385e78b0308267c5fa17048e269a40f928d5b",
+      "vendoredSha256": "b538d9ef9b1b6ab583509142ae1385e78b0308267c5fa17048e269a40f928d5b",
+      "modified": false,
+      "upstreamGitBlob": "b0fbc7b09f5dee0d66422e053faf68530e6e39bf",
+      "referenceOnly": true
+    },
+    {
+      "path": "crates/devices/build.rs",
+      "vendoredSha256": "9891705b5bab71034989c5aafbd83d68d1075ef4261607eb33c90eb78bac36fa",
+      "added": true,
+      "modified": true,
+      "patch": "Studio headless API/build entry or raw timestamped event extension over the original SdlBackend; no alternative device protocol parser."
+    },
+    {
+      "path": "crates/devices/Cargo.toml",
+      "upstreamSha256": "52138d47502973d1a8adc1267ea5ef3c38c6328a0a2ad202315bde8fc7d655df",
+      "vendoredSha256": "5e462d623ac783e79c8d3458662900de4c6dc7397b0a2973a04f4461421186b1",
+      "upstreamGitBlob": "e243ba4c58913aaeb11846ede8b691aa9913042e",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+    },
+    {
+      "path": "crates/devices/src/click_gate.rs",
+      "upstreamSha256": "5f678da7190e8138144c8e9dc9e8f62d37e26bf39d6bdd77cd0480d9884aa5fb",
+      "vendoredSha256": "5f678da7190e8138144c8e9dc9e8f62d37e26bf39d6bdd77cd0480d9884aa5fb",
+      "upstreamGitBlob": "d75c2205186f27e3c61a5b72cfc8bd60f2b65fd1",
+      "modified": false
+    },
+    {
+      "path": "crates/devices/src/devnode.rs",
+      "upstreamSha256": "c6e6230a242fc8574aa550c08b542537934083ed28fd7a80317872d65486a8f9",
+      "vendoredSha256": "9dc6840b4ae141aefcb6589d454ae2c03b7e506555d0287a49251a29d5ba53e5",
+      "upstreamGitBlob": "6cfa8dad5f3fb7965091d2b520e785ced1848653",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+    },
+    {
+      "path": "crates/devices/src/gamepad.rs",
+      "upstreamSha256": "eebedc0853796764a8695f9e871ab0bc928aae68d9e4bc1687b5dc06e4373284",
+      "vendoredSha256": "eebedc0853796764a8695f9e871ab0bc928aae68d9e4bc1687b5dc06e4373284",
+      "upstreamGitBlob": "f80c61a274550d6259ab591d1845bd68a319c445",
+      "modified": false
+    },
+    {
+      "path": "crates/devices/src/gilrs_backend.rs",
+      "upstreamSha256": "733c08a33194b2b09209e0d971412da3c5c1d6ae9f00e92696aaebd68324b7a3",
+      "vendoredSha256": "4c85ecd69cfc9c5843d2e4cf3d04784f3c65252dc67a7693a374d4399e6b7684",
+      "upstreamGitBlob": "b7944d679191d4bedbd495d87718c5db5e04344a",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+    },
+    {
+      "path": "crates/devices/src/gyro.rs",
+      "upstreamSha256": "aa5335219c8ebc95e416da622e65d644fe2210250bffe283ff131bba22f48446",
+      "vendoredSha256": "984a6d59d4574eb14f4d1d1d6a29aea863e96163bd528d5ae24c6eab264dbfaf",
+      "upstreamGitBlob": "036f129eb74648619d436d6cca06808badcf1082",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+    },
+    {
+      "path": "crates/devices/src/headless.rs",
+      "vendoredSha256": "a737f0ce2e48ae8b5a3ddb79d0ba35509b9df569603c2acf10dabfbe62d577fa",
+      "added": true,
+      "modified": true,
+      "patch": "Studio headless API/build entry or raw timestamped event extension over the original SdlBackend; no alternative device protocol parser."
+    },
+    {
+      "path": "crates/devices/src/identification.rs",
+      "upstreamSha256": "80a4f1da308cc07e4684ef69f9a82621b74833bf655103a75831b8dbd5e18eec",
+      "vendoredSha256": "80a4f1da308cc07e4684ef69f9a82621b74833bf655103a75831b8dbd5e18eec",
+      "upstreamGitBlob": "c7025e699e7eb5dfed7361275cb32fb66e387aac",
+      "modified": false
+    },
+    {
+      "path": "crates/devices/src/layouts.rs",
+      "upstreamSha256": "10452485ef7c8bd7bc939466d4604d0bd18580c2ae1e51aede43a59d6a18bf82",
+      "vendoredSha256": "10452485ef7c8bd7bc939466d4604d0bd18580c2ae1e51aede43a59d6a18bf82",
+      "upstreamGitBlob": "647ad69cd9b6f2a73064424743321c72767a37be",
+      "modified": false
+    },
+    {
+      "path": "crates/devices/src/lib.rs",
+      "upstreamSha256": "62356da0b3320161817dcba423accf185e81f7282466d30fd8ba2fab6c860993",
+      "vendoredSha256": "62356da0b3320161817dcba423accf185e81f7282466d30fd8ba2fab6c860993",
+      "upstreamGitBlob": "e012080a12da4dd22d1ad7f8246feb4da16eebcf",
+      "modified": false,
+      "referenceOnly": true
+    },
+    {
+      "path": "crates/devices/src/raw.rs",
+      "vendoredSha256": "4a36d664ec4e5e79c067ae78eeee551bc85f0ac503148a22748b76bfac38728c",
+      "added": true,
+      "modified": true,
+      "patch": "Timestamped SDL touch down/motion/up DTOs added to the existing selected-device FIFO; gyro sample/order/overflow contracts unchanged."
+    },
+    {
+      "path": "crates/devices/src/raw_hid.rs",
+      "upstreamSha256": "958c0c489c878ac2d1b7ee1d0bbf333f98c41117f11f9d77eb36027d16454301",
+      "vendoredSha256": "d5fcc78f0341b78d8c0e0fe2339a1a5471c14cc9f4b9ea9dba6ebc07b25f0be7",
+      "upstreamGitBlob": "c21cc4960210fd7f7a9e5cc4a91fbf749bc3d794",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+    },
+    {
+      "path": "crates/devices/src/sdl_backend.rs",
+      "upstreamSha256": "f585254f3d8c77489cc809d24cb2f33e0c61e25606efab0954d1a9c52dceec17",
+      "vendoredSha256": "d21ad993cc069aff91ce01c154a7e4eaa714118d59abd52f4defe2fcf4c76e85",
+      "upstreamGitBlob": "64855a2375eaedea5f341f8581b38789dd48ea7e",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL.; 0.11 raw mode explicitly re-enables native touch down/motion/up after disabling sampled gamepad events. Real DLL synthetic FIFO check covers the subscription."
+    },
+    {
+      "path": "crates/devices/src/sdl_raw.rs",
+      "vendoredSha256": "fa699d48e64043ef11feef6773f3266c41a89e9e56b50afb131ebb1c1b48e5be",
+      "added": true,
+      "modified": true,
+      "patch": "Expose original DeviceBackend::send and LedOut::due on the selected OpenPad; cancellation drops pending colors. Surface capabilities and reuse original read_touchpad_fingers for snapshots. No sampled input poll or extra handles."
+    },
+    {
+      "path": "crates/devices/src/spike.rs",
+      "upstreamSha256": "3b663743b50b61044827605c3487308751191722f74437a9c727e075d6f61684",
+      "vendoredSha256": "3b663743b50b61044827605c3487308751191722f74437a9c727e075d6f61684",
+      "upstreamGitBlob": "c4df47f009d2794ff603f71e415478eddcc51f20",
+      "modified": false
+    },
+    {
+      "path": "crates/devices/src/steam_controller.rs",
+      "upstreamSha256": "16fce4edc7af2b90fab4c0744fe0e1433b82e4767128181a36e80570fddf472e",
+      "vendoredSha256": "5fe20763584826ff81d2aa2eed80874d26a994c8957d10f8da4c10269baae662",
+      "upstreamGitBlob": "4b527f3f9d7e2d51353b8955b0e0c24e9c4bd43d",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+    },
+    {
+      "path": "crates/devices/src/steam_haptics.rs",
+      "upstreamSha256": "b776776e740b08d334a78e9d4060821a6fa8918512ca832869ce2994dfc74ccb",
+      "vendoredSha256": "b654106cef3cda4a6c66564b867bdd0b623d579c65d6fcfb3c69cf8fb1e6edbb",
+      "upstreamGitBlob": "8ebd0b6d3fd33663dc6996dd9c4a981034ccb85e",
+      "modified": true,
+      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+    },
+    {
+      "path": "crates/modules/Cargo.toml",
+      "upstreamSha256": "05b77a66cf8eb7c03d15d2bd4f4c9de4846a71bab41deabe67bc706174278f25",
+      "vendoredSha256": "ba61da41494c80b0269df3fbf730f7c33e10a4666968c3affcc1127f6de12d05",
+      "upstreamGitBlob": "4987dcc8b490b0c518afcde8a1b65f356135dcb9",
+      "modified": true,
+      "patch": "Headless subset and original device/node contracts; keep hardware ownership and error/lifecycle adaptation in Studio."
+    },
+    {
+      "path": "crates/modules/src/generator.rs",
+      "upstreamSha256": "8e86e6159485f3f3c5ccce8fbb0e778a15cd10ad2e8165f2dec53b19991eeddf",
+      "vendoredSha256": "8e86e6159485f3f3c5ccce8fbb0e778a15cd10ad2e8165f2dec53b19991eeddf",
+      "upstreamGitBlob": "3d019a75d77ffe2bac7c9e0e480fc44cdbe8577d",
+      "modified": false
+    },
+    {
+      "path": "crates/modules/src/headless.rs",
+      "vendoredSha256": "a4d5f21b870d588b0701628ac9b4f7cf21505a5d2af5d10da7d98aa4030507e1",
+      "added": true,
+      "modified": true,
+      "patch": "Studio headless entry exposing selected original upstream types, layouts or descriptors."
+    },
+    {
+      "path": "crates/modules/src/lib.rs",
+      "upstreamSha256": "adf5387440d9a43f8c0d17b36c28aff0fed73d02f366c188b757d7c6763c9088",
+      "vendoredSha256": "adf5387440d9a43f8c0d17b36c28aff0fed73d02f366c188b757d7c6763c9088",
+      "upstreamGitBlob": "1de07c05d5e1ecb9683d8fa1c50f2322837d7d3a",
+      "modified": false,
+      "referenceOnly": true
+    },
+    {
+      "path": "crates/modules/src/logic.rs",
+      "upstreamSha256": "994c4e980019151460d849f923705e40416047fdeb2bf06a13377f86817530f1",
+      "vendoredSha256": "994c4e980019151460d849f923705e40416047fdeb2bf06a13377f86817530f1",
+      "upstreamGitBlob": "5c008192deb1f4119c6cd29c9248bf7855830974",
+      "modified": false
+    },
+    {
+      "path": "crates/modules/src/math.rs",
+      "upstreamSha256": "ff0c3fd3b5ca26051604c8a9f77e6ca98e2b5923691cf41ba55ea34e8a90c103",
+      "vendoredSha256": "ff0c3fd3b5ca26051604c8a9f77e6ca98e2b5923691cf41ba55ea34e8a90c103",
+      "upstreamGitBlob": "d64d21d814fd94437182b2ff8e5afa568d1c864c",
+      "modified": false
+    },
+    {
+      "path": "crates/modules/src/processing.rs",
+      "upstreamSha256": "d978514811e3d0ace09150fc298e4c7257b76a88b0e6cfca00e1a81ab0004ca3",
+      "vendoredSha256": "d978514811e3d0ace09150fc298e4c7257b76a88b0e6cfca00e1a81ab0004ca3",
+      "upstreamGitBlob": "a12500d6aa334de836a78133c973e0af5e45d808",
+      "modified": false
+    },
+    {
+      "path": "crates/modules/src/util.rs",
+      "upstreamSha256": "0cec7b0627972acfc8688532c3b904a6649229d59cb9a8d3e4f0efae1528e8c4",
+      "vendoredSha256": "0cec7b0627972acfc8688532c3b904a6649229d59cb9a8d3e4f0efae1528e8c4",
+      "upstreamGitBlob": "3afcb4e97585e3548a6eda4cd97a59b867e0db3d",
+      "modified": false
+    },
+    {
+      "path": "crates/virtual/Cargo.toml",
+      "upstreamSha256": "a2aa3b9fbb05d6ee56e95318944bcb3e6268beae0506cf709ff364c3e23ade37",
+      "vendoredSha256": "75233e49040f456ae1942df32efe2d64a5949f888e2ccc7fbf607687fb416c3a",
+      "upstreamGitBlob": "b2d417c904f5379c11cd76322d5ca37f7e1b664f",
+      "modified": true,
+      "patch": "Headless dependencies for original native HID/GIP/ViGEm gamepads; optional upstream tests do not run by default."
+    },
+    {
+      "path": "crates/virtual/src/headless.rs",
+      "vendoredSha256": "57ce01b54ec6273c2b62ed1af24881fe3f2fe9d5517ad173b8827f7714a04633",
+      "added": true,
+      "modified": true,
+      "patch": "Headless lifecycle feedback_sequence metadata added with a default implementation; original virtual device source/feedback contract retained."
+    },
+    {
+      "path": "crates/virtual/src/layouts.rs",
+      "upstreamSha256": "971c7f73a701e41a780fb9212adadfa4fdbc4e3ecae8e964fe5cd6c3cf51fa56",
+      "vendoredSha256": "971c7f73a701e41a780fb9212adadfa4fdbc4e3ecae8e964fe5cd6c3cf51fa56",
+      "upstreamGitBlob": "21f7cc4259dfb0d41a1f1428b01c44c5b28b737c",
+      "modified": false
+    },
+    {
+      "path": "crates/virtual/src/lib.rs",
+      "upstreamSha256": "f1b175a9231ad6e443e08fe206056a23419ff4a618155eb74e887d6ddb571ffc",
+      "vendoredSha256": "f1b175a9231ad6e443e08fe206056a23419ff4a618155eb74e887d6ddb571ffc",
+      "upstreamGitBlob": "23f155f10b8efabf3b21de283d11e837b091eb80",
+      "modified": false,
+      "referenceOnly": true
+    },
+    {
+      "path": "crates/hidmaestro/src/hidhide.rs",
+      "upstreamSha256": "82f829eaf66831e9a6f72672da081aae793e5ae121e057a4396a620d8c556cd7",
+      "vendoredSha256": "a2a15adc3ff8993e6fdf002b350ade8f2d0c97a0530a3b981596247650005d81",
+      "upstreamGitBlob": "724d64f06088336f87dcb251969d81ba8be2d432",
+      "modified": true,
+      "patch": "Expose the original native HidHide IOCTL client with checked opens/reads and inverse mode; preserve errors instead of substituting empty policy. Studio owns the physical target selection, write-ahead journal and lease lifecycle. Official configuration requires no elevation."
+    },
+    {
+      "path": "crates/virtual/src/keyboard.rs",
+      "upstreamSha256": null,
+      "vendoredSha256": "047fdbf55b79953e34abc714334df0fbc8275ffa539034fe55af6ff8e23ce431",
+      "added": true,
+      "modified": true,
+      "derivedFrom": "crates/virtual/src/keymouse_hm.rs",
+      "derivedFromSha256": "a74fd443f8c80fb9b3e44b1e0832dc1a03f5ba167be1a85468d012ae058939b0",
+      "patch": "Expose the original pure key_name_to_hid_usage lookup verbatim, with pub visibility, without GUI or device ownership."
+    },
+    {
+      "path": "crates/virtual/src/hidmaestro_device.rs",
+      "upstreamSha256": "86c7c527bfdec8e149211fc82ffe6ae72b020947f66d2df78d6b7ce939b364b7",
+      "upstreamGitBlob": "7b34287b2c480617eec78ccdfdc4350ed1027ab3",
+      "modified": true,
+      "patch": "Retain original input/output encoding and decoding. Add feedback-command sequence metadata including native ping and timeout; pure offline test with input/output None. Shared-section upstream tests remain explicitly opt-in.",
+      "vendoredSha256": "525c00d5fa4824aaac3f2cb3f13b3f63edae15814c02ec3395dbda7e362d4faf"
+    },
+    {
+      "path": "crates/virtual/src/sony_feedback.rs",
+      "upstreamSha256": "f66db7d53224a1d715e7a13c9418e5fab5329cca0eb4f2b6f90756b7bf096845",
+      "upstreamGitBlob": "d09d541d4793607b2e2592cbe6b6992ba29ca218",
+      "modified": false,
+      "vendoredSha256": "f66db7d53224a1d715e7a13c9418e5fab5329cca0eb4f2b6f90756b7bf096845"
+    },
+    {
+      "path": "crates/hidmaestro/src/helper.rs",
+      "upstreamSha256": "9f339e84c8345d801765a9abfba2a8b79b85af4254bce1b0e49063639f6f25cf",
+      "upstreamGitBlob": "4e6405f1117b466b13a3234a82e2fad624b437c3",
+      "modified": false,
+      "vendoredSha256": "9f339e84c8345d801765a9abfba2a8b79b85af4254bce1b0e49063639f6f25cf"
+    },
+    {
+      "path": "crates/hidmaestro/src/helper_ipc.rs",
+      "upstreamSha256": "c89b654f9ed6aee2135ca9d4b61dc31efcfa11bcb0bf966c445a312a01201270",
+      "upstreamGitBlob": "0e5655b351a89e96c7a06278a3092460e729f72e",
+      "modified": false,
+      "vendoredSha256": "c89b654f9ed6aee2135ca9d4b61dc31efcfa11bcb0bf966c445a312a01201270"
+    },
+    {
+      "path": "crates/virtual/src/windows.rs",
+      "upstreamSha256": "615059935d6ecb49a45e9a157f490f223f0ab753f08a0e5d6e5e21b74d2ab0b9",
+      "upstreamGitBlob": "d41e3e334e8864662a2c456499d0581196cdbe23",
+      "modified": false,
+      "vendoredSha256": "615059935d6ecb49a45e9a157f490f223f0ab753f08a0e5d6e5e21b74d2ab0b9"
+    },
+    {
+      "path": "crates/virtual/src/pins.rs",
+      "upstreamSha256": null,
+      "modified": true,
+      "derivedFrom": "crates/virtual/src/lib.rs::apply_pin (verbatim body; public headless entry)",
+      "vendoredSha256": "59dd4757f6fcb901b944ed828ce0f11160bdfdb9d4298b52f5c46f3ec2931295"
+    },
+    {
+      "path": "crates/virtual/src/native_gamepads.rs",
+      "upstreamSha256": null,
+      "modified": true,
+      "derivedFrom": "crates/virtual/src/windows.rs::instance_label, XRumble, VirtualXInput through VirtualDS4 and pure axis/button helpers; headless checked flush and player-index API exposure (see docs/flexinput-reuse.md)",
+      "vendoredSha256": "f6973ea0a45a76086df3bcf7ca6a61785fdb8bfbf7c8ee464c4a23997884cd12",
+      "patch": "Preserve original reports, target and notifications. Add command sequence counters captured atomically with polled values; existing fallible flush/player-index exposure retained. Offline tests never connect a driver."
+    }
+  ],
+  "port": "Motion Studio headless adapter: excludes GUI and JSM evaluation; native SDL raw event seam, original physical-source processing and native gamepad devices; Studio owns configuration and bounded lifecycle"
+}

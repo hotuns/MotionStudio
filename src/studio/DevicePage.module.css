@@ -1,0 +1,59 @@
+.page { display: flex; flex-direction: column; gap: 12px; }
+.page .connection { padding-block: 14px; }
+.connection :global(.studio-device-controls) { justify-content: space-between; }
+.connectionActions { display: flex; flex-wrap: wrap; gap: 8px; }
+.deviceHeader { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.deviceHeader button, .connectionActions button { display: inline-flex; align-items: center; gap: 7px; flex-shrink: 0; }
+.deviceHeader p { margin-top: 4px; }
+.monitor { container-type: inline-size; gap: 14px; }
+.viewModes { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border-1); border-radius: 8px; background: var(--bg-1); }
+.viewModes button { padding: 6px 10px; }
+.viewModes button[aria-pressed='true'] { background: var(--bg-2); color: var(--accent); border-color: var(--border-1); }
+.readoutModes { justify-self: start; }
+.statusLayout { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(260px, 1fr); gap: 14px; }
+.previewPanel, .panel { min-width: 0; border: 1px solid var(--border-1); border-radius: 12px; background: var(--bg-1); }
+.previewPanel { overflow: hidden; }
+.previewStage {
+  display: grid;
+  place-items: center;
+  position: relative;
+  height: clamp(236px, 26vw, 380px);
+  background-image:
+    radial-gradient(ellipse at center, var(--bg-2) 10%, transparent 75%),
+    linear-gradient(color-mix(in srgb, var(--border-1) 65%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--border-1) 65%, transparent) 1px, transparent 1px);
+  background-size: auto, 28px 28px, 28px 28px;
+  background-position: center;
+}
+.previewStage > :not(.modelViewport) { width: min(82%, 420px); max-height: 100%; }
+.modelViewport { position: absolute; inset: 0; }
+.modelViewport canvas { display: block; width: 100%; height: 100%; }
+.modelLoading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--text-muted); }
+.inputStrip {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: 8px; min-height: 42px; padding: 8px 12px; border-top: 1px solid var(--border-1);
+}
+.triggerReadouts { display: flex; gap: 14px; color: var(--text-mid); white-space: nowrap; }
+.triggerReadouts strong { color: var(--text-strong); font-variant-numeric: tabular-nums; }
+.previewHint { margin: 0; padding: 6px 12px; color: var(--text-muted); font-size: 12px; }
+.panel { display: grid; align-content: start; gap: 12px; padding: 14px; }
+.readouts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.readouts dt, .metrics dt { color: var(--text-muted); font-size: 12px; }
+.readouts dd { color: var(--text-strong); margin: 3px 0 0; font-size: 17px; font-variant-numeric: tabular-nums; }
+.acceleration, .sensorDetails { border-top: 1px solid var(--border-1); padding-top: 10px; }
+.acceleration .readouts, .sensorDetails .readouts { margin-top: 8px; }
+.acceleration dd, .sensorDetails dd { font-size: 14px; }
+.sensorDetails summary, .foldHeading { cursor: pointer; color: var(--text-mid); }
+.foldHeading strong { color: var(--text-strong); }
+.foldHeading span { margin-left: 10px; font-size: 12px; }
+.diagnostics { display: grid; gap: 10px; margin-top: 12px; }
+.deviceMeta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; color: var(--text-muted); }
+.page .diagnosticHeading { margin-top: 14px; }
+.buttonList { display: flex; flex-wrap: wrap; gap: .55rem; }
+.buttonChip { padding: .35rem .7rem; border-radius: 999px; border: 1px solid var(--border-1); background: var(--bg-input); color: var(--text-mid); font-size: 12px; line-height: 1; }
+.buttonChip[data-pressed='true'] { border-color: var(--border-strong); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg-2)); }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 145px), 1fr)); gap: 12px; margin: 0; }
+.metrics dd { font-variant-numeric: tabular-nums; font-weight: 500; margin: 3px 0 0; }
+@container (max-width: 590px) {
+  .statusLayout { grid-template-columns: minmax(0, 1fr); }
+}

@@ -1,0 +1,43 @@
+[package]
+name    = "flexinput-hidmaestro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+autobins = false
+
+[dependencies]
+flexinput-core = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+# Everything but the profiles, the report encoder and the feature answers is
+# Windows: the driver, its helper, the shared sections. Linux builds the
+# portable half for its UHID pads (flexinput-virtual's linux module).
+[target.'cfg(windows)'.dependencies]
+# The helper deploys usbip-win2 for the composite personas (usbip_install.rs)
+# and checks for its host controller through flexinput-usbip's vhci client.
+
+# Pins the bundled usbip-win2 installer (usbip_bundled.rs). Already in the graph
+# via crates/net.
+sha2       = "0.10"
+# Per-machine driver package signing (signing.rs): self-signed cert on a CNG
+# key, Authenticode via mssign32, catalogs via wintrust's CDF engine — all
+# in-box Windows DLLs, no SDK tooling. 0.61 to match the other crates.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    # Ownership claims (claims.rs): one-instance named pipes, and the
+    # process's start time for its owner record.
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    # Handing a Bluetooth adapter to FlexInput (winusb_bind.rs): the forced
+    # driver install, UpdateDriverForPlugAndPlayDevices.
+    "Win32_Devices_DeviceAndDriverInstallation",
+] }
+

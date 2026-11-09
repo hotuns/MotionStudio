@@ -1,0 +1,165 @@
+pub mod gamepad;
+pub mod gilrs_backend;
+pub mod classic_bt;
+pub mod gyro;
+// Moved to core (pure DSP, shared with the virtual composite pads); kept at
+// its old path here.
+pub use flexinput_core::haptic_pcm;
+pub mod hidhide;
+pub mod identification;
+pub mod layouts;
+#[cfg(target_os = "linux")]
+pub mod linux_hide;
+pub mod midi;
+pub mod own_thread;
+pub mod raw_hid;
+pub mod sdl_backend;
+pub mod spectrum;
+pub mod click_gate;
+pub mod spike;
+pub mod spike_tune;
+
+#[cfg(feature = "joycon2")]
+pub mod joycon2_backend;
+
+pub mod steam_controller;
+pub mod steam_haptics;
+#[cfg(any(windows, target_os = "linux"))]
+mod dualsense_haptic;
+#[cfg(windows)]
+mod devnode;
+
+#[cfg(windows)]
+pub mod loopback_haptic;
+
+#[cfg(windows)]
+pub mod loopback_manager;
+
+use flexinput_core::raw_pad::RawPadProfiles;
+use flexinput_core::{Signal, SignalType};
+
+pub use gilrs_backend::{
+    probe_xinput_slots, probe_xinput_slots_cached, GilrsBackend, XInputSlotInfo,
+};
+pub use hidhide::HidHideClient;
+pub use identification::ControllerKind;
+pub use midi::MidiBackend;
+
+#[derive(Clone)]
+pub struct DevicePin {
+    pub id: String,
+    pub display_name: String,
+    pub signal_type: SignalType,
+}
+
+#[derive(Clone)]
+pub struct PhysicalDevice {
+    pub id: String,
+    pub display_name: String,
+    pub kind: ControllerKind,
+    pub outputs: Vec<DevicePin>,
+    pub inputs: Vec<DevicePin>,
+    /// Windows device instance path (e.g. `HID\VID_054C&PID_09CC\5&...`),
+    /// used for HidHide blacklist operations. None if unavailable.
+    pub instance_path: Option<String>,
+    /// USB vendor/product id for a gamepad (gilrs pads). `None` for devices
+    /// without one (MIDI). Used to resolve the HID instance id off-thread for
+    /// HidHide masking, so a slow SetupAPI lookup never runs on the I/O loop.
+    pub vid: Option<u16>,
+    pub pid: Option<u16>,
+}
+
+pub trait DeviceBackend: Send {
+    /// Short label for diagnostics (the I/O loop's per-backend timings).
+    fn name(&self) -> &'static str { "backend" }
+    fn enumerate(&mut self) -> Vec<PhysicalDevice>;
+    fn poll(&mut self) -> Vec<(String, String, Signal)>;
+    /// Route a signal to a physical output pin (e.g. MIDI CC send).
+    /// Backends that don't support output can ignore this.
+    fn send(&mut self, _device_id: &str, _pin_id: &str, _signal: Signal) {}
+    /// The I/O loop's output pass has sent everything it will: a backend that
+    /// gathers its sends hands them over here (see `own_thread::OwnThread`).
+    fn end_output_pass(&mut self) {}
+    /// Drain accumulated raw-event counts per device id. Used by the I/O
+    /// thread to compute live per-device polling rates. Default: empty
+    /// (backends that don't track events are reported as 0 Hz).
+    fn take_event_counts(&mut self) -> Vec<(String, u32)> { Vec::new() }
+    /// Configure the outlier-spike filter for a specific physical device.
+    /// Called from the I/O loop each tick with the current UI settings
+    /// (cheap no-op if unchanged). `window` is the judging window width in
+    /// samples — see `crate::spike`.
+    ///
+    /// Backends without a raw IMU stream should ignore this. Any backend
+    /// that DOES emit `gyro_*` / `accel_*` pins must implement it, or the
+    /// filter's UI controls silently do nothing for that device's prefix.
+    fn set_spike_filter(
+        &mut self,
+        _device_id: &str,
+        _enabled: bool,
+        _sensitivity_pct: f32,
+        _window: u8,
+    ) {
+    }
+    /// Global "route every pad through SDL" switch, pushed from the I/O loop
+    /// each tick (cheap no-op when unchanged). When on, the SDL backend claims
+    /// ALL gamepads (not just the ones kind-detect calls `Generic`) and the
+    /// gilrs backend emits + enumerates nothing, so a controller's inputs come
+    /// entirely from SDL. Primarily a verification switch — it lets a pad with a
+    /// native parser (DualSense / Switch Pro) be read through SDL and compared
+    /// against its canonical-correct native path. Changes device IDs
+    /// (`gilrs:…` → `sdl:…`), so existing wiring does not follow the switch.
+    fn set_sdl_all_pads(&mut self, _on: bool) {}
+    /// Hand a device its measured resting gyro drift, in **degrees per second
+    /// on the device's own rate axes**, or `None` to fall back to whatever the
+    /// backend compiled in.
+    ///
+    /// ⭐ Separate from the `gyro_offset` calibration the engine applies to the
+    /// pins, and NOT a duplicate of it. Some devices integrate an orientation
+    /// internally from the same rate; for those, a correction applied to the
+    /// output pins arrives too late to stop the integrated estimate drifting,
+    /// and only the device layer can subtract it early enough to fix both.
+    /// Backends without an internal integrator can ignore this.
+    fn set_gyro_drift(&mut self, _device_id: &str, _drift: Option<[f32; 3]>) {}
+    /// Hand the backend every learned raw-pad layout (see
+    /// `flexinput_core::raw_pad`), pushed from the I/O loop each iteration.
+    /// Cheap to call: the snapshot is only replaced when the user changes a
+    /// layout, so a backend compares the `Arc` by pointer and returns. Only the
+    /// backend that surfaces `sdl:raw:` devices uses it.
+    fn set_raw_pad_profiles(&mut self, _profiles: &std::sync::Arc<RawPadProfiles>) {}
+}
+
+/// Every backend, in the order the I/O loop polls them. `raise` lifts a thread
+/// a backend runs its input on as the I/O loop's own (Linux; see
+/// `own_thread::OwnThread::spawn`).
+pub fn init_backends(raise: fn(&str)) -> Vec<Box<dyn DeviceBackend>> {
+    let mut backends: Vec<Box<dyn DeviceBackend>> = Vec::new();
+    if let Some(b) = GilrsBackend::try_new() {
+        backends.push(Box::new(b));
+    }
+    // SDL is a sibling source for pads gilrs/kind-detect classify as `Generic`
+    // (Steam Controller, 8BitDo, third-party). It self-inits lazily on the first
+    // poll, on its own thread (every SDL call stays there), and enumerates
+    // ONLY `Generic` pads, so it never double-surfaces a controller gilrs owns.
+    // Its own thread because SDL's update can block for seconds: a Steam
+    // Controller's puck may sit on the feature report SDL sends it every 3 s,
+    // and any device change on the system has SDL look for pads again.
+    // Pushed AFTER gilrs so gilrs's tuned paths take precedence in iteration.
+    let sdl = sdl_backend::SdlBackend::new();
+    backends.push(Box::new(own_thread::OwnThread::spawn(sdl, "sdl:", raise)));
+    // The Steam Controller (2026), off its own HID reports: SDL leaves it be.
+    // Its ids keep SDL's `sdl:generic:` form, so saved patches still find it.
+    backends.push(Box::new(steam_controller::SteamControllerBackend::new()));
+    // Joy-Con 2 over BLE. Cannot overlap with the two above: Windows binds no
+    // driver to these controllers, so gilrs and SDL never see them and no
+    // dedup is needed. Starts its own thread and enumerates nothing until a
+    // controller has finished connecting, so it is free to add unconditionally.
+    #[cfg(feature = "joycon2")]
+    backends.push(Box::new(joycon2_backend::Joycon2Backend::new()));
+    // Bluetooth Classic gamepads on our own dongle. Enumerates nothing until a
+    // controller with a STORED LINK KEY connects, so on a machine that has
+    // never run the pairing tool it costs one idle thread and touches no radio
+    // at all — see `classic_bt`, which also explains why it yields the dongle
+    // to the Joy-Con 2 hub rather than competing for it.
+    backends.push(Box::new(classic_bt::ClassicBtBackend::new()));
+    backends
+}

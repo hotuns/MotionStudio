@@ -1,0 +1,12 @@
+schema_version = 1
+name = "原生触摸板鼠标"
+virtual_gamepad = "none"
+
+[gyro]
+enabled = false
+
+[touchpad]
+enabled = true
+pointer_speed = 1.0
+scroll_speed = 1.0
+natural_scroll = true

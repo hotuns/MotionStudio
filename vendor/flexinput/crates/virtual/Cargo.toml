@@ -1,0 +1,16 @@
+[package]
+name = "flexinput-virtual"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+[lib]
+path = "src/headless.rs"
+[dependencies]
+flexinput-core.workspace = true
+
+flexinput-hidmaestro = { path = "../hidmaestro" }
+glam.workspace = true
+[features]
+upstream-output-tests = []
+[target.'cfg(windows)'.dependencies]
+vigem-client = { version = "0.1", features = ["unstable_ds4", "unstable_xtarget_notification"] }

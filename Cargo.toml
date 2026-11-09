@@ -1,0 +1,29 @@
+[workspace]
+members = ["crates/engine", "crates/host", "crates/filters", "src-tauri", "vendor/flexinput/crates/core", "vendor/flexinput/crates/engine", "vendor/flexinput/crates/hidmaestro", "vendor/flexinput/crates/devices", "vendor/flexinput/crates/modules", "vendor/flexinput/crates/virtual"]
+default-members = ["crates/engine", "crates/host"]
+resolver = "2"
+
+[workspace.package]
+version = "0.16.9"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+flexinput-core = { path = "vendor/flexinput/crates/core" }
+flexinput-devices = { path = "vendor/flexinput/crates/devices", default-features = false }
+flexinput-modules = { path = "vendor/flexinput/crates/modules", default-features = false }
+flexinput-virtual = { path = "vendor/flexinput/crates/virtual" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+glam = { version = "0.27", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+smallvec = { version = "1", features = ["serde"] }
+puffin = "0.20"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = false
+codegen-units = 16
+strip = "debuginfo"

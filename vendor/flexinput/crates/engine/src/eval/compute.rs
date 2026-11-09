@@ -1,0 +1,1668 @@
+//! The per-node computation: `compute_node` dispatch, the `eval_pure`
+//! entry point, and the stateful generators and filters behind them
+//! (oscillator, envelope, delay, average, DC filter, response curve,
+//! change detector, logic delay, counter, sample and hold).
+
+use super::*;
+
+/// A macro port's output value, coerced to the port's declared type from the
+/// two aspects writers publish: the scalar (`SIGS_NS`) and the deflection
+/// (`SIGS_NS_VEC2`). An absent aspect is a released mapping, which reads as the
+/// type's off value — so downstream logic always sees a defined signal — except
+/// an Any port, which emits nothing when nothing drives it, like an unwired pin.
+///
+/// Shared by the Macro Output node and the JSM Config's own macro pins, so a
+/// port reads the same wherever it is shown.
+pub(crate) fn macro_port_value(
+    ty: SignalType,
+    scalar: Option<Signal>,
+    vec2: Option<Signal>,
+) -> Option<Signal> {
+    match ty {
+        SignalType::Vec2 => Some(vec2.unwrap_or(Signal::Vec2(Vec2::ZERO))),
+        // Float / Any prefer the deflection aspect when present: a Touch Zones
+        // card writes BOTH the (binary) gate and the deflection, and an
+        // analog-typed port wants the position, not a gate pinned at 1.0.
+        // Remapper/Lean write only the scalar, so they're unaffected.
+        SignalType::Float => Some(match (scalar, vec2) {
+            (_, Some(Signal::Vec2(v))) => Signal::Float(v.length().min(1.0)),
+            (Some(s), _) => Signal::Float(s.as_float().clamp(0.0, 1.0)),
+            _ => Signal::Float(0.0),
+        }),
+        SignalType::Any => vec2.or(scalar),
+        _ => Some(match (scalar, vec2) {
+            (Some(s), _) => Signal::Bool(s.as_bool()),
+            (None, Some(Signal::Vec2(v))) => Signal::Bool(v.length() >= 0.5),
+            _ => Signal::Bool(false),
+        }),
+    }
+}
+
+// ── Per-node dispatch ─────────────────────────────────────────────────────────
+pub(crate) fn compute_node(
+    snap: &NodeSnap,
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    dev_sigs: &BusMap,
+    collector_sigs: &BusMap,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+    puffin::profile_function!();
+    match snap.module_id.as_str() {
+        "device.source" => {
+            // Deadzone + gyro multiplier already applied in `preprocess_dev_sigs`
+            // at the top of `eval_graph_tick` so AutoMap/splitter/collector see
+            // the same processed values via raw dev_sigs reads.
+            let dev_id = snap.device_id.as_deref().unwrap_or("");
+            // MIDI ports only publish pins away from rest; a pin they omit reads
+            // as its rest value, as every CC did when all 128 were emitted.
+            let is_midi = dev_id.starts_with("midi_in:");
+            (0..snap.n_outputs).map(|i| {
+                let pin_id = snap.output_pin_ids.get(i).map(|s| s.as_str()).unwrap_or("");
+                if pin_id.is_empty() { return None; }
+                dev_sigs.get_pin(&dev_id, &pin_id).copied()
+                    .or_else(|| if is_midi { flexinput_core::midi::rest_value_for_id(pin_id) } else { None })
+            }).collect()
+        }
+        "module.automap_split" => {
+            let dev_id = snap.params.get("_automap_device_id").and_then(|v| v.as_str()).unwrap_or("");
+            // The collector_id (set by build_processing_graph) is the closest
+            // upstream collector in the AutoMap wire chain. Splitter prefers its
+            // injected/overridden signals over the raw device samples so the
+            // probe reflects the most recent state along the chain.
+            let collector_id = snap.params.get("_automap_collector_id").and_then(|v| v.as_str()).unwrap_or("");
+            (0..snap.n_outputs).map(|i| {
+                let pin_id = snap.output_pin_ids.get(i).map(|s| s.as_str()).unwrap_or("");
+                // "automap_pass" or empty = the AutoMap passthrough slot — no signal value.
+                if pin_id.is_empty() || pin_id == "automap_pass" { return None; }
+                if !collector_id.is_empty() {
+                    if let Some(&sig) = collector_sigs.get_pin(&collector_id, &pin_id) {
+                        return Some(sig);
+                    }
+                }
+                // MIDI pins are only published away from rest; a missing one
+                // reads as its rest value.
+                dev_sigs.get_pin(&dev_id, &pin_id).copied()
+                    .or_else(|| flexinput_core::midi::parse_pin(pin_id).map(|p| p.rest_value()))
+            }).collect()
+        }
+        "module.input_viewer" => {
+            // Pure display: the board renders from live signals on the UI
+            // thread; output 0 is the AutoMap passthrough (resolved by the
+            // device walk, carries no Signal).
+            (0..snap.n_outputs).map(|_| None).collect()
+        }
+        "module.menu" => {
+            // Fallback only — both eval loops intercept module.menu with
+            // eval_menu_node before compute_node runs. Idle-typed outputs:
+            // closed, nothing hovered, all zone pins off. Slot 0 stays the
+            // AutoMap passthrough sentinel (no Signal). Zone pins share the
+            // Touch Zones id vocabulary (f0z{id}_x/y/act + f0c = Select).
+            use flexinput_core::menu as fm;
+            use flexinput_core::touchzones as tz;
+            (0..snap.n_outputs).map(|i| {
+                let pin_id = snap.output_pin_ids.get(i).map(|s| s.as_str()).unwrap_or("");
+                match fm::parse_pin(pin_id) {
+                    Some(fm::Pin::Open) => return Some(Signal::Bool(false)),
+                    Some(fm::Pin::Hover) => return Some(Signal::Float(-1.0)),
+                    Some(fm::Pin::Zone { .. }) | None => {}
+                }
+                match tz::parse_pin(pin_id)? {
+                    tz::Pin::Zone { comp: tz::ZoneComp::Active, .. } => Some(Signal::Bool(false)),
+                    tz::Pin::Zone { .. } => Some(Signal::Float(0.0)),
+                    tz::Pin::Click { .. } => Some(Signal::Bool(false)),
+                    tz::Pin::Press { .. } => Some(Signal::Float(0.0)),
+                }
+            }).collect()
+        }
+        "module.touch_zones" => {
+            use flexinput_core::touchzones as tz;
+            // Same upstream resolution as the Splitter: prefer the closest
+            // collector's injected signals, else the raw device samples.
+            let dev_id = snap.params.get("_automap_device_id").and_then(|v| v.as_str()).unwrap_or("");
+            let collector_id = snap.params.get("_automap_collector_id").and_then(|v| v.as_str()).unwrap_or("");
+            let read = |pin: &str| -> Option<Signal> {
+                if !collector_id.is_empty() {
+                    if let Some(&s) = collector_sigs.get_pin(&collector_id, &pin) {
+                        return Some(s);
+                    }
+                }
+                dev_sigs.get_pin(&dev_id, &pin).copied()
+            };
+            let read_edges = |field: usize, which: &str| -> Vec<f32> {
+                let key = if field == 0 { which.to_string() } else { format!("{which}{field}") };
+                snap.params.get(&key).and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+                    .unwrap_or_default()
+            };
+
+            // Split mode: field 0 tracks touch1, field 1 tracks touch2 — each on
+            // its own grid (a Steam-Controller-style pair, or two fingers tracked
+            // separately). Single mode: one field, both fingers.
+            let split = snap.params.get("field_mode").and_then(|v| v.as_str()) == Some("split");
+            let n_fields = if split { 2 } else { 1 };
+
+            // Zone geometry from the BSP tree (partial per-zone dividers), migrating
+            // the legacy grid losslessly when no tree is stored — leaf ids == the old
+            // row-major indices, so existing ports keep binding. This is the SAME
+            // source of truth mapping mode uses, so a Ports-mode zone can be split
+            // per-zone (not just full grid cuts) and its `zone_pin_id` stays stable.
+            let field_tree = |field: usize| -> tz::ZoneNode {
+                let key = if field == 0 { "zone_tree".to_string() } else { format!("zone_tree{field}") };
+                snap.params.get(&key).and_then(tz::ZoneNode::from_value)
+                    .unwrap_or_else(|| tz::ZoneNode::from_grid(
+                        &read_edges(field, "col_edges"), &read_edges(field, "row_edges")))
+            };
+
+            // Resolve which zone (tree leaf) each active finger occupies, per field,
+            // keeping per-zone local coords. In single mode touch1 is processed last
+            // so it wins when both fingers land in the same zone.
+            let mut zone_hit: HashMap<(usize, usize), (f32, f32)> = HashMap::new();
+            for field in 0..n_fields {
+                let tree = field_tree(field);
+                let fingers: &[(&str, &str, &str)] = if split {
+                    if field == 0 { &[("touch1_x", "touch1_y", "touch1_active")] }
+                    else          { &[("touch2_x", "touch2_y", "touch2_active")] }
+                } else {
+                    &[("touch2_x", "touch2_y", "touch2_active"),
+                      ("touch1_x", "touch1_y", "touch1_active")]
+                };
+                for &(px, py, pa) in fingers {
+                    if !read(pa).map(|s| s.as_bool()).unwrap_or(false) { continue; }
+                    let (x, y) = tz::pad_point_to_unit(
+                        read(px).map(|s| s.as_float()).unwrap_or(0.0),
+                        read(py).map(|s| s.as_float()).unwrap_or(0.0),
+                    );
+                    let (id, lx, ly) = tree.locate(x, y);
+                    zone_hit.insert((field, id as usize), (lx, ly));
+                }
+            }
+
+            (0..snap.n_outputs).map(|i| {
+                let pin_id = snap.output_pin_ids.get(i).map(|s| s.as_str()).unwrap_or("");
+                match tz::parse_pin(pin_id)? {
+                    tz::Pin::Zone { field, idx, comp } => Some(match (zone_hit.get(&(field, idx)), comp) {
+                        (Some(&(lx, _)), tz::ZoneComp::X) => Signal::Float(lx),
+                        (Some(&(_, ly)), tz::ZoneComp::Y) => Signal::Float(ly),
+                        (Some(_), tz::ZoneComp::Active)   => Signal::Bool(true),
+                        (None, tz::ZoneComp::Active)      => Signal::Bool(false),
+                        (None, _)                         => Signal::Float(0.0),
+                    }),
+                    // Field 0 click = the touchpad button; field 1 = the second
+                    // pad's click (see `field_click_pins`).
+                    tz::Pin::Click { field } => Some(Signal::Bool(
+                        tz::field_click_pins(field).iter()
+                            .any(|p| read(p).map(|s| s.as_bool()).unwrap_or(false)))),
+                    // The field's pad pressed, on a pad that reports it.
+                    tz::Pin::Press { field } => Some(Signal::Float(
+                        tz::field_press_pins(field, split).iter()
+                            .filter_map(|p| read(p).map(|s| s.as_float()))
+                            .fold(0.0_f32, f32::max).clamp(0.0, 1.0))),
+                }
+            }).collect()
+        }
+        "module.macro" => {
+            // Macro Output: no wired inputs — each output pin reads back the
+            // per-tick macro namespace that mapping evaluators (Remapper /
+            // Touch Zones cards / 3DOF-Lean) published into via
+            // `merge_macro_scalar` / `merge_macro_vec2`, then coerces to the
+            // port's declared type. Absent entry = mapping released → the
+            // type's off value, so downstream logic always sees a defined
+            // signal (Any ports emit None when unset, like an unwired pin).
+            use flexinput_core::macros as mac;
+            let port_types: HashMap<String, SignalType> = mac::ports_from_params(&snap.params)
+                .into_iter()
+                .map(|p| (mac::macro_pin_id(&p.id), p.signal_type))
+                .collect();
+            (0..snap.n_outputs).map(|i| {
+                let pin_id = snap.output_pin_ids.get(i).map(|s| s.as_str()).unwrap_or("");
+                if pin_id.is_empty() { return None; }
+                let ty = port_types.get(pin_id).copied().unwrap_or(SignalType::Bool);
+                let scalar = collector_sigs.get_pin(&mac::SIGS_NS, &pin_id).copied();
+                let vec2 = collector_sigs.get_pin(&mac::SIGS_NS_VEC2, &pin_id).copied();
+                macro_port_value(ty, scalar, vec2)
+            }).collect()
+        }
+        "module.constant" | "module.knob" => {
+            let v = snap.params.get("value").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            vec![Some(Signal::Float(v))]
+        }
+        "module.switch" => {
+            // The engine is the sole authority on `active`. The UI signals its
+            // intent through a monotonically-increasing `ui_toggle_seq` counter
+            // (bumped on each button click); the engine compares against its
+            // last-seen value and toggles. This avoids the two-writer race that
+            // happens when both UI and engine modify the same `active` param.
+            //
+            //   aux_f32[0] = current `active`         (0/1)
+            //   aux_f32[1] = previous `latch` level   (0/1)
+            //   aux_f32[2] = last-seen ui_toggle_seq  (truncated to f32; suitable
+            //                for counters well past patch lifetime — wraparound
+            //                isn't a concern in practice and a mismatch just
+            //                toggles once).
+            //   aux_f32[3] = init flag                (0 until first tick)
+            while state.aux_f32.len() < 4 { state.aux_f32.push(0.0); }
+            let initialised = state.aux_f32[3] > 0.5;
+            let prev_active = state.aux_f32[0] > 0.5;
+            let prev_latch  = state.aux_f32[1] > 0.5;
+            let prev_seq    = state.aux_f32[2];
+
+            let saved_active = snap.params.get("active").and_then(|v| v.as_bool()).unwrap_or(false);
+            let cur_seq = snap.params.get("ui_toggle_seq")
+                .and_then(|v| v.as_u64()).unwrap_or(0) as f32;
+            let direct = inputs.get(0).copied().flatten()
+                .and_then(|s| s.coerce_to(SignalType::Bool))
+                .map(|s| matches!(s, Signal::Bool(true))).unwrap_or(false);
+            let latch  = inputs.get(1).copied().flatten()
+                .and_then(|s| s.coerce_to(SignalType::Bool))
+                .map(|s| matches!(s, Signal::Bool(true))).unwrap_or(false);
+
+            // First tick after load: adopt the persisted `active` so saved
+            // patches reopen in their stored state.
+            let mut active = if initialised { prev_active } else { saved_active };
+
+            // UI clicks since last tick: toggle once per increment of the
+            // sequence counter. We can't replay individual clicks if many
+            // happened between ticks, so collapse to "differs → toggle once".
+            if initialised && cur_seq != prev_seq {
+                active = !active;
+            }
+            // Latch rising edge → toggle.
+            if latch && !prev_latch {
+                active = !active;
+            }
+            // Direct HIGH → force ON; falling edge does not force OFF.
+            if direct {
+                active = true;
+            }
+
+            state.aux_f32[0] = if active { 1.0 } else { 0.0 };
+            state.aux_f32[1] = if latch  { 1.0 } else { 0.0 };
+            state.aux_f32[2] = cur_seq;
+            state.aux_f32[3] = 1.0;
+
+            let out = vec![Some(Signal::Bool(active))];
+            state.last_signals = out.clone();
+            out
+        }
+        "module.dropdown" => {
+            let n = snap.params.get("options")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let idx = snap.params.get("selected_index")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            if n == 0 {
+                vec![Some(Signal::Float(0.0)), Some(Signal::Int(0))]
+            } else {
+                let idx = idx.min(n - 1);
+                // Centre-of-bucket quantisation: matches the inverse mapping
+                // used by `Selector`/`Split` ((sel*N).floor()), so wiring the
+                // float output into a Selector with N inputs selects bucket
+                // `idx` exactly.
+                let f = (idx as f32 + 0.5) / n as f32;
+                vec![Some(Signal::Float(f)), Some(Signal::Int(idx as i32))]
+            }
+        }
+        "generator.oscillator" => {
+            let out = compute_oscillator(inputs, state, &snap.params, dt);
+            state.last_signals = out.clone();
+            out
+        }
+        "generator.envelope" => {
+            // last_signals set inside compute_envelope: [output, phase]
+            compute_envelope(inputs, state, &snap.params, dt)
+        }
+        "module.delay" => {
+            let out = compute_delay(inputs, state, &snap.params);
+            state.last_signals = out.clone();
+            out
+        }
+        "module.average" => {
+            let out = compute_average(inputs, state, &snap.params, dt);
+            state.last_signals = out.clone();
+            out
+        }
+        "module.dc_filter" => {
+            let out = compute_dc_filter(inputs, state, &snap.params, dt);
+            state.last_signals = out.clone();
+            out
+        }
+        "module.twoway_response_curve" => {
+            let out = compute_twoway_response_curve(inputs, state, &snap.params, dt);
+            state.last_signals = out.clone();
+            out
+        }
+        "logic.has_changed" => {
+            let out = compute_has_changed(inputs, state, &snap.params);
+            state.last_signals = out.clone();
+            out
+        }
+        "logic.delay" => {
+            let out = compute_logic_delay(inputs, state, &snap.params, dt);
+            state.last_signals = out.clone();
+            out
+        }
+        "logic.counter" => {
+            let out = compute_counter(inputs, state, &snap.params);
+            state.last_signals = out.clone();
+            out
+        }
+        "module.sample_hold" => compute_sample_hold(inputs, state, &snap.params),
+        "processing.gyro_3dof" => {
+            let out = compute_gyro_3dof(inputs, state, &snap.params, dev_sigs, collector_sigs, dt);
+            state.last_signals = out.clone();
+            out
+        }
+        "processing.rws" => {
+            let out = rws_fit_outputs(compute_rws(inputs, state, &snap.params, dt), snap.n_outputs);
+            state.last_signals = out.clone();
+            out
+        }
+        "module.response_curve" | "module.vec_response_curve" | "module.vec_reshape" => {
+            state.last_signals = inputs.to_vec();
+            (0..snap.n_outputs).map(|out_idx| {
+                eval_pure(&snap.module_id, out_idx, inputs, &snap.params, snap.n_outputs)
+            }).collect()
+        }
+        "display.oscilloscope" | "display.vectorscope" | "display.readout"
+        | "display.controller3d" => vec![],
+        "device.sink" => {
+            if snap.n_outputs == 0 { return vec![]; }
+            let dev_id = snap.device_id.as_deref().unwrap_or("");
+            let dz = snap.params.get("deadzone").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+            (0..snap.n_outputs).map(|i| {
+                let pin_id = snap.output_pin_ids.get(i).map(|s| s.as_str()).unwrap_or("");
+                if pin_id.is_empty() { return None; }
+                let sig = dev_sigs.get_pin(&dev_id, &pin_id).copied()?;
+                Some(if dz > 0.0 && is_stick_pin(pin_id) { apply_deadzone(sig, dz) } else { sig })
+            }).collect()
+        }
+        "subpatch.inlet" => vec![],
+        "subpatch.outlet" => vec![inputs.first().copied().flatten()],
+        id => {
+            (0..snap.n_outputs).map(|out_idx| {
+                eval_pure(id, out_idx, inputs, &snap.params, snap.n_outputs)
+            }).collect()
+        }
+    }
+}
+
+// ── Pure module evaluation ────────────────────────────────────────────────────
+
+pub fn eval_pure(
+    id: &str,
+    out_idx: usize,
+    inputs: &[Option<Signal>],
+    params: &HashMap<String, Value>,
+    n_outputs: usize,
+) -> Option<Signal> {
+    let param_f = |name: &str, default: f32| -> f32 {
+        params.get(name).and_then(|v| v.as_f64()).map(|f| f as f32).unwrap_or(default)
+    };
+
+    match id {
+        "math.add" => {
+            if inputs.iter().any(|s| matches!(s, Some(Signal::Vec2(_)))) {
+                let sum = (0..inputs.len())
+                    .map(|i| get_v2(inputs, i, 0.0))
+                    .fold(Vec2::ZERO, |acc, v| acc + v);
+                Some(Signal::Vec2(sum))
+            } else {
+                Some(Signal::Float((0..inputs.len()).map(|i| get_f(inputs, i, 0.0)).sum()))
+            }
+        }
+        "math.subtract" => {
+            if inputs.iter().any(|s| matches!(s, Some(Signal::Vec2(_)))) {
+                let first = get_v2(inputs, 0, 0.0);
+                let rest = (1..inputs.len()).map(|i| get_v2(inputs, i, 0.0)).fold(Vec2::ZERO, |acc, v| acc + v);
+                Some(Signal::Vec2(first - rest))
+            } else {
+                let first = get_f(inputs, 0, 0.0);
+                let rest: f32 = (1..inputs.len()).map(|i| get_f(inputs, i, 0.0)).sum();
+                Some(Signal::Float(first - rest))
+            }
+        }
+        "math.multiply" => {
+            if inputs.iter().any(|s| matches!(s, Some(Signal::Vec2(_)))) {
+                let first = get_v2(inputs, 0, 0.0);
+                let scale = (1..inputs.len()).map(|i| get_v2(inputs, i, 1.0)).fold(Vec2::ONE, |acc, v| acc * v);
+                Some(Signal::Vec2(first * scale))
+            } else {
+                let first = get_f(inputs, 0, 0.0);
+                let rest: f32 = (1..inputs.len()).map(|i| get_f(inputs, i, 1.0)).product();
+                Some(Signal::Float(first * rest))
+            }
+        }
+        "math.divide" => {
+            if inputs.iter().any(|s| matches!(s, Some(Signal::Vec2(_)))) {
+                let mut v = get_v2(inputs, 0, 0.0);
+                for i in 1..inputs.len() {
+                    let d = get_v2(inputs, i, 1.0);
+                    v = Vec2::new(
+                        if d.x == 0.0 { 0.0 } else { v.x / d.x },
+                        if d.y == 0.0 { 0.0 } else { v.y / d.y },
+                    );
+                }
+                Some(Signal::Vec2(v))
+            } else {
+                let mut v = get_f(inputs, 0, 0.0);
+                for i in 1..inputs.len() {
+                    let d = get_f(inputs, i, 1.0);
+                    v = if d == 0.0 { 0.0 } else { v / d };
+                }
+                Some(Signal::Float(v))
+            }
+        }
+        "math.abs" => match inputs.get(0).and_then(|s| *s) {
+            Some(Signal::Vec2(v)) => Some(Signal::Vec2(v.abs())),
+            other => Some(Signal::Float(other.map(|s| s.as_float()).unwrap_or(0.0).abs())),
+        },
+        // Inverse (id kept as "math.negate" for patch compatibility).
+        "math.negate" => {
+            let unipolar = params.get("unipolar").and_then(|v| v.as_bool()).unwrap_or(false);
+            if unipolar {
+                // Mirror inside 0..=max, clipping outside instead of going negative.
+                let max = param_f("unipolar_max", 1.0);
+                let inv = |v: f32| if max <= 0.0 { 0.0 } else { (max - v).clamp(0.0, max) };
+                match inputs.get(0).and_then(|s| *s) {
+                    Some(Signal::Vec2(v)) => Some(Signal::Vec2(Vec2::new(inv(v.x), inv(v.y)))),
+                    other => Some(Signal::Float(inv(other.map(|s| s.as_float()).unwrap_or(0.0)))),
+                }
+            } else {
+                match inputs.get(0).and_then(|s| *s) {
+                    Some(Signal::Vec2(v)) => Some(Signal::Vec2(-v)),
+                    other => Some(Signal::Float(-other.map(|s| s.as_float()).unwrap_or(0.0))),
+                }
+            }
+        }
+        // Min/Max — out 0 = max, out 1 = min, over the WIRED inputs only, so an
+        // unwired spare pin doesn't drag the min down to 0.
+        "math.min_max" => {
+            let vec_mode = inputs.iter().any(|s| matches!(s, Some(Signal::Vec2(_))));
+            let mut lo_f: Option<f32> = None;
+            let mut hi_f: Option<f32> = None;
+            let mut lo_v: Option<Vec2> = None;
+            let mut hi_v: Option<Vec2> = None;
+            for (i, sig) in inputs.iter().enumerate() {
+                if sig.is_none() { continue; }
+                if vec_mode {
+                    let v = get_v2(inputs, i, 0.0);
+                    lo_v = Some(lo_v.map_or(v, |c: Vec2| c.min(v)));
+                    hi_v = Some(hi_v.map_or(v, |c: Vec2| c.max(v)));
+                } else {
+                    let v = get_f(inputs, i, 0.0);
+                    lo_f = Some(lo_f.map_or(v, |c: f32| c.min(v)));
+                    hi_f = Some(hi_f.map_or(v, |c: f32| c.max(v)));
+                }
+            }
+            match (vec_mode, out_idx) {
+                (true, 0)  => Some(Signal::Vec2(hi_v.unwrap_or(Vec2::ZERO))),
+                (true, 1)  => Some(Signal::Vec2(lo_v.unwrap_or(Vec2::ZERO))),
+                (false, 0) => Some(Signal::Float(hi_f.unwrap_or(0.0))),
+                (false, 1) => Some(Signal::Float(lo_f.unwrap_or(0.0))),
+                _ => None,
+            }
+        }
+        // Quantize — snap to a grid of `factor` steps per unit (1 = integers,
+        // 2 = halves, …). The wired Factor pin wins over the body's value.
+        "math.quantize" => {
+            let factor = if inputs.get(1).and_then(|s| *s).is_some() {
+                get_f(inputs, 1, 1.0)
+            } else {
+                param_f("factor", 1.0)
+            };
+            let mode = params.get("mode").and_then(|v| v.as_str()).unwrap_or("round");
+            let q = |v: f32| -> f32 {
+                // A non-positive factor has no grid — pass the value through.
+                if !factor.is_finite() || factor <= 0.0 || !v.is_finite() { return v; }
+                let scaled = v * factor;
+                let snapped = match mode {
+                    "floor" => scaled.floor(),
+                    "ceil"  => scaled.ceil(),
+                    "trunc" => scaled.trunc(),
+                    _       => scaled.round(),
+                };
+                snapped / factor
+            };
+            match inputs.first().and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => Some(Signal::Vec2(Vec2::new(q(v.x), q(v.y)))),
+                other => Some(Signal::Float(q(other.map(|s| s.as_float()).unwrap_or(0.0)))),
+            }
+        }
+        "math.clamp"  => {
+            let min = if inputs.get(1).and_then(|s| *s).is_some() { get_f(inputs, 1, -1.0) } else { param_f("min", -1.0) };
+            let max = if inputs.get(2).and_then(|s| *s).is_some() { get_f(inputs, 2,  1.0) } else { param_f("max",  1.0) };
+            match inputs.get(0).and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => Some(Signal::Vec2(v.clamp(Vec2::splat(min), Vec2::splat(max)))),
+                other => Some(Signal::Float(other.map(|s| s.as_float()).unwrap_or(0.0).clamp(min, max))),
+            }
+        }
+        "math.map_range" => {
+            let in_min  = if inputs.get(1).and_then(|s| *s).is_some() { get_f(inputs, 1, -1.0) } else { param_f("in_min",  -1.0) };
+            let in_max  = if inputs.get(2).and_then(|s| *s).is_some() { get_f(inputs, 2,  1.0) } else { param_f("in_max",   1.0) };
+            let out_min = if inputs.get(3).and_then(|s| *s).is_some() { get_f(inputs, 3, -1.0) } else { param_f("out_min", -1.0) };
+            let out_max = if inputs.get(4).and_then(|s| *s).is_some() { get_f(inputs, 4,  1.0) } else { param_f("out_max",  1.0) };
+            let map = |v: f32| -> f32 {
+                let t = if (in_max - in_min).abs() < f32::EPSILON { 0.0 }
+                        else { (v - in_min) / (in_max - in_min) };
+                out_min + t * (out_max - out_min)
+            };
+            match inputs.get(0).and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => Some(Signal::Vec2(Vec2::new(map(v.x), map(v.y)))),
+                other => Some(Signal::Float(map(other.map(|s| s.as_float()).unwrap_or(0.0)))),
+            }
+        }
+        "logic.and"       => Some(Signal::Bool(get_b(inputs, 0, false) && get_b(inputs, 1, false))),
+        "logic.or"        => Some(Signal::Bool(get_b(inputs, 0, false) || get_b(inputs, 1, false))),
+        "logic.not"       => Some(Signal::Bool(!get_b(inputs, 0, false))),
+        "logic.xor"       => Some(Signal::Bool(get_b(inputs, 0, false) ^ get_b(inputs, 1, false))),
+        "logic.equal"     => Some(Signal::Bool(get_f(inputs, 0, 0.0) == get_f(inputs, 1, 0.0))),
+        "logic.not_equal" => Some(Signal::Bool(get_f(inputs, 0, 0.0) != get_f(inputs, 1, 0.0))),
+        "logic.greater_than" => {
+            let (a, b) = (get_f(inputs, 0, 0.0), get_f(inputs, 1, 0.0));
+            let or_eq = params.get("or_equal").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(Signal::Bool(if or_eq { a >= b } else { a > b }))
+        }
+        "logic.less_than" => {
+            let (a, b) = (get_f(inputs, 0, 0.0), get_f(inputs, 1, 0.0));
+            let or_eq = params.get("or_equal").and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(Signal::Bool(if or_eq { a <= b } else { a < b }))
+        }
+        "module.selector" => {
+            if out_idx != 0 { return None; }
+            let n_inputs = inputs.len().saturating_sub(1);
+            let sel = get_f(inputs, 0, 0.0);
+            let interp = params.get("interpolate").and_then(|v| v.as_bool()).unwrap_or(false);
+            if interp && n_inputs >= 2 {
+                let pos = sel.clamp(0.0, 1.0) * (n_inputs - 1) as f32;
+                let lo = pos.floor() as usize;
+                let hi = (lo + 1).min(n_inputs - 1);
+                let t = pos.fract();
+                let lo_s = inputs.get(lo + 1).and_then(|s| *s);
+                let hi_s = inputs.get(hi + 1).and_then(|s| *s);
+                // Blend as Vec2 when either neighbour is one (an unwired or
+                // non-Vec2 neighbour reads as centred); everything else blends
+                // as Float, as before.
+                if matches!(lo_s, Some(Signal::Vec2(_))) || matches!(hi_s, Some(Signal::Vec2(_))) {
+                    let as_v2 = |s: Option<Signal>| match s {
+                        Some(Signal::Vec2(v)) => v,
+                        _ => Vec2::ZERO,
+                    };
+                    Some(Signal::Vec2(as_v2(lo_s).lerp(as_v2(hi_s), t)))
+                } else {
+                    let lo_v = lo_s.map(|s| s.as_float()).unwrap_or(0.0);
+                    let hi_v = hi_s.map(|s| s.as_float()).unwrap_or(0.0);
+                    Some(Signal::Float(lo_v * (1.0 - t) + hi_v * t))
+                }
+            } else {
+                let n = n_inputs as f32;
+                let idx = (sel.clamp(0.0, 1.0) * n).floor() as usize;
+                let idx = idx.min(n_inputs.saturating_sub(1));
+                inputs.get(idx + 1).and_then(|s| *s)
+            }
+        }
+        "module.split" => {
+            let sel = get_f(inputs, 0, 0.0);
+            let raw = inputs.get(1).and_then(|s| *s);
+            let n   = n_outputs;
+            let interp = params.get("interpolate").and_then(|v| v.as_bool()).unwrap_or(false);
+            let zero_like = |sig: Option<Signal>| -> Signal {
+                match sig {
+                    Some(Signal::Vec2(_)) => Signal::Vec2(glam::Vec2::ZERO),
+                    Some(Signal::Bool(_)) => Signal::Bool(false),
+                    Some(Signal::Int(_))  => Signal::Int(0),
+                    _                     => Signal::Float(0.0),
+                }
+            };
+            if interp && n >= 2 {
+                let pos = sel.clamp(0.0, 1.0) * (n - 1) as f32;
+                let lo  = pos.floor() as usize;
+                let hi  = (lo + 1).min(n - 1);
+                let t   = pos.fract();
+                match raw {
+                    Some(Signal::Vec2(v)) => {
+                        if out_idx == lo && lo == hi { Some(Signal::Vec2(v)) }
+                        else if out_idx == lo        { Some(Signal::Vec2(v * (1.0 - t))) }
+                        else if out_idx == hi        { Some(Signal::Vec2(v * t)) }
+                        else                         { Some(Signal::Vec2(glam::Vec2::ZERO)) }
+                    }
+                    _ => {
+                        let val = raw.map(|s| s.as_float()).unwrap_or(0.0);
+                        if out_idx == lo && lo == hi { Some(Signal::Float(val)) }
+                        else if out_idx == lo        { Some(Signal::Float(val * (1.0 - t))) }
+                        else if out_idx == hi        { Some(Signal::Float(val * t)) }
+                        else                         { Some(Signal::Float(0.0)) }
+                    }
+                }
+            } else {
+                let idx = (sel.clamp(0.0, 1.0) * n as f32).floor() as usize;
+                let idx = idx.min(n.saturating_sub(1));
+                if out_idx == idx { Some(raw.unwrap_or(Signal::Float(0.0))) } else { Some(zero_like(raw)) }
+            }
+        }
+        "module.response_curve" => {
+            if out_idx >= n_outputs { return None; }
+            let x       = get_f(inputs, out_idx, 0.0);
+            let pts     = curve_points_from_params(params);
+            let biases  = biases_from_params(params);
+            let abs     = params.get("absolute").and_then(|v| v.as_bool()).unwrap_or(true);
+            let in_max  = params.get("in_max") .and_then(|v| v.as_f64()).unwrap_or(1.0)  as f32;
+            let in_min  = params.get("in_min") .and_then(|v| v.as_f64()).unwrap_or(-1.0) as f32;
+            let out_max = params.get("out_max").and_then(|v| v.as_f64()).unwrap_or(1.0)  as f32;
+            let out_min = params.get("out_min").and_then(|v| v.as_f64()).unwrap_or(-1.0) as f32;
+            Some(Signal::Float(apply_curve(x, &pts, &biases, abs, in_min, in_max, out_min, out_max, read_scale_t(params))))
+        }
+        "module.vec_response_curve" => {
+            if out_idx >= n_outputs { return None; }
+            let vec = match inputs.get(out_idx).and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => v,
+                _ => return Some(Signal::Vec2(glam::Vec2::ZERO)),
+            };
+            let mag = vec.length();
+            if mag < f32::EPSILON { return Some(Signal::Vec2(glam::Vec2::ZERO)); }
+            let pts     = curve_points_from_params(params);
+            let biases  = biases_from_params(params);
+            let in_max  = params.get("in_max") .and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let out_max = params.get("out_max").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let out_mag = apply_curve(mag, &pts, &biases, true, 0.0, in_max, 0.0, out_max, read_scale_t(params));
+            Some(Signal::Vec2(vec / mag * out_mag))
+        }
+        "module.vec_reshape" => {
+            if out_idx >= n_outputs { return None; }
+            let vec = match inputs.get(out_idx).and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => v,
+                _ => return Some(Signal::Vec2(glam::Vec2::ZERO)),
+            };
+            let boundary = reshape_pts(params, "boundary_pts", VEC_RESHAPE_BOUNDARY_DEFAULT);
+            let gain     = reshape_pts(params, "gain_pts",     VEC_RESHAPE_GAIN_DEFAULT);
+            let gbiases: Vec<f32> = params.get("gain_biases").and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|b| b.as_f64().map(|f| f as f32)).collect())
+                .unwrap_or_default();
+            let sym     = params.get("symmetry").and_then(|v| v.as_str()).unwrap_or("quad4");
+            let renorm  = params.get("renorm").and_then(|v| v.as_bool()).unwrap_or(true);
+            let in_max  = params.get("in_max") .and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let out_max = params.get("out_max").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            Some(Signal::Vec2(vec_reshape_apply(vec, &boundary, &gain, &gbiases, sym, renorm, in_max, out_max)))
+        }
+        "module.vec_to_axis" => {
+            let vec = match inputs.first().and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => v,
+                _ => glam::Vec2::ZERO,
+            };
+            match out_idx { 0 => Some(Signal::Float(vec.x)), 1 => Some(Signal::Float(vec.y)), _ => None }
+        }
+        // Vec → polar. Angle 0 = straight up, growing clockwise; it wraps back to
+        // 0 at the theoretical max (1.0 or 360.0) since that's the same direction.
+        "module.vec_to_deflection" => {
+            let vec = match inputs.first().and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => v,
+                _ => Vec2::ZERO,
+            };
+            match out_idx {
+                0 => Some(Signal::Float(vec.length())),
+                1 => {
+                    let degrees = params.get("degrees").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let full = if degrees { 360.0 } else { 1.0 };
+                    // atan2(x, y), not (y, x): puts the zero on +Y and turns clockwise.
+                    let turns = vec.x.atan2(vec.y) / std::f32::consts::TAU;
+                    let wrapped = (turns * full).rem_euclid(full);
+                    Some(Signal::Float(if wrapped >= full { 0.0 } else { wrapped }))
+                }
+                _ => None,
+            }
+        }
+        "module.axis_to_vec" => {
+            if out_idx != 0 { return None; }
+            let x = match inputs.first().and_then(|s| *s) { Some(Signal::Float(f)) => f, _ => 0.0 };
+            let y = match inputs.get(1).and_then(|s| *s)  { Some(Signal::Float(f)) => f, _ => 0.0 };
+            Some(Signal::Vec2(glam::Vec2::new(x, y)))
+        }
+        _ => None,
+    }
+}
+
+// ── Stateful compute functions ────────────────────────────────────────────────
+
+pub(crate) fn compute_oscillator(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+    let shape     = params.get("shape")     .and_then(|v| v.as_str()) .unwrap_or("sine");
+    let freq_unit = params.get("freq_unit") .and_then(|v| v.as_str()) .unwrap_or("hz");
+    let bipolar   = params.get("bipolar")   .and_then(|v| v.as_bool()).unwrap_or(true);
+
+    let freq_wired  = inputs.get(0).and_then(|s| *s).is_some();
+    let phase_wired = inputs.get(1).and_then(|s| *s).is_some();
+
+    let base_freq = params.get("freq_param").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+    // When freq is wired the input is a normalized multiplier [0,1] (or bipolar) applied
+    // to the base frequency set in the node. This lets you sweep 0→base_freq with a
+    // unipolar source or modulate depth with another oscillator.
+    let freq_val  = if freq_wired  { get_f(inputs, 0, 1.0).max(0.0) * base_freq } else { base_freq };
+    let phase_off = if phase_wired { get_f(inputs, 1, 0.0) } else { params.get("phase_param").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 };
+    let retrig    = get_b(inputs, 2, false);
+
+    let period_s = match freq_unit {
+        "hz" => if freq_val > 0.0 { 1.0 / freq_val } else { 1.0 },
+        _    => (freq_val / 1000.0).max(0.0001),
+    }.max(0.0001);
+
+    while state.aux_f32.len() < 2 { state.aux_f32.push(0.0); }
+
+    let retrig_edge = retrig && state.aux_f32[1] < 0.5;
+    state.aux_f32[1] = if retrig { 1.0 } else { 0.0 };
+    if retrig_edge { state.aux_f32[0] = 0.0; }
+
+    state.aux_f32[0] = (state.aux_f32[0] + dt / period_s) % 1.0;
+    let phase  = (state.aux_f32[0] + phase_off).rem_euclid(1.0);
+    let val    = osc_sample(shape, phase);
+    let output = if bipolar { val } else { (val + 1.0) * 0.5 };
+    vec![Some(Signal::Float(output))]
+}
+
+pub fn osc_sample(shape: &str, phase: f32) -> f32 {
+    match shape {
+        "sine"     => (phase * std::f32::consts::TAU).sin(),
+        "triangle" => if phase < 0.5 { 4.0 * phase - 1.0 } else { 3.0 - 4.0 * phase },
+        "saw"      => 2.0 * phase - 1.0,
+        "square"   => if phase < 0.5 { 1.0 } else { -1.0 },
+        _          => 0.0,
+    }
+}
+
+// ── Envelope Generator ────────────────────────────────────────────────────────
+//
+// Behavior is set by three combinable flags — Hold, Bounce, Loop — rather than a
+// single mode. `envelope_flags` resolves them (with a fallback that maps the old
+// `mode` string for patches saved before the switch). The eight combinations:
+//
+//   (none)        one-shot: a single 0→1 pass on trigger.
+//   Hold          attack→sustain, hold while held, release →1.
+//   Loop          sawtooth 0↔1 while held; returns to 0 on release.
+//   Bounce        forward while held (sustains at 1), reverses to 0 on release.
+//   Hold+Bounce   bounce, value held flat at the sustain level through the
+//                 post-sustain time buffer (the "B+Hold" buffer mode).
+//   Hold+Loop     attack→sustain, then sawtooth loop between sustain and 1.
+//   Bounce+Loop   ping-pong 0↔1 while held; recedes to 0 on release.
+//   Hold+Bounce+Loop  attack→sustain, then ping-pong between sustain and 1.
+//
+// State layout in aux_f32:
+//   [0] = current phase (0..1 along the curve X axis)
+//   [1] = previous trigger value (0/1)
+//   [2] = stage: 0=idle/done, 1=attack, 2=sustain-active, 3=release
+//   [3] = discontinuity epoch (bumped on teleports; UI breaks the trail on change)
+//   [4] = bounce ping-pong direction (+1 forward, -1 backward)
+//
+// last_signals = [output, phase, epoch, applied_time] for the UI.
+
+/// Resolve the (hold, bounce, loop) envelope flags, falling back to the legacy
+/// `mode` string for patches saved before flags existed.
+pub fn envelope_flags(params: &HashMap<String, Value>) -> (bool, bool, bool) {
+    let has_new = params.contains_key("hold")
+        || params.contains_key("bounce")
+        || params.contains_key("loop");
+    if has_new {
+        let g = |k: &str| params.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        (g("hold"), g("bounce"), g("loop"))
+    } else {
+        match params.get("mode").and_then(|v| v.as_str()).unwrap_or("oneshot") {
+            "hold"        => (true,  false, false),
+            "loop"        => (false, false, true),
+            "bounce"      => (false, true,  false),
+            "bounce_hold" => (true,  true,  false),
+            _             => (false, false, false),
+        }
+    }
+}
+
+pub(crate) fn compute_envelope(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+    let (hold, bounce, loopf) = envelope_flags(params);
+    let timebase   = params.get("timebase").and_then(|v| v.as_str()).unwrap_or("ms");
+    let time_param = params.get("time_mul").and_then(|v| v.as_f64()).unwrap_or(500.0) as f32;
+    let sustain_x  = params.get("sustain") .and_then(|v| v.as_f64()).unwrap_or(0.5)   as f32;
+    let sustain_c  = sustain_x.clamp(0.0, 1.0);
+    let pts    = curve_points_from_params(params);
+    let biases = biases_from_params(params);
+
+    let trig_wired = inputs.get(0).and_then(|s| *s).is_some();
+    let time_wired = inputs.get(1).and_then(|s| *s).is_some();
+    let time_val   = if time_wired { get_f(inputs, 1, time_param).max(0.0) } else { time_param };
+
+    let period_s = match timebase {
+        "s"  => time_val.max(0.0001),
+        "hz" => if time_val > 0.0 { 1.0 / time_val } else { 1.0 },
+        _    => (time_val / 1000.0).max(0.0001),
+    };
+    let dt_phase = (dt / period_s).min(1.0);
+
+    while state.aux_f32.len() < 5 { state.aux_f32.push(0.0); }
+    let mut phase = state.aux_f32[0];
+    let prev_trig = state.aux_f32[1];
+    let mut stage = state.aux_f32[2];
+    // Discontinuity epoch: bumped every time `phase` is set non-continuously
+    // (retrigger, loop wrap, loop release-reset, hold early-release jump). The
+    // UI reads this from last_signals[2] and breaks the trail across an epoch
+    // change so the dot teleports (old trail fades in place) rather than drawing
+    // a bridging streak across the jump.
+    let mut epoch = state.aux_f32[3];
+    // Bounce ping-pong direction (+1 forward, -1 backward). Default forward.
+    let mut dir = if state.aux_f32[4] == 0.0 { 1.0 } else { state.aux_f32[4] };
+
+    let trigger   = get_b(inputs, 0, false);
+    let trig_edge = trigger && prev_trig < 0.5;
+
+    if bounce {
+        // ── Bounce family ─────────────────────────────────────────────────────
+        // Continuous motion (no teleports), so the trail follows the dot. With
+        // Hold the active region is [sustain, 1] (climb to sustain first); with
+        // Loop the dot ping-pongs in that region instead of sustaining at 1.
+        let lo = if hold { sustain_c } else { 0.0 };
+        if trigger {
+            if loopf {
+                if phase < lo {
+                    phase = (phase + dt_phase).min(lo);
+                    dir = 1.0;
+                } else {
+                    phase += dir * dt_phase;
+                    if phase >= 1.0 { phase = 1.0; dir = -1.0; }
+                    if phase <= lo  { phase = lo;  dir =  1.0; }
+                }
+            } else {
+                // Forward, sustaining at the end (value frozen at sustain when
+                // Hold is set — the post-sustain time buffer, see sample below).
+                phase = (phase + dt_phase).min(1.0);
+                dir = 1.0;
+            }
+        } else {
+            phase = (phase - dt_phase).max(0.0);
+            dir = 1.0;
+        }
+    } else if hold {
+        // ── Hold family (no bounce) ───────────────────────────────────────────
+        if trig_edge { phase = 0.0; stage = 1.0; epoch += 1.0; }
+        if stage == 1.0 {
+            // Attack: climb to the sustain point.
+            phase += dt_phase;
+            if phase >= sustain_c {
+                phase = sustain_c;
+                stage = 2.0;
+            } else if !trigger {
+                // Released before reaching sustain. Jump onto the release side
+                // (X >= sustain) at the point whose curve value best matches the
+                // current output — similar level or higher, never a downward jump.
+                let current_y = sample_curve(&pts, phase, &biases);
+                let steps = 200u32;
+                let mut best_x = sustain_c;
+                let mut best_d = f32::INFINITY;
+                for i in 0..=steps {
+                    let x = sustain_c + (1.0 - sustain_c) * i as f32 / steps as f32;
+                    let d = (sample_curve(&pts, x, &biases) - current_y).abs();
+                    if d < best_d { best_d = d; best_x = x; }
+                }
+                phase = best_x;
+                stage = 3.0;
+                epoch += 1.0; // teleport across the sustain point
+            }
+        }
+        if stage == 2.0 {
+            if !trigger {
+                stage = 3.0; // begin release
+            } else if loopf {
+                // Hold+Loop: sawtooth loop between sustain and 1.
+                let span = (1.0 - sustain_c).max(1e-4);
+                let advanced = phase + dt_phase;
+                if advanced >= 1.0 {
+                    epoch += 1.0;
+                    phase = sustain_c + (advanced - 1.0).rem_euclid(span);
+                } else {
+                    phase = advanced;
+                }
+            }
+            // Plain Hold: phase stays parked at sustain.
+        }
+        if stage == 3.0 {
+            // Release: run forward to the end.
+            phase += dt_phase;
+            if phase >= 1.0 { phase = 1.0; stage = 0.0; }
+        }
+    } else if loopf {
+        // ── Loop (no hold, no bounce) ─────────────────────────────────────────
+        if trig_wired && !trigger {
+            if phase != 0.0 { epoch += 1.0; }
+            phase = 0.0;
+        } else {
+            if trig_edge { phase = 0.0; epoch += 1.0; }
+            let advanced = phase + dt_phase;
+            if advanced >= 1.0 { epoch += 1.0; } // wrapped around
+            phase = advanced % 1.0;
+        }
+    } else {
+        // ── One-shot ──────────────────────────────────────────────────────────
+        if trig_edge { phase = 0.0; stage = 1.0; epoch += 1.0; }
+        if stage == 1.0 {
+            phase += dt_phase;
+            if phase >= 1.0 { phase = 1.0; stage = 0.0; }
+        }
+    }
+
+    state.aux_f32[0] = phase;
+    state.aux_f32[1] = if trigger { 1.0 } else { 0.0 };
+    state.aux_f32[2] = stage;
+    state.aux_f32[3] = epoch;
+    state.aux_f32[4] = dir;
+
+    // Hold+Bounce (no loop) freezes the value at the sustain level through the
+    // post-sustain buffer; every other combination samples the live phase.
+    let buffer_mode = hold && bounce && !loopf;
+    let sample_phase = if buffer_mode { phase.min(sustain_c) } else { phase };
+    let output = sample_curve(&pts, sample_phase, &biases).clamp(0.0, 1.0);
+    state.last_signals = vec![
+        Some(Signal::Float(output)),
+        Some(Signal::Float(phase)),
+        Some(Signal::Float(epoch)),
+        // Applied time value in the current unit — the UI shows this in the
+        // grayed-out time box when the Time input is wired.
+        Some(Signal::Float(time_val)),
+    ];
+    vec![Some(Signal::Float(output))]
+}
+
+pub(crate) fn compute_delay(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+) -> Vec<Option<Signal>> {
+    let delay_secs = params.get("delay_ms").and_then(|v| v.as_f64()).unwrap_or(100.0)
+        .clamp(0.0, 60_000.0) as f32 / 1000.0;
+    let now = Instant::now();
+
+    while state.delay_bufs.len() < inputs.len() {
+        state.delay_bufs.push(VecDeque::new());
+    }
+
+    let mut results = Vec::with_capacity(inputs.len());
+    for (ch, inp) in inputs.iter().enumerate() {
+        let Some(v) = sig_to_f32(*inp) else { results.push(None); continue; };
+        let buf = &mut state.delay_bufs[ch];
+        buf.push_back((now, v));
+
+        let mut output = buf.front().map(|(_, v)| *v);
+        for (ts, val) in buf.iter() {
+            if now.duration_since(*ts).as_secs_f32() >= delay_secs { output = Some(*val); }
+            else { break; }
+        }
+
+        let max_age = delay_secs + 1.0;
+        while buf.len() > 2 {
+            let oldest_age = now.duration_since(buf.front().unwrap().0).as_secs_f32();
+            if oldest_age > max_age { buf.pop_front(); } else { break; }
+        }
+
+        results.push(output.map(Signal::Float));
+    }
+    results
+}
+
+/// The Sample rate patches were authored at when Average's window was a tick
+/// count: a legacy `buf_size` of N meant N ticks at this rate.
+const AVERAGE_LEGACY_TICK_HZ: f64 = 2000.0;
+
+/// An Average node's window in milliseconds. `window_ms`, or a patch saved
+/// before it existed: its `buf_size` read at the rate it was authored for.
+pub fn average_window_ms(params: &HashMap<String, Value>) -> f64 {
+    params.get("window_ms").and_then(|v| v.as_f64())
+        .or_else(|| params.get("buf_size").and_then(|v| v.as_f64())
+            .map(|n| n * 1000.0 / AVERAGE_LEGACY_TICK_HZ))
+        .unwrap_or(5.0)
+}
+
+pub(crate) fn compute_average(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+    // The window is time, so the average means the same at any Sample rate.
+    // Upper bound: the longest window (5 s) at the highest rate (8 kHz).
+    let ticks = average_window_ms(params) / 1000.0 / (dt as f64).max(1e-6);
+    let buf_size = (ticks.round() as usize).clamp(1, 40_000);
+    let spike_mad = params.get("spike_mad").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
+
+    while state.avg_bufs.len()    < inputs.len() { state.avg_bufs.push(VecDeque::new()); }
+    while state.avg_bufs_v2.len() < inputs.len() { state.avg_bufs_v2.push(VecDeque::new()); }
+
+    let mut results = Vec::with_capacity(inputs.len());
+    for (ch, inp) in inputs.iter().enumerate() {
+        match inp {
+            Some(Signal::Vec2(v)) => {
+                let buf = &mut state.avg_bufs_v2[ch];
+                buf.push_back(*v);
+                while buf.len() > buf_size { buf.pop_front(); }
+
+                let avg = if spike_mad > 0.0 && buf.len() >= 3 {
+                    Vec2::new(
+                        mad_average(buf.iter().map(|v| v.x), spike_mad as f32),
+                        mad_average(buf.iter().map(|v| v.y), spike_mad as f32),
+                    )
+                } else {
+                    buf.iter().copied().sum::<Vec2>() / buf.len() as f32
+                };
+                results.push(Some(Signal::Vec2(avg)));
+            }
+            inp => {
+                let Some(v) = sig_to_f32(*inp) else { results.push(None); continue; };
+                let buf = &mut state.avg_bufs[ch];
+                buf.push_back(v);
+                while buf.len() > buf_size { buf.pop_front(); }
+
+                let avg = if spike_mad > 0.0 && buf.len() >= 3 {
+                    mad_average(buf.iter().copied(), spike_mad as f32)
+                } else {
+                    buf.iter().sum::<f32>() / buf.len() as f32
+                };
+                results.push(Some(Signal::Float(avg)));
+            }
+        }
+    }
+    results
+}
+
+pub(crate) fn mad_average(values: impl Iterator<Item = f32> + Clone, spike_mad: f32) -> f32 {
+    let mut sorted: Vec<f32> = values.collect();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let median = sorted_median(&sorted);
+    let mut devs: Vec<f32> = sorted.iter().map(|&x| (x - median).abs()).collect();
+    devs.sort_by(|a, b| a.total_cmp(b));
+    let mad = sorted_median(&devs);
+    if mad < 1e-9 {
+        sorted.iter().sum::<f32>() / sorted.len() as f32
+    } else {
+        let thresh = spike_mad * mad;
+        let kept: Vec<f32> = sorted.iter().cloned().filter(|&x| (x - median).abs() <= thresh).collect();
+        if kept.is_empty() { sorted.iter().sum::<f32>() / sorted.len() as f32 }
+        else { kept.iter().sum::<f32>() / kept.len() as f32 }
+    }
+}
+
+pub(crate) fn sorted_median(sorted: &[f32]) -> f32 {
+    let n = sorted.len();
+    if n == 0 { return 0.0; }
+    if n % 2 == 0 { (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0 } else { sorted[n / 2] }
+}
+
+pub(crate) const DC_THRESHOLD: f64    = 0.005;
+pub(crate) const DC_STABILITY: f64    = 0.02;
+pub(crate) const DC_FAST_TC_SECS: f64 = 0.05;
+
+pub(crate) fn compute_dc_filter(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+    let window_secs = params.get("window_ms").and_then(|v| v.as_f64()).unwrap_or(500.0)
+        .clamp(10.0, 60_000.0) as f32 / 1000.0;
+    let decay_secs = params.get("decay_ms").and_then(|v| v.as_f64()).unwrap_or(200.0)
+        .clamp(10.0, 60_000.0) / 1000.0;
+
+    let dt64       = dt as f64;
+    let alpha_fast = 1.0 - (-dt64 / DC_FAST_TC_SECS).exp();
+    let alpha_est  = 1.0 - (-dt64 / window_secs as f64).exp();
+    let alpha_corr = 1.0 - (-dt64 / decay_secs).exp();
+    let blend_step = dt as f64 / decay_secs;
+
+    while state.dc_fast.len()        < inputs.len() { state.dc_fast.push(0.0); }
+    while state.dc_estimates.len()   < inputs.len() { state.dc_estimates.push(0.0); }
+    while state.dc_corrections.len() < inputs.len() { state.dc_corrections.push(0.0); }
+    while state.dc_timers.len()      < inputs.len() { state.dc_timers.push(0.0); }
+    while state.dc_frozen.len()      < inputs.len() { state.dc_frozen.push(0.0); }
+    while state.dc_blend.len()       < inputs.len() { state.dc_blend.push(0.0); }
+
+    let mut results = Vec::with_capacity(inputs.len());
+    for (ch, inp) in inputs.iter().enumerate() {
+        let Some(v) = sig_to_f32(*inp) else { results.push(None); continue; };
+        let v64 = v as f64;
+
+        state.dc_fast[ch]      += alpha_fast * (v64 - state.dc_fast[ch]);
+        state.dc_estimates[ch] += alpha_est  * (v64 - state.dc_estimates[ch]);
+
+        let is_stable  = (state.dc_fast[ch] - state.dc_estimates[ch]).abs() < DC_STABILITY;
+        let is_nonzero = state.dc_estimates[ch].abs() > DC_THRESHOLD;
+
+        if is_stable && is_nonzero { state.dc_timers[ch] = (state.dc_timers[ch] + dt).min(window_secs + 1.0); }
+        else                       { state.dc_timers[ch] = 0.0; }
+
+        let output = if is_stable {
+            if state.dc_timers[ch] >= window_secs {
+                state.dc_corrections[ch] += alpha_corr * (state.dc_estimates[ch] - state.dc_corrections[ch]);
+            } else {
+                state.dc_corrections[ch] += alpha_corr * (0.0 - state.dc_corrections[ch]);
+            }
+            let out = v64 - state.dc_corrections[ch];
+            state.dc_frozen[ch] = out;
+            state.dc_blend[ch]  = 0.0;
+            out
+        } else {
+            state.dc_blend[ch] = (state.dc_blend[ch] + blend_step).min(1.0);
+            let b   = state.dc_blend[ch];
+            let out = state.dc_frozen[ch] * (1.0 - b) + v64 * b;
+            state.dc_corrections[ch] = v64 - out;
+            out
+        };
+        results.push(Some(Signal::Float(output as f32)));
+    }
+    results
+}
+
+pub(crate) fn compute_twoway_response_curve(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+    let abs      = params.get("absolute").and_then(|v| v.as_bool()).unwrap_or(true);
+    let vec_mode = params.get("vec_mode").and_then(|v| v.as_bool()).unwrap_or(false);
+    compute_twoway_response_curve_as(inputs, state, params, dt, abs, vec_mode)
+}
+
+/// The two-way curve with its Abs and Vec modes given rather than read from
+/// `params` — for a caller that decides them from the signal it is handed (the
+/// AutoMap Two-way Curve, whose picked signal may be a stick or a trigger).
+pub(crate) fn compute_twoway_response_curve_as(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+    dt: f32,
+    abs: bool,
+    vec_mode: bool,
+) -> Vec<Option<Signal>> {
+    let n_ch = inputs.len();
+
+    // Grow per-channel state vectors lazily.
+    while state.twoway_lane.len()       < n_ch { state.twoway_lane.push(1); }
+    while state.twoway_held.len()       < n_ch { state.twoway_held.push(f32::NAN); }
+    while state.twoway_blend.len()      < n_ch { state.twoway_blend.push(1.0); }
+    while state.twoway_last_out.len()   < n_ch { state.twoway_last_out.push(0.0); }
+    while state.twoway_old_output.len() < n_ch { state.twoway_old_output.push(0.0); }
+    while state.twoway_peak_y.len()     < n_ch { state.twoway_peak_y.push(f32::NAN); }
+    while state.twoway_peak_age.len()   < n_ch { state.twoway_peak_age.push(0.0); }
+
+    // Shared params (applied to both curves).
+    let in_max  = params.get("in_max") .and_then(|v| v.as_f64()).unwrap_or(1.0)  as f32;
+    let in_min  = params.get("in_min") .and_then(|v| v.as_f64()).unwrap_or(-1.0) as f32;
+    let out_max = params.get("out_max").and_then(|v| v.as_f64()).unwrap_or(1.0)  as f32;
+    let out_min = params.get("out_min").and_then(|v| v.as_f64()).unwrap_or(-1.0) as f32;
+    let scale_t = read_scale_t(params);
+
+    // Up-lane (rising) curve params.
+    let pts_up   = curve_points_from_params(params);
+    let biases_up = biases_from_params(params);
+
+    // Down-lane (falling) curve uses "_dn"-suffixed params, falling back to up-lane.
+    let pts_dn: Vec<[f32; 2]> = params.get("points_dn")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|p| {
+            let a = p.as_array()?;
+            Some([a.get(0)?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])
+        }).collect())
+        .unwrap_or_else(|| pts_up.clone());
+    let biases_dn: Vec<f32> = params.get("biases_dn")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|b| b.as_f64().map(|f| f as f32)).collect())
+        .unwrap_or_else(|| biases_up.clone());
+
+    let hyst = TwowayHyst::from_params(params, abs || vec_mode);
+    let interp_ms = params.get("interp_ms").and_then(|v| v.as_f64()).unwrap_or(50.0) as f32;
+    let peak_hold = params.get("peak_hold_ms").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0) as f32 / 1000.0;
+    // Which lane holds peaks: "up" (the press, default), "down" or "both".
+    let peak_dir = params.get("peak_hold_dir").and_then(|v| v.as_str()).unwrap_or("up");
+
+    let interp_step = if interp_ms > 0.0 { dt / (interp_ms / 1000.0) } else { 1.0 };
+
+    let mut results = Vec::with_capacity(n_ch);
+
+    for ch in 0..n_ch {
+        let raw_input = if vec_mode {
+            match inputs.get(ch).and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => v.length(),
+                Some(Signal::Float(f)) => f,
+                _ => { results.push(None); continue; }
+            }
+        } else {
+            match inputs.get(ch).and_then(|s| *s) {
+                Some(Signal::Float(f)) => f,
+                _ => { results.push(None); continue; }
+            }
+        };
+
+        // Use magnitude in abs/vec mode; signed value in bipolar mode.
+        let hyst_input = if abs || vec_mode { raw_input.abs() } else { raw_input };
+
+        // Hysteresis + denoise in one: track the input, but read the curves at
+        // a held point that only follows the input in the lane's direction.
+        // The lane flips once the input has come back more than the lane's band
+        // from that point. Noise smaller than the band never moves the output,
+        // and movement in the lane's direction passes through with no lag.
+        let prev_held = state.twoway_held[ch];
+        let switched = if hyst.start_up && hyst.at_rest(hyst_input) {
+            // At rest with "Start on Up": already on the Up lane, nothing held,
+            // so a pull from rest follows the Up curve from its first sample.
+            let was_down = state.twoway_lane[ch] < 0;
+            state.twoway_lane[ch] = 1;
+            state.twoway_held[ch] = hyst_input;
+            was_down
+        } else {
+            // The bands where the input stands now — the Hyst graph can vary
+            // them along the travel.
+            let at = state.twoway_held[ch];
+            twoway_track(&mut state.twoway_held[ch], &mut state.twoway_lane[ch], hyst_input,
+                hyst.band_for(true, at), hyst.band_for(false, at))
+        };
+        if switched {
+            // Blend from what was actually emitted, so a switch never jumps to
+            // a value neither lane gave at the held point.
+            state.twoway_old_output[ch] = state.twoway_last_out[ch];
+            state.twoway_blend[ch] = 0.0;
+        }
+        let held = state.twoway_held[ch];
+        // Abs mode tracks the magnitude; the curve takes the input's sign back.
+        let curve_input = if abs && !vec_mode && raw_input < 0.0 { -held } else { held };
+
+        // Advance blend.
+        state.twoway_blend[ch] = (state.twoway_blend[ch] + interp_step).min(1.0);
+        let blend = state.twoway_blend[ch];
+
+        // Evaluate the active lane's curve at the held input.
+        let new_output = if state.twoway_lane[ch] >= 0 {
+            apply_curve(curve_input, &pts_up, &biases_up, abs, in_min, in_max, out_min, out_max, scale_t)
+        } else {
+            apply_curve(curve_input, &pts_dn, &biases_dn, abs, in_min, in_max, out_min, out_max, scale_t)
+        };
+
+        let mut output = blend * new_output + (1.0 - blend) * state.twoway_old_output[ch];
+
+        // Peak hold. The device reports far slower than this ticks, so a fast
+        // pull lands on either side of a narrow peak and never reads it — and
+        // one report on it is too short for a game to see. Take the highest
+        // the curve got over the stretch the held point just moved across, and
+        // keep it up for `peak_hold`. Only on the lane(s) `peak_dir` picks: a
+        // hold on the Down lane would also lag a release down a sloped curve.
+        // A flip drops whatever was held at once.
+        let lane_up = state.twoway_lane[ch] >= 0;
+        let hold_here = match peak_dir { "both" => true, "down" => !lane_up, _ => lane_up };
+        if peak_hold > 0.0 && hold_here {
+            let (lp, lb) = if lane_up { (&pts_up, &biases_up) } else { (&pts_dn, &biases_dn) };
+            let g = hyst.graph_x(held);
+            let cur_y = sample_curve(lp, g, lb);
+            // On a flip the sweep starts where the old lane was frozen: a press
+            // that had to clear the band still came up through every point
+            // from its low, and a flip only happens on a real reversal. Only
+            // movement the lane's way counts — "Start on Up" puts a release
+            // that reaches rest on the Up lane, moving down.
+            let with_lane = if lane_up { held > prev_held } else { held < prev_held };
+            let swept = if prev_held.is_nan() || !with_lane { cur_y }
+                else { curve_max_between(lp, lb, hyst.graph_x(prev_held), g) };
+            let (pk, age) = (&mut state.twoway_peak_y[ch], &mut state.twoway_peak_age[ch]);
+            if switched { *pk = f32::NAN; }
+            if swept > cur_y + 1e-6 && (pk.is_nan() || swept >= *pk) {
+                *pk = swept;
+                *age = 0.0;
+            } else if !pk.is_nan() {
+                *age += dt;
+                if *age >= peak_hold || *pk <= cur_y { *pk = f32::NAN; }
+            }
+            if !pk.is_nan() {
+                let sign = if abs && !vec_mode && raw_input < 0.0 { -1.0 } else { 1.0 };
+                output = curve_y_to_output(*pk, sign, abs, out_min, out_max, scale_t);
+            }
+        } else {
+            state.twoway_peak_y[ch] = f32::NAN;
+        }
+        state.twoway_last_out[ch] = output;
+
+        let sig = if vec_mode {
+            match inputs.get(ch).and_then(|s| *s) {
+                Some(Signal::Vec2(v)) => {
+                    let mag = v.length();
+                    if mag < f32::EPSILON { Signal::Vec2(glam::Vec2::ZERO) }
+                    else { Signal::Vec2(v / mag * output) }
+                }
+                _ => Signal::Float(output),
+            }
+        } else {
+            Signal::Float(output)
+        };
+
+        results.push(Some(sig));
+    }
+
+    results
+}
+
+/// Top of the two-way curve's Hyst graph: its Y runs 0..1 for a band of
+/// 0..`TWOWAY_HYST_MAX_PCT` % of the input range — the Hyst value box's range.
+pub const TWOWAY_HYST_MAX_PCT: f32 = 10.0;
+
+/// The two-way curve's hysteresis settings, in input units. Shared with the
+/// UI so the band it draws is the one the engine applies.
+#[derive(Clone, Debug)]
+pub struct TwowayHyst {
+    /// The Up → Down flip is guarded (the release must clear the band).
+    pub guard_down: bool,
+    /// The Down → Up flip is guarded (the press must clear the band).
+    pub guard_up: bool,
+    /// The band when the Hyst graph is a single dot (`hysteresis_pct`).
+    pub band: f32,
+    /// The Hyst graph when it has two dots or more: band over the input, on the
+    /// curves' own X axis (range + Log/Exp), Y 0..1 = 0..`TWOWAY_HYST_MAX_PCT` %.
+    pub points: Vec<[f32; 2]>,
+    pub biases: Vec<f32>,
+    /// "Start on Up": at rest the tracker sits on the Up lane, unheld.
+    pub start_up: bool,
+    /// Bottom of the tracked range — 0 for a magnitude, `in_min` when bipolar.
+    pub rest: f32,
+    /// How close to `rest` still counts as resting.
+    pub rest_eps: f32,
+    magnitude: bool,
+    in_min: f32,
+    in_max: f32,
+    abs_max: f32,
+    scale_t: f32,
+}
+
+impl TwowayHyst {
+    /// `hysteresis_pct` sets a flat band; `hyst_points` / `hyst_biases` with
+    /// two dots or more replace it with a band that varies over the input
+    /// (`hysteresis_ms` from the old windowed detector is no longer read).
+    /// `hyst_dir` ("both" / "up" / "down") picks which movement must clear it,
+    /// the other flipping at once; `hyst_start_up` is "Start on Up".
+    /// `magnitude` is the Abs / Vec mode the curve runs in.
+    pub fn from_params(params: &HashMap<String, Value>, magnitude: bool) -> Self {
+        let f = |k: &str, d: f64| params.get(k).and_then(|v| v.as_f64()).unwrap_or(d) as f32;
+        let (in_min, in_max) = (f("in_min", -1.0), f("in_max", 1.0));
+        // A magnitude's range is its ↑ end alone, as `apply_curve` reads it.
+        let abs_max = in_max.abs().max(f32::EPSILON);
+        let dir = params.get("hyst_dir").and_then(|v| v.as_str()).unwrap_or("both");
+        let (rest, span) = if magnitude { (0.0, abs_max) } else { (in_min, (in_max - in_min).abs()) };
+        let points: Vec<[f32; 2]> = params.get("hyst_points").and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|p| {
+                let a = p.as_array()?;
+                Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])
+            }).collect())
+            .unwrap_or_default();
+        let biases: Vec<f32> = params.get("hyst_biases").and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|b| b.as_f64().map(|f| f as f32)).collect())
+            .unwrap_or_default();
+        TwowayHyst {
+            guard_down: dir != "up",
+            guard_up: dir != "down",
+            band: (f("hysteresis_pct", 0.5) / 100.0 * abs_max).max(0.0),
+            points: if points.len() >= 2 { points } else { Vec::new() },
+            biases,
+            start_up: params.get("hyst_start_up").and_then(|v| v.as_bool()).unwrap_or(false),
+            rest,
+            rest_eps: 0.002 * span.max(f32::EPSILON),
+            magnitude, in_min, in_max, abs_max,
+            scale_t: read_scale_t(params),
+        }
+    }
+    pub fn at_rest(&self, x: f32) -> bool { x <= self.rest + self.rest_eps }
+    /// An input value's X on the curves' graph (range, then Log/Exp) — where
+    /// the Hyst graph is read.
+    pub fn graph_x(&self, x: f32) -> f32 {
+        if self.magnitude {
+            curve_scale((x.abs() / self.abs_max).clamp(0.0, 1.0), self.scale_t)
+        } else {
+            let range = (self.in_max - self.in_min).abs().max(f32::EPSILON);
+            let norm = ((x - self.in_min) / range * 2.0 - 1.0).clamp(-1.0, 1.0);
+            norm.signum() * curve_scale(norm.abs(), self.scale_t)
+        }
+    }
+    /// The band at input `x`, before the direction setting.
+    pub fn band_at(&self, x: f32) -> f32 {
+        if self.points.is_empty() || x.is_nan() { return self.band; }
+        let y = sample_curve(&self.points, self.graph_x(x), &self.biases).clamp(0.0, 1.0);
+        y * TWOWAY_HYST_MAX_PCT / 100.0 * self.abs_max
+    }
+    /// The band guarding a flip away from the lane (`lane_up` = rising), with
+    /// the held point at `at`.
+    pub fn band_for(&self, lane_up: bool, at: f32) -> f32 {
+        if (lane_up && self.guard_down) || (!lane_up && self.guard_up) { self.band_at(at) } else { 0.0 }
+    }
+}
+
+/// One step of the two-way curve's direction tracker. `held` follows `x` while
+/// `x` moves in the `lane`'s direction (+1 rising, -1 falling) and stays put
+/// while `x` comes back by up to that lane's band (`to_down` on the rising lane,
+/// `to_up` on the falling one); past that the lane flips and `held` jumps to
+/// `x`. Returns whether the lane flipped. A NaN `held` (first sample) takes `x`
+/// without flipping.
+pub(crate) fn twoway_track(held: &mut f32, lane: &mut i8, x: f32, to_down: f32, to_up: f32) -> bool {
+    if held.is_nan() {
+        *held = x;
+        return false;
+    }
+    let rising = *lane >= 0;
+    let ahead = if rising { x >= *held } else { x <= *held };
+    if ahead {
+        *held = x;
+        return false;
+    }
+    let band = if rising { to_down } else { to_up };
+    if (x - *held).abs() > band {
+        *held = x;
+        *lane = if rising { -1 } else { 1 };
+        return true;
+    }
+    false
+}
+
+/// What a two-way curve node shows the UI per tick: its inputs, then one
+/// `Vec2(held, lane)` per channel from the tracker, so the body can draw the
+/// point the curves are actually read at and the band around it.
+pub(crate) fn twoway_live_inputs(inputs: &[Option<Signal>], state: Option<&NodeState>) -> Vec<Option<Signal>> {
+    let mut out = inputs.to_vec();
+    if let Some(st) = state {
+        for ch in 0..inputs.len() {
+            let track = match (st.twoway_held.get(ch), st.twoway_lane.get(ch)) {
+                (Some(&h), Some(&l)) if !h.is_nan() => Some(Signal::Vec2(glam::Vec2::new(h, l as f32))),
+                _ => None,
+            };
+            out.push(track);
+        }
+    }
+    out
+}
+
+/// Whether `c` has moved more than `band` away from `p`. A Bool has no small
+/// movements, and neither does a signal that changed type: those always count.
+fn moved_past(p: Signal, c: Signal, band: f32) -> bool {
+    match (p, c) {
+        (Signal::Float(a), Signal::Float(b)) => (b - a).abs() > band,
+        (Signal::Int(a), Signal::Int(b)) => (b as f32 - a as f32).abs() > band,
+        (Signal::Vec2(a), Signal::Vec2(b)) => a.distance(b) > band,
+        (Signal::Vec4(a), Signal::Vec4(b)) => a.distance(b) > band,
+        _ => p != c,
+    }
+}
+
+/// `prev_signals[0]` is the value it last reacted to: with a hysteresis band, the
+/// output stays quiet until the input leaves the band around that value, so noise
+/// inside it never fires and a slow drift fires once it has gone far enough. With
+/// no band that is simply the previous tick's value.
+pub(crate) fn compute_has_changed(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+) -> Vec<Option<Signal>> {
+    let cur = inputs.first().copied().flatten();
+    let band = params.get("hysteresis_pct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32 / 100.0;
+    while state.prev_signals.len() < 1 { state.prev_signals.push(None); }
+    let prev = state.prev_signals[0];
+
+    let moved = match (prev, cur) {
+        (Some(p), Some(c)) if band > 0.0 => moved_past(p, c, band),
+        _ => prev != cur,
+    };
+    if moved {
+        state.prev_signals[0] = cur;
+    }
+
+    let (changed, increased, decreased) = match (prev, cur) {
+        (Some(p), Some(c)) => {
+            let (ps, cs) = (sig_scalar(p), sig_scalar(c));
+            (moved, moved && cs > ps, moved && cs < ps)
+        }
+        (None, Some(_)) => (true, false, false),
+        _ => (false, false, false),
+    };
+    vec![Some(Signal::Bool(changed)), Some(Signal::Bool(increased)), Some(Signal::Bool(decreased))]
+}
+
+pub(crate) fn compute_logic_delay(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+    dt: f32,
+) -> Vec<Option<Signal>> {
+    let mode      = params.get("mode").and_then(|v| v.as_str()).unwrap_or("delay_false");
+    let time      = params.get("time").and_then(|v| v.as_f64()).unwrap_or(100.0) as f32;
+    let use_ms    = params.get("unit").and_then(|v| v.as_str()).unwrap_or("ms") == "ms";
+    let threshold = if use_ms { time / 1000.0 } else { time };
+    let tick      = if use_ms { dt } else { 1.0 };
+
+    while state.aux_f32.len() < 2 { state.aux_f32.push(0.0); }
+    let mode_code = if mode == "delay_true" { 0.0f32 } else { 1.0f32 };
+    if state.aux_f32[1] != mode_code {
+        state.aux_f32[0] = if mode == "delay_true" { 0.0 } else { threshold };
+        state.aux_f32[1] = mode_code;
+    }
+
+    let input = inputs.first().copied().flatten()
+        .and_then(|s| s.coerce_to(SignalType::Bool))
+        .map(|s| matches!(s, Signal::Bool(true)))
+        .unwrap_or(false);
+
+    let timer  = &mut state.aux_f32[0];
+    let output = match mode {
+        "delay_true" => { if input { *timer += tick; *timer >= threshold } else { *timer = 0.0; false } }
+        _            => { if input { *timer = 0.0; true } else { *timer += tick; *timer < threshold } }
+    };
+    vec![Some(Signal::Bool(output))]
+}
+
+/// Sample mode takes the input on the gate's rising edge. Hold mode tracks the
+/// input while the gate is low, so the last value taken is the one on the tick
+/// the gate went high.
+///
+///   prev_signals[0] = held value
+///   aux_f32[0]      = previous gate level (0/1)
+pub(crate) fn compute_sample_hold(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+) -> Vec<Option<Signal>> {
+    let cur  = inputs.first().copied().flatten();
+    let gate = get_b(inputs, 1, false);
+    let hold = params.get("mode").and_then(|v| v.as_str()) == Some("hold");
+
+    while state.prev_signals.len() < 1 { state.prev_signals.push(None); }
+    while state.aux_f32.len() < 1 { state.aux_f32.push(0.0); }
+
+    let rising = gate && state.aux_f32[0] < 0.5;
+    state.aux_f32[0] = if gate { 1.0 } else { 0.0 };
+    if rising || (hold && !gate) {
+        state.prev_signals[0] = cur;
+    }
+
+    // The input's type decides the output's, including before the first sample
+    // (its rest value) and after a rewire to another type. An input with no
+    // signal emits nothing, like an unwired pin, so unwiring doesn't leave what's
+    // downstream stuck on the held value.
+    let held = state.prev_signals[0];
+    vec![cur.map(|c| held.and_then(|h| h.coerce_to(c.signal_type())).unwrap_or(c.zeroed()))]
+}
+
+pub(crate) fn compute_counter(
+    inputs: &[Option<Signal>],
+    state: &mut NodeState,
+    params: &HashMap<String, Value>,
+) -> Vec<Option<Signal>> {
+    let mode       = params.get("mode")      .and_then(|v| v.as_str()) .unwrap_or("loop");
+    let normalized = params.get("normalized").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let step_wired = inputs.get(3).and_then(|s| *s).is_some();
+    let min_wired  = inputs.get(4).and_then(|s| *s).is_some();
+    let max_wired  = inputs.get(5).and_then(|s| *s).is_some();
+
+    let step = (if step_wired { get_f(inputs, 3, 1.0)  } else { params.get("step_param").and_then(|v| v.as_f64()).unwrap_or(1.0)  as f32 }).max(f32::EPSILON);
+    let min  =  if min_wired  { get_f(inputs, 4, 0.0)  } else { params.get("min_param") .and_then(|v| v.as_f64()).unwrap_or(0.0)  as f32 };
+    let max  =  if max_wired  { get_f(inputs, 5, 10.0) } else { params.get("max_param") .and_then(|v| v.as_f64()).unwrap_or(10.0) as f32 };
+
+    let max_steps = ((max - min) / step).round().max(0.0) as i32;
+
+    while state.aux_f32.len() < 5 { state.aux_f32.push(0.0); }
+    if state.aux_f32[1] == 0.0 { state.aux_f32[1] = 1.0; }
+
+    let inc   = get_b(inputs, 0, false);
+    let dec   = get_b(inputs, 1, false);
+    let reset = get_b(inputs, 2, false);
+
+    let inc_edge   = inc   && state.aux_f32[2] < 0.5;
+    let dec_edge   = dec   && state.aux_f32[3] < 0.5;
+    let reset_edge = reset && state.aux_f32[4] < 0.5;
+
+    state.aux_f32[2] = if inc   { 1.0 } else { 0.0 };
+    state.aux_f32[3] = if dec   { 1.0 } else { 0.0 };
+    state.aux_f32[4] = if reset { 1.0 } else { 0.0 };
+
+    let mut count = state.aux_f32[0] as i32;
+    let mut dir   = state.aux_f32[1];
+
+    if reset_edge {
+        count = 0; dir = 1.0;
+    } else {
+        match mode {
+            "loop" => {
+                if inc_edge { count = (count + 1).rem_euclid(max_steps + 1); }
+                if dec_edge { count = (count - 1).rem_euclid(max_steps + 1); }
+            }
+            "limit" => {
+                if inc_edge { count = (count + 1).min(max_steps); }
+                if dec_edge { count = (count - 1).max(0); }
+            }
+            "bounce" => {
+                if max_steps > 0 {
+                    if inc_edge { count += 1; }
+                    if dec_edge { count -= 1; }
+                    if count > max_steps { count = 2 * max_steps - count; }
+                    if count < 0         { count = -count; }
+                }
+            }
+            _ => {
+                if inc_edge { count += 1; }
+                if dec_edge { count = (count - 1).max(0); }
+            }
+        }
+    }
+
+    if mode != "unlimited" { count = count.clamp(0, max_steps); }
+    state.aux_f32[0] = count as f32;
+    state.aux_f32[1] = dir;
+
+    let output = if normalized {
+        if max_steps > 0 { count as f32 / max_steps as f32 } else { 0.0 }
+    } else {
+        min + count as f32 * step
+    };
+    vec![Some(Signal::Float(output))]
+}

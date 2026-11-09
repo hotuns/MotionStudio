@@ -1,0 +1,16 @@
+{
+  "平滑与采样": "Smoothing and sampling",
+  "静止抑制与恢复": "Idle suppression and recovery",
+  "实时信号视图": "Live signal view",
+  "输出预览": "Output preview",
+  "鼠标相对位移轨迹": "Relative mouse movement path",
+  "等待鼠标位移": "Waiting for mouse movement",
+  "相对位移（计数）": "Relative movement (counts)",
+  "虚拟手柄输出": "Virtual controller output",
+  "实际输出": "Live output",
+  "模拟输出": "Simulated output",
+  "鼠标轨迹": "Mouse trajectory",
+  "近 3 秒轨迹 · 停手后保留": "Last 3 seconds of motion · kept when you stop",
+  "清空轨迹": "Clear trajectory",
+  "启用输出或开始观察输入后显示轨迹。": "Enable output or start observing input to see the trajectory."
+}

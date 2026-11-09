@@ -1,0 +1,15 @@
+.field {display:grid;gap:8px;margin:16px 0;font-size:12px;}
+.field input,.field select,.field textarea,.path input {width:100%;min-width:0;padding:10px;border:1px solid var(--border-1);border-radius:7px;background:var(--bg-input);color:var(--text-strong);}
+.field textarea {resize:vertical;font:12px/1.7 ui-monospace,Consolas,monospace;min-height:140px;}
+.tools,.places {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;}.tools label {cursor:pointer;}
+.tabs {display:flex;flex-wrap:wrap;gap:6px;margin:10px 0;}
+.tabs button {min-width:0;white-space:normal;overflow-wrap:anywhere;}
+.tabs button[aria-pressed='true'] {border-color:var(--accent);color:var(--accent);}
+.profileFields {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:10px;}
+.profileFields .field {margin:8px 0;}
+.report article[data-status='error'] {border-left-color:var(--danger-text);}
+.source {display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:12px;}.source strong {overflow-wrap:anywhere;}.source span {color:var(--text-muted);}.source button {margin-left:auto;}
+.stats {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;}.stats span {padding:12px;border:1px solid var(--border-1);border-radius:8px;background:var(--bg-input);color:var(--text-muted);font-size:12px;}.stats strong {display:block;color:var(--text-strong);font-size:22px;margin-bottom:4px;}
+.report {display:grid;gap:8px;}.report article {border:1px solid var(--border-1);border-left:3px solid var(--accent);border-radius:7px;padding:10px 12px;}.report article[data-status='skipped'] {border-left-color:var(--danger-text);}.report article[data-status='ignored'],.report article[data-status='overridden'] {border-left-color:var(--text-muted);}.report article>div {display:flex;justify-content:space-between;gap:12px;font-size:11px;margin-bottom:8px;color:var(--text-muted);}.report code {font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere;}.report article p {margin:8px 0 0;}
+.path {display:flex;align-items:flex-end;gap:8px;margin:10px 0;}.path label {display:grid;gap:8px;flex:1;min-width:0;font-size:12px;}
+.files {display:grid;gap:5px;margin:12px 0;}.files button {display:flex;align-items:center;gap:12px;min-height:42px;width:100%;text-align:left;overflow-wrap:anywhere;border:1px solid var(--border-1);border-radius:7px;padding:9px 12px;background:var(--bg-input);color:var(--text-strong);cursor:pointer;}.files span {color:var(--accent);flex-shrink:0;}

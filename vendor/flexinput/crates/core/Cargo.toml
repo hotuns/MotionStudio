@@ -1,0 +1,14 @@
+[package]
+name    = "flexinput-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+glam       = { workspace = true }
+uuid       = { workspace = true }
+smallvec   = { workspace = true }
+# Fast non-cryptographic hasher for the engine's per-tick signal maps (SipHash
+# was ~20% of the engine tick). Already in the lockfile via other crates.
+rustc-hash = "2.1"

@@ -1,0 +1,19 @@
+diff --git a/src/joystick/hidapi/SDL_hidapi_flydigi.c b/src/joystick/hidapi/SDL_hidapi_flydigi.c
+index f20f10801..e249416cb 100644
+--- a/src/joystick/hidapi/SDL_hidapi_flydigi.c
++++ b/src/joystick/hidapi/SDL_hidapi_flydigi.c
+@@ -1005,6 +1005,14 @@ static void HIDAPI_DriverFlydigi_HandleStatePacketV2(SDL_Joystick *joystick, SDL
+         values[0] = HIDAPI_RemapVal((float)LOAD16(data[17], data[18]), INT16_MIN, INT16_MAX, -flGyroScale, flGyroScale);
+         values[1] = HIDAPI_RemapVal((float)LOAD16(data[21], data[22]), INT16_MIN, INT16_MAX, -flGyroScale, flGyroScale);
+         values[2] = HIDAPI_RemapVal(-(float)LOAD16(data[19], data[20]), INT16_MIN, INT16_MAX, -flGyroScale, flGyroScale);
++        if (ctx->deviceID == 150) { // Apex 6 Pro; other models have not been verified
++            const float x = values[0];
++            const float y = values[1];
++            const float z = values[2];
++            values[0] = -z;
++            values[1] = -x;
++            values[2] = -y;
++        }
+         SDL_SendJoystickSensor(timestamp, joystick, SDL_SENSOR_GYRO, sensor_timestamp, values, 3);
+ 
+         const float flAccelScale = ctx->accelScale;

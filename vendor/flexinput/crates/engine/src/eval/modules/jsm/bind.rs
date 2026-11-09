@@ -1,0 +1,615 @@
+//! The button side of a JSM config at run time: which binding a press picks,
+//! which of its keys fire when, and what ends up held.
+//!
+//! JSM's press model, as its README documents it and its graph draws it:
+//!
+//! ```text
+//!       hold           turbo period                a tap is shorter
+//!        v                  v                      than the hold time
+//! ___|---|---|---|---|---|---|--|________|---|_______________
+//!    a   b   c   c   c   c   c  d        a   d
+//!                               \_ hold release   \_ tap fires here, 40 ms long
+//! a start press \   b hold press _   c turbo +   d release press /
+//! ```
+//!
+//! On top of that a press has to decide WHICH binding it belongs to: the top of
+//! the chord stack, a double press, a simultaneous or diagonal pair, or the
+//! button's own binding. That decision happens once, when the button goes down
+//! (except for a simultaneous press, which waits out its window first).
+
+use std::collections::{HashMap, HashSet};
+
+use super::names::{Btn, GyroAction, Out};
+use super::parse::{ActionMod, Binding, Compiled, EventMod, Timings, Trigger};
+
+/// A moment on the runtime's clock, in seconds since the config was compiled.
+///
+/// `f64`, never `f32`: the clock adds one tick at a time, and an `f32` this
+/// far from zero can't hold a step that small. At 8 kHz it ran double speed
+/// after about half an hour and stopped dead after about an hour (2.3 h and
+/// 4.5 h at the default 2 kHz) — every hold waiting for a time that never
+/// came, every tap's key down for good. `f64` keeps a tick for longer than a
+/// session lasts.
+type Secs = f64;
+
+/// How long a tap's key stays down (JSM's `MAGIC_TAP_DURATION`), and how long an
+/// instant press stays down (`MAGIC_INSTANT_DURATION`). Gyro actions and
+/// calibration hold far longer (`MAGIC_EXTENDED_TAP_DURATION`).
+const TAP_HOLD: Secs = 0.040;
+const INSTANT_HOLD: Secs = 0.040;
+const EXTENDED_TAP_HOLD: Secs = 0.500;
+
+/// What one press of a button is doing.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Role {
+    Idle,
+    /// Down, waiting to see whether a simultaneous partner joins in time.
+    WaitSim { until: Secs },
+    /// Down and driving press `usize`.
+    Active(usize),
+    /// Down, but another button's pair press (simultaneous or diagonal) owns it.
+    Follower(usize),
+}
+
+impl Default for Role {
+    fn default() -> Self { Role::Idle }
+}
+
+#[derive(Default)]
+struct BtnRun {
+    down: bool,
+    role: Role,
+    /// Until when a press of this button would be its double press. Set as a
+    /// press of its own binding ends, JSM's way: a tap counts the window from
+    /// its release (it is held back for that long, `pending_tap`), a press held
+    /// past the hold time from its start — so with the default timings only a
+    /// tap leads to a double press. Measuring from the press start for a tap
+    /// too left a normal double tap 50–70 ms for the gap where JSM gives 150.
+    double_until: Option<Secs>,
+    /// A tap held back to see whether a second press turns it into a double
+    /// press: (binding, when to give up waiting).
+    pending_tap: Option<(usize, Secs)>,
+}
+
+/// An active press: a binding, and how far through it we are.
+struct Press {
+    binding: usize,
+    owner: Btn,
+    partner: Option<Btn>,
+    start: Secs,
+    hold_fired: bool,
+    turbo_next: Secs,
+    /// Pins this press is holding down, so they release when it ends.
+    held: Vec<String>,
+    /// Released already: its keys are up and it fires nothing more.
+    ended: bool,
+}
+
+/// A pin driven for a while rather than held: a tap, an instant press, a turbo
+/// pulse, a scroll notch.
+struct Timed {
+    pin: String,
+    until: Secs,
+}
+
+/// Everything the config asks for right now.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Outputs {
+    /// Pins to drive true this tick.
+    pub pins: HashSet<String>,
+    /// Gyro actions asserted this tick (phase 3 acts on them).
+    pub gyro: HashSet<GyroAction>,
+    /// Console commands fired this tick (phase 8 runs them).
+    pub commands: Vec<String>,
+    /// Quoted settings fired this tick (`S = "GYRO_SENS = 2"`), as (name, value),
+    /// in the order they fired. `eval.rs` keeps them in force from then on.
+    pub settings: Vec<(String, String)>,
+    /// Rumble asked for by a binding, as (strong, weak) — phase 7 sends it.
+    pub rumble: Option<(f32, f32)>,
+    /// A binding asked to switch to this tab (JSM: load that config file).
+    pub layer: Option<String>,
+    /// A binding asked for `RESET_MAPPINGS`.
+    pub reset: bool,
+    /// Turns bindings fired this tick (`FLICK_R90`), as (degrees, own time).
+    pub flicks: Vec<(f32, Option<f32>)>,
+}
+
+/// The run-time state of one JSM Config node.
+pub struct Runtime {
+    t: Secs,
+    buttons: HashMap<Btn, BtnRun>,
+    presses: Vec<Press>,
+    /// Chord buttons currently held, oldest first — the latest chord wins.
+    chords: Vec<Btn>,
+    /// Pins held by a toggle (`^`), until toggled off again.
+    toggles: HashSet<String>,
+    timed: Vec<Timed>,
+    /// Pins held by active presses, ref-counted so two bindings on one pin don't
+    /// release it early.
+    held: HashMap<String, u32>,
+    out: Outputs,
+}
+
+impl Default for Runtime {
+    fn default() -> Self {
+        Runtime {
+            t: 0.0,
+            buttons: HashMap::new(),
+            presses: Vec::new(),
+            chords: Vec::new(),
+            toggles: HashSet::new(),
+            timed: Vec::new(),
+            held: HashMap::new(),
+            out: Outputs::default(),
+        }
+    }
+}
+
+impl Runtime {
+    /// The chords held right now, oldest first — what a modeshift resolves
+    /// against (`parse::resolve`).
+    pub fn chords(&self) -> &[Btn] { &self.chords }
+
+    /// Which buttons are holding each held pin, and through which binding, for
+    /// a pin that takes its value from the button rather than just being on
+    /// (`ZL = MIDI_CC7`: the pull IS the value). Only pins a live press holds; a
+    /// tap, a toggle or a turbo pulse has no button behind it any more and
+    /// reads full.
+    pub fn held_by(&self) -> HashMap<String, Vec<(Btn, usize)>> {
+        let mut out: HashMap<String, Vec<(Btn, usize)>> = HashMap::new();
+        for p in self.presses.iter().filter(|p| !p.ended) {
+            for pin in &p.held {
+                out.entry(pin.clone()).or_default().push((p.owner, p.binding));
+            }
+        }
+        out
+    }
+
+    /// The runtime for a layer switched to while `held` were down (`chords`
+    /// being the old runtime's stack, oldest first).
+    ///
+    /// JSM keeps a press's mapping until the button lets go, so a press that
+    /// switched layers — `L3 = PS_L3' "L3.txt"\` — still taps PS_L3 on release:
+    /// the old layer's runtime finishes it (`retire`). This one must not see
+    /// those buttons go down as fresh presses of its own, so they start here as
+    /// already down; letting go of one is nothing, and the next press is this
+    /// layer's. The ones this layer holds as chords stack as chords, so a held
+    /// layer button can still shift the layer it switched to.
+    pub fn continuing(cfg: &Compiled, held: &[Btn], chords: &[Btn]) -> Runtime {
+        let mut rt = Runtime::default();
+        for &b in held {
+            rt.buttons.entry(b).or_default().down = true;
+        }
+        let order = chords.iter().chain(held.iter()).copied();
+        for b in order {
+            if held.contains(&b) && is_chord_button(cfg, b) && !rt.chords.contains(&b) {
+                rt.chords.push(b);
+            }
+        }
+        rt
+    }
+
+    /// The buttons down right now.
+    pub fn held_buttons(&self) -> Vec<Btn> {
+        let mut v: Vec<Btn> = self.buttons.iter().filter(|(_, r)| r.down).map(|(b, _)| *b).collect();
+        v.sort_by_key(|b| b.name());
+        v
+    }
+
+    /// This layer has been switched away from: it only finishes the presses
+    /// already under way (their releases, taps and holds) and lets its timed
+    /// pins run out. A toggle it left on goes off now, as it did when a switch
+    /// threw the whole runtime away.
+    pub fn retire(&mut self) {
+        self.toggles.clear();
+    }
+
+    /// Nothing left for a retired layer to do: no press under way, no tap
+    /// waiting on a double press or running out its time, no pair waiting.
+    pub fn finished(&self) -> bool {
+        self.presses.iter().all(|p| p.ended)
+            && self.timed.is_empty()
+            && self.toggles.is_empty()
+            && self.buttons.values().all(|r| {
+                r.pending_tap.is_none() && !matches!(r.role, Role::WaitSim { .. })
+            })
+    }
+
+    /// Start the clock this far in, for a test of a long session without
+    /// ticking through it.
+    #[cfg(test)]
+    pub(crate) fn wind_clock(&mut self, secs: Secs) {
+        self.t = secs;
+    }
+
+    /// Advance one tick. `down` answers "is this JSM button pressed right now?".
+    ///
+    /// `chord_only` names buttons that may stack a chord but must not run a
+    /// binding of their own — a trigger in `X_LT` mode, whose pull goes straight
+    /// to the virtual pad. JSM keeps the same split: that trigger returns early
+    /// out of its state machine and pokes the chord stack by hand.
+    pub fn tick(
+        &mut self,
+        cfg: &Compiled,
+        timings: &Timings,
+        dt: f32,
+        down: &dyn Fn(Btn) -> bool,
+        chord_only: &dyn Fn(Btn) -> bool,
+    ) -> &Outputs {
+        self.t += dt as Secs;
+        self.out = Outputs::default();
+        self.timed.retain(|t| t.until > self.t);
+
+        // Buttons the config cares about, in a stable order so a tie between two
+        // buttons pressed in the same tick resolves the same way every time.
+        let mut watched: Vec<Btn> = cfg.mentioned.iter().copied().collect();
+        watched.sort_by_key(|b| b.name());
+
+        // A chord-only button never reaches the press machinery, so it is stacked
+        // and unstacked here and left out of everything below. Any binding it has
+        // stays silent, which is what JSM does and what the editor promises on the
+        // line.
+        watched.retain(|&b| {
+            if !chord_only(b) {
+                return true;
+            }
+            let held = down(b);
+            if held && !self.chords.contains(&b) {
+                if is_chord_button(cfg, b) {
+                    self.chords.push(b);
+                }
+            } else if !held {
+                self.chords.retain(|&c| c != b);
+            }
+            self.buttons.entry(b).or_default().down = held;
+            false
+        });
+
+        // ── releases first, so a button freed this tick can't also start a pair
+        for &b in &watched {
+            let now = down(b);
+            let was = self.buttons.entry(b).or_default().down;
+            if was && !now {
+                self.release(b, cfg, timings);
+            }
+        }
+        // ── then presses
+        for &b in &watched {
+            let now = down(b);
+            let was = self.buttons.entry(b).or_default().down;
+            if !was && now {
+                self.press(b, cfg, timings);
+            }
+            let run = self.buttons.entry(b).or_default();
+            run.down = now;
+        }
+        // ── a simultaneous press that ran out of patience resolves on its own
+        for &b in &watched {
+            let expired = matches!(self.buttons[&b].role, Role::WaitSim { until } if until <= self.t);
+            if expired {
+                self.resolve(b, cfg, timings);
+            }
+        }
+        // ── a tap held back for a double press that never came
+        for &b in &watched {
+            let due = match self.buttons[&b].pending_tap {
+                Some((binding, at)) if at <= self.t => Some(binding),
+                _ => None,
+            };
+            if let Some(binding) = due {
+                self.buttons.entry(b).or_default().pending_tap = None;
+                self.fire(binding, EventMod::Tap, cfg, None);
+            }
+        }
+
+        self.advance_presses(cfg, timings);
+        self.compose();
+        &self.out
+    }
+
+    // ── press lifecycle ──────────────────────────────────────────────────────
+
+    fn press(&mut self, b: Btn, cfg: &Compiled, timings: &Timings) {
+        {
+            let run = self.buttons.entry(b).or_default();
+            run.down = true;
+        }
+        if is_chord_button(cfg, b) && !self.chords.contains(&b) {
+            self.chords.push(b);
+        }
+
+        // A second press inside the window turns into the double-press binding.
+        let repeat = self.buttons[&b].double_until.is_some_and(|until| self.t <= until);
+        self.buttons.entry(b).or_default().double_until = None;
+        if repeat {
+            if let Some(i) = find(cfg, |t| matches!(t, Trigger::Double(x) if *x == b)) {
+                self.buttons.entry(b).or_default().pending_tap = None;
+                self.start(i, b, None, cfg, timings);
+                return;
+            }
+        }
+
+        // A simultaneous pair needs both buttons inside the window: if the
+        // partner is already waiting, they pair up now; otherwise wait for it.
+        if let Some((i, partner)) = sim_partner(cfg, b) {
+            let ready = matches!(self.buttons.get(&partner).map(|r| r.role), Some(Role::WaitSim { .. }));
+            if ready {
+                self.take_over(partner);
+                self.start(i, b, Some(partner), cfg, timings);
+                return;
+            }
+            self.buttons.entry(b).or_default().role = Role::WaitSim { until: self.t + Secs::from(timings.sim) };
+            return;
+        }
+        self.resolve(b, cfg, timings);
+    }
+
+    /// Pick the binding for a button that is down and not waiting on a partner.
+    fn resolve(&mut self, b: Btn, cfg: &Compiled, timings: &Timings) {
+        // A diagonal partner already pressing releases its own binding and the
+        // pair takes over — no window, either order.
+        if let Some((i, partner)) = diag_partner(cfg, b) {
+            if self.buttons.get(&partner).is_some_and(|r| matches!(r.role, Role::Active(_))) {
+                self.take_over(partner);
+                self.start(i, b, Some(partner), cfg, timings);
+                return;
+            }
+        }
+        // The top of the chord stack wins, then the button's own binding.
+        for &chord in self.chords.iter().rev() {
+            if chord == b { continue; }
+            if let Some(i) = find(cfg, |t| matches!(t, Trigger::Chord { chord: c, btn }
+                if *c == chord && *btn == b))
+            {
+                self.start(i, b, None, cfg, timings);
+                return;
+            }
+        }
+        if let Some(i) = find(cfg, |t| matches!(t, Trigger::Simple(x) if *x == b)) {
+            self.start(i, b, None, cfg, timings);
+            return;
+        }
+        self.buttons.entry(b).or_default().role = Role::Idle;
+    }
+
+    fn start(&mut self, binding: usize, owner: Btn, partner: Option<Btn>, cfg: &Compiled, timings: &Timings) {
+        let idx = self.presses.len();
+        self.presses.push(Press {
+            binding,
+            owner,
+            partner,
+            start: self.t,
+            hold_fired: false,
+            turbo_next: self.t + Secs::from(timings.hold),
+            held: Vec::new(),
+            ended: false,
+        });
+        self.buttons.entry(owner).or_default().role = Role::Active(idx);
+        if let Some(p) = partner {
+            self.buttons.entry(p).or_default().role = Role::Follower(idx);
+        }
+        self.fire(binding, EventMod::Start, cfg, Some(idx));
+    }
+
+    /// End whatever press a button owns without firing its tap — used when a
+    /// pair press takes the button over.
+    fn take_over(&mut self, b: Btn) {
+        if let Some(Role::Active(i)) = self.buttons.get(&b).map(|r| r.role) {
+            self.end_press(i);
+        }
+        self.buttons.entry(b).or_default().pending_tap = None;
+    }
+
+    fn release(&mut self, b: Btn, cfg: &Compiled, timings: &Timings) {
+        self.chords.retain(|&c| c != b);
+        let role = self.buttons.entry(b).or_default().role;
+        self.buttons.entry(b).or_default().role = Role::Idle;
+        self.buttons.entry(b).or_default().down = false;
+        let (idx, pair_partner) = match role {
+            Role::Active(i) => (i, self.presses.get(i).and_then(|p| p.partner)),
+            Role::Follower(i) => (i, self.presses.get(i).map(|p| p.owner)),
+            // Released while still waiting for a partner: the button's own
+            // binding never started, so resolve it now and let it end at once
+            // (a quick tap of a button that has a simultaneous binding).
+            Role::WaitSim { .. } => {
+                self.resolve(b, cfg, timings);
+                let Some(Role::Active(i)) = self.buttons.get(&b).map(|r| r.role) else { return; };
+                self.buttons.entry(b).or_default().role = Role::Idle;
+                self.finish_press(i, b, cfg, timings);
+                return;
+            }
+            Role::Idle => return,
+        };
+        self.finish_press(idx, b, cfg, timings);
+        // Releasing one half of a pair hands the other half its own binding,
+        // the way JSM's diagonal presses do.
+        if let Some(other) = pair_partner {
+            let still_down = self.buttons.get(&other).is_some_and(|r| r.down);
+            let was_diag = self.presses.get(idx).is_some_and(|p|
+                matches!(cfg.bindings.get(p.binding).map(|b| b.trigger), Some(Trigger::Diag(..))));
+            self.buttons.entry(other).or_default().role = Role::Idle;
+            if still_down && was_diag {
+                self.resolve(other, cfg, timings);
+            }
+        }
+    }
+
+    /// Fire a press's release (and tap, when it was short) and drop its holds.
+    fn finish_press(&mut self, idx: usize, b: Btn, cfg: &Compiled, timings: &Timings) {
+        let Some(press) = self.presses.get(idx) else { return; };
+        if press.ended { return; }
+        let (binding, held_long, start) = (press.binding, press.hold_fired, press.start);
+        self.fire(binding, EventMod::Release, cfg, None);
+        // A press can lead to a double press when the button has one — but not
+        // the double press itself: after one, the next press starts afresh.
+        let leads_to_double = find(cfg, |t| matches!(t, Trigger::Double(x) if *x == b)).is_some()
+            && !matches!(cfg.bindings.get(binding).map(|x| x.trigger), Some(Trigger::Double(_)));
+        let window = Secs::from(timings.double);
+        if !held_long && self.t - start < Secs::from(timings.hold) {
+            // A tap waits out the double-press window, counted from now, so
+            // the two don't both fire.
+            if leads_to_double {
+                let run = self.buttons.entry(b).or_default();
+                run.pending_tap = Some((binding, self.t + window));
+                run.double_until = Some(self.t + window);
+            } else {
+                self.fire(binding, EventMod::Tap, cfg, None);
+            }
+        } else if leads_to_double {
+            // Held past the hold time: counted from where the press began.
+            self.buttons.entry(b).or_default().double_until = Some(start + window);
+        }
+        self.end_press(idx);
+    }
+
+    /// Release everything a press holds and mark it done.
+    fn end_press(&mut self, idx: usize) {
+        let Some(press) = self.presses.get_mut(idx) else { return; };
+        if press.ended { return; }
+        press.ended = true;
+        let held = std::mem::take(&mut press.held);
+        for pin in held {
+            if let Some(n) = self.held.get_mut(&pin) {
+                *n = n.saturating_sub(1);
+                if *n == 0 { self.held.remove(&pin); }
+            }
+        }
+    }
+
+    fn advance_presses(&mut self, cfg: &Compiled, timings: &Timings) {
+        let live: Vec<usize> = self.presses.iter().enumerate()
+            .filter(|(_, p)| !p.ended)
+            .map(|(i, _)| i)
+            .collect();
+        for i in live {
+            let (binding, start, hold_fired, turbo_next) = {
+                let p = &self.presses[i];
+                (p.binding, p.start, p.hold_fired, p.turbo_next)
+            };
+            if !hold_fired && self.t - start >= Secs::from(timings.hold) {
+                self.presses[i].hold_fired = true;
+                self.fire(binding, EventMod::Hold, cfg, Some(i));
+            }
+            // Turbo pulses only once the button has been held: `turbo_next`
+            // starts one hold time in, then moves on by a turbo period each time.
+            if self.t >= turbo_next {
+                self.presses[i].turbo_next = self.t + Secs::from(timings.turbo);
+                self.fire(binding, EventMod::Turbo, cfg, None);
+            }
+        }
+        // Drop finished presses once nothing points at them any more.
+        if self.presses.iter().all(|p| p.ended) && !self.presses.is_empty() {
+            let owners: Vec<Btn> = self.buttons.iter()
+                .filter(|(_, r)| matches!(r.role, Role::Active(_) | Role::Follower(_)))
+                .map(|(b, _)| *b)
+                .collect();
+            if owners.is_empty() { self.presses.clear(); }
+        }
+    }
+
+    // ── firing one event of a binding ────────────────────────────────────────
+
+    fn fire(&mut self, binding: usize, event: EventMod, cfg: &Compiled, press: Option<usize>) {
+        let Some(b) = cfg.bindings.get(binding) else { return; };
+        for step in b.steps.iter().filter(|s| s.event == event) {
+            self.act(step.action, &step.out, event, press, b);
+        }
+    }
+
+    fn act(&mut self, action: ActionMod, out: &Out, event: EventMod, press: Option<usize>, binding: &Binding) {
+        let _ = binding;
+        match out {
+            // `Out::Midi` never gets here: compiling settles each one into the
+            // `Out::Pin` it plays (`parse::settle_midi`).
+            Out::None | Out::Unsupported { .. } | Out::Midi(_) => {}
+            // Held, tapped and toggled exactly as a key is, under its reserved
+            // pin — see `GyroAction::pin`. Asserted only on the tick it fired, a
+            // `GYRO_OFF` binding switched the gyro off for one tick.
+            Out::Gyro(g) => self.hold_pin(action, &g.pin(), event, press, true),
+            Out::Calibrate => {}
+            // A turn is started, not held: it runs its time out on its own.
+            Out::Flick { deg, secs } => self.out.flicks.push((*deg, *secs)),
+            Out::Command(c) => self.out.commands.push(c.clone()),
+            Out::Set { name, value } => self.out.settings.push((name.clone(), value.clone())),
+            // Both are acted on by `eval.rs`, which owns the tab the module runs
+            // and the state a reset throws away.
+            Out::Layer(tab) => self.out.layer = Some(tab.clone()),
+            Out::Reset => self.out.reset = true,
+            Out::Rumble { strong, weak } => self.out.rumble = Some((*strong, *weak)),
+            Out::Pulse(pin) => self.timed.push(Timed { pin: pin.clone(), until: self.t + TAP_HOLD }),
+            Out::Pin(pin) | Out::Bend { pin, .. } => self.hold_pin(action, pin, event, press, false),
+        }
+    }
+
+    /// Drive `pin` the way `action` and `event` say. `long_tap` is JSM's rule for
+    /// gyro actions and calibration: a tap of one lasts much longer than a key's.
+    fn hold_pin(&mut self, action: ActionMod, pin: &String, event: EventMod, press: Option<usize>, long_tap: bool) {
+        match action {
+            ActionMod::Toggle => {
+                if !self.toggles.remove(pin) { self.toggles.insert(pin.clone()); }
+            }
+            ActionMod::Instant => {
+                self.timed.push(Timed { pin: pin.clone(), until: self.t + INSTANT_HOLD });
+            }
+            ActionMod::Release => {
+                self.toggles.remove(pin);
+                self.held.remove(pin);
+                self.timed.retain(|t| &t.pin != pin);
+            }
+            ActionMod::None => match event {
+                // Held until the button lets go.
+                EventMod::Start | EventMod::Hold => {
+                    *self.held.entry(pin.clone()).or_insert(0) += 1;
+                    if let Some(i) = press {
+                        if let Some(p) = self.presses.get_mut(i) { p.held.push(pin.clone()); }
+                    }
+                }
+                // A tap is a short press of its own (see `long_tap`).
+                EventMod::Tap | EventMod::Turbo => {
+                    let hold = if long_tap { EXTENDED_TAP_HOLD } else { TAP_HOLD };
+                    self.timed.push(Timed { pin: pin.clone(), until: self.t + hold });
+                }
+                EventMod::Release => {}
+            },
+        }
+    }
+
+    fn compose(&mut self) {
+        let held = self.held.keys().chain(self.timed.iter().map(|t| &t.pin)).chain(self.toggles.iter());
+        for pin in held {
+            // A gyro action's reserved pin comes out as the action, never as a pin.
+            match GyroAction::from_pin(pin) {
+                Some(g) => { self.out.gyro.insert(g); }
+                None => { self.out.pins.insert(pin.clone()); }
+            }
+        }
+    }
+}
+
+// ── lookups over the compiled config ────────────────────────────────────────
+
+fn find(cfg: &Compiled, pred: impl Fn(&Trigger) -> bool) -> Option<usize> {
+    cfg.bindings.iter().position(|b| pred(&b.trigger))
+}
+
+/// A button that other bindings — or settings — hang off while it is held.
+fn is_chord_button(cfg: &Compiled, b: Btn) -> bool {
+    cfg.bindings.iter().any(|x| matches!(x.trigger, Trigger::Chord { chord, .. } if chord == b))
+        || cfg.modeshifts.iter().any(|m| m.chord == b)
+}
+
+fn sim_partner(cfg: &Compiled, b: Btn) -> Option<(usize, Btn)> {
+    cfg.bindings.iter().enumerate().find_map(|(i, x)| match x.trigger {
+        Trigger::Sim(a, c) if a == b => Some((i, c)),
+        Trigger::Sim(a, c) if c == b => Some((i, a)),
+        _ => None,
+    })
+}
+
+fn diag_partner(cfg: &Compiled, b: Btn) -> Option<(usize, Btn)> {
+    cfg.bindings.iter().enumerate().find_map(|(i, x)| match x.trigger {
+        Trigger::Diag(a, c) if a == b => Some((i, c)),
+        Trigger::Diag(a, c) if c == b => Some((i, a)),
+        _ => None,
+    })
+}

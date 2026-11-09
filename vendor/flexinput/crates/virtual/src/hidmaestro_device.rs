@@ -1,0 +1,735 @@
+//! `VirtualDevice` backend backed by HIDMaestro (plain-HID profiles).
+//!
+//! Bridges FlexInput's sink-pin signal graph to the `flexinput-hidmaestro`
+//! crate: pin writes accumulate into a `PinState`, `flush()` encodes a HID
+//! report through the profile and publishes it to the shared-memory input
+//! section, and `poll_outputs()` drains the output ring for rumble.
+//!
+//! **Device lifetime / elevation:** creating the virtual device node and the
+//! `Global\` shared sections requires elevation (see
+//! `flexinput_hidmaestro::orchestrator`). That is owned by a separate elevated
+//! helper process (Phase 4). This adapter therefore *opens* an already-created
+//! input/output section by controller index; `is_connected()` reflects whether
+//! the open succeeded. When the helper isn't running (or the device wasn't
+//! created), the device is "disconnected" and silently drops writes — matching
+//! how `VirtualXInput` behaves when ViGEmBus is absent.
+
+use std::time::Instant;
+
+use flexinput_core::Signal;
+use flexinput_hidmaestro::encode::{encode_report_into, gip_from_state, PinState};
+use flexinput_hidmaestro::{helper, InputSection, OutputSection, Profile};
+
+use crate::sony_feedback::SonyFeedback;
+use crate::{layouts, SinkPin, SourcePin};
+
+/// Classification of one XUSB-companion output-ring frame for rumble purposes.
+enum RumbleFrame {
+    /// A real vibration command: latch these `(strong, weak)` amplitudes.
+    Command(f32, f32),
+    /// WGI's idle keep-alive heartbeat (`[00 00 00 00 02 01 01 00 00]`): the
+    /// driver republishes it continuously between commands. It must NOT change
+    /// the latched rumble (treating it as a stop made continuous vibration
+    /// collapse to one short pulse per ~1 s command re-send).
+    Idle,
+    /// Not a vibration frame at all (e.g. the LED `…01` frame, or malformed).
+    Other,
+}
+
+/// Classify an Xbox 360 vibration packet from the XUSB companion's output ring.
+///
+/// Layout confirmed empirically 2026-06-20 by sending known motor values through
+/// BOTH rumble APIs and reading the forwarded bytes. **Motors are always at
+/// `data[2]` (LEFT = strong/low-frequency) and `data[3]` (RIGHT = weak/high-
+/// frequency), each already 0..255** (the high byte of the 16-bit
+/// `wLeftMotorSpeed`/`wRightMotorSpeed`), with a `0x02` packet marker at
+/// `data[4]`. Two frame lengths carry this same layout:
+///   * **5-byte** `[00, 00, L, R, 02]` — the legacy XInput / `XInputSetState`
+///     (and Steam) path via `IOCTL_XUSB_SET_STATE`. Always a real command.
+///   * **9-byte** `[00, XX, L, R, 02, 01, 01, 00, 00]` — the WGI
+///     `Gamepad.Vibration` (`put_Vibration`, browsers/UWP/web testers) path.
+///     `XX` (data[1]) is a command marker (≠0 on a real set, incl. an explicit
+///     stop like `00 F7 00 00 02…`), NOT a motor value. WGI also republishes an
+///     **idle heartbeat** `[00 00 00 00 02 01 01 00 00]` (data[1]==0, motors==0)
+///     continuously — that is keep-alive, not a stop.
+///
+/// So: a 9-byte frame with `data[1]==0` AND both motors 0 is [`RumbleFrame::Idle`]
+/// (ignore); everything else with the `0x02` marker is a [`RumbleFrame::Command`]
+/// to latch (a 5-byte frame is always a command — that path has no heartbeat).
+fn classify_rumble_frame(data: &[u8]) -> RumbleFrame {
+    if data.len() < 5 || data[4] != 0x02 {
+        return RumbleFrame::Other;
+    }
+    let (strong, weak) = (data[2], data[3]);
+    if data.len() >= 9 && data[1] == 0 && strong == 0 && weak == 0 {
+        return RumbleFrame::Idle;
+    }
+    RumbleFrame::Command(strong as f32 / 255.0, weak as f32 / 255.0)
+}
+
+/// How long a non-zero XInput/WGI rumble level is held without a fresh non-zero
+/// command before it decays to zero. WGI (`Gamepad.Vibration`) has NO explicit
+/// stop — it conveys "off" by ceasing to re-send the command (~every 700 ms while
+/// active) and reverting to an idle heartbeat. So we hold the level a bit longer
+/// than that re-send gap, then decay. Long enough to ride out a missed re-send;
+/// short enough that release feels responsive. (Steam's legacy path DOES send an
+/// explicit `Command(0,0)`, which stops immediately regardless of this.)
+const RUMBLE_HOLD: std::time::Duration = std::time::Duration::from_millis(900);
+
+/// `HIDMAESTRO_OUTPUT_SOURCE_HID_OUTPUT` (driver.h): an output report a host
+/// wrote, as opposed to a feature report (1), XInput rumble (2) or a feature
+/// read notice (3).
+const OUTPUT_SOURCE_HID_OUTPUT: u8 = 0;
+
+/// A HIDMaestro-backed virtual controller (plain-HID path: DS4 / DualSense).
+pub struct HidMaestroDevice {
+    id: String,
+    display_name: String,
+    profile: Profile,
+    /// Original profile JSON, kept verbatim so the helper re-parses the exact
+    /// same source (avoids any lossy reconstruction from parsed fields).
+    profile_json: String,
+    pins: PinState,
+    /// Reused report buffer (profile.input_report_size bytes).
+    report_buf: Vec<u8>,
+    /// Open input section (write target). `None` when the device/helper isn't
+    /// available — the adapter then no-ops, staying "disconnected".
+    input: Option<InputSection>,
+    /// Open output section (rumble/FFB ring). Best-effort; may be `None`.
+    output: Option<OutputSection>,
+    /// Latest decoded rumble (strong, weak) in 0.0..1.0.
+    rumble: (f32, f32),
+    feedback_sequence: u64,
+    /// When the last NON-ZERO XInput/WGI rumble command was seen. The XUSB path
+    /// has no reliable explicit "stop" for WGI (it just stops re-sending the
+    /// command and reverts to an idle heartbeat), so a non-zero `rumble` decays
+    /// to zero if no fresh non-zero command arrives within `RUMBLE_HOLD`. `None`
+    /// once rumble is zero. Companion (XInput) path only.
+    last_rumble_cmd: Option<Instant>,
+    /// Helper-managed device instance id (`ROOT\HIDClass\NNNN`). `Some` when
+    /// this device was created via the helper and must be destroyed on drop.
+    helper_instance_id: Option<String>,
+    /// The plain-HID (Sony) path's output-report decode: rumble peak/settle,
+    /// lightbar, LEDs, adaptive triggers.
+    sony: SonyFeedback,
+}
+
+impl HidMaestroDevice {
+    /// Open a HIDMaestro device for `controller_index` from `profile_json`. The
+    /// device node + sections must already exist (created by the elevated
+    /// helper); this parses the profile and opens the sections to drive them.
+    ///
+    /// Returns `None` if `profile_json` is invalid. `id`/`display_name` follow
+    /// FlexInput's virtual-device id scheme (e.g. `virtual.ds4`).
+    pub fn open(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        profile_json: &str,
+        controller_index: u32,
+    ) -> Option<Self> {
+        let profile = Profile::from_json(profile_json).ok()?;
+        let report_buf = vec![0u8; profile.input_report_size];
+        let input = InputSection::open(controller_index).ok();
+        let output = OutputSection::open(controller_index).ok();
+        Some(HidMaestroDevice {
+            id: id.into(),
+            display_name: display_name.into(),
+            profile,
+            profile_json: profile_json.to_string(),
+            pins: PinState::new(),
+            report_buf,
+            input,
+            output,
+            rumble: (0.0, 0.0),
+            feedback_sequence: 0,
+            helper_instance_id: None,
+            last_rumble_cmd: None,
+            sony: SonyFeedback::default(),
+        })
+    }
+
+    /// Create a HIDMaestro device end-to-end: ask the elevated helper to create
+    /// the device node + `Global\` sections (spawning the helper on first use,
+    /// one UAC), then open the sections here to drive it.
+    ///
+    /// Returns `None` if `profile_json` is invalid. On a helper/creation failure
+    /// the device is returned "disconnected" (no input section) with the error
+    /// logged — adding a device never panics the UI thread.
+    pub fn create(
+        id: impl Into<String>,
+        display_name: impl Into<String>,
+        profile_json: &str,
+        index_hint: u32,
+    ) -> Option<Self> {
+        // open() with the hint first; the real index comes back from the helper
+        // (it allocates a globally-unique one, or reclaims the existing device).
+        let mut dev = Self::open(id, display_name, profile_json, index_hint)?;
+        let device_id = dev.id.clone();
+        match helper::create(&device_id, &dev.profile_json, index_hint) {
+            Ok((instance_id, allocated_index)) => {
+                // Open the sections at the index the helper actually used — NOT
+                // the hint. (Opening the wrong index was the no-input bug: two
+                // devices both guessed index 0 and collided.)
+                dev.input = InputSection::open(allocated_index).ok();
+                dev.output = OutputSection::open(allocated_index).ok();
+                dev.helper_instance_id = Some(instance_id.clone());
+
+                // First-launch readiness: on a fresh create the UMDF driver opens
+                // its side of the section AFTER it binds. The helper now waits for
+                // the HID child to reach the "Started" state before returning (see
+                // orchestrator::wait_for_hid_child_started), so by here the driver
+                // is listening. Prime a neutral frame so the driver's first
+                // observed SeqNo transition is unambiguously ours.
+                if let Some(input) = dev.input.as_mut() {
+                    let state = dev.pins.state();
+                    // Mirror flush(): for the XUSB companion send an empty HID
+                    // Data[] (GIP is the sole source); otherwise encode the report.
+                    let gip = dev
+                        .profile
+                        .requires_xusb_companion
+                        .then(|| gip_from_state(&state));
+                    let data: &[u8] = if gip.is_some() {
+                        dev.report_buf.fill(0);
+                        &dev.report_buf[..]
+                    } else {
+                        encode_report_into(&dev.profile, &state, &mut dev.report_buf);
+                        if dev.profile.report.report_id != 0 {
+                            &dev.report_buf[1..]
+                        } else {
+                            &dev.report_buf[..]
+                        }
+                    };
+                    input.write_frame(data, gip.as_ref());
+                }
+            }
+            Err(e) => {
+                eprintln!("[hidmaestro] create via helper failed for {}: {e}", dev.id);
+            }
+        }
+        Some(dev)
+    }
+
+    /// Publish a raw, pre-built input report to the SHM frame, bypassing the
+    /// gamepad PinState/encode path. For profiles whose reports the gamepad
+    /// model doesn't describe — the virtual keyboard/mouse (see
+    /// `keymouse_hm`). `data` must be `input_report_size` bytes of RID-less
+    /// payload, exactly as the profile descriptor lays it out. No-op while
+    /// disconnected (no input section), matching `flush()`.
+    pub fn write_raw_input(&mut self, data: &[u8]) {
+        if let Some(input) = self.input.as_mut() {
+            input.write_frame(data, None);
+        }
+    }
+
+    /// Which static sink-pin layout to advertise for `profile`. Xbox360/XInput
+    /// uses the XInput pin set (no gyro/touchpad/lightbar); DualSense uses its
+    /// full Sony set, and the Edge that plus its back/Fn buttons; everything
+    /// else falls back to DS4 pins.
+    fn sink_pins_for(&self) -> &'static [SinkPin] {
+        if self.profile.requires_xusb_companion {
+            layouts::XINPUT_SINK_PINS
+        } else if self.profile.id.contains("dualsense-edge") {
+            layouts::DUALSENSE_EDGE_SINK_PINS
+        } else if self.profile.id.contains("dualsense") {
+            layouts::DUALSENSE_SINK_PINS
+        } else {
+            layouts::DS4_SINK_PINS
+        }
+    }
+}
+
+impl crate::VirtualDevice for HidMaestroDevice {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn display_name(&self) -> &str {
+        &self.display_name
+    }
+
+    fn sink_pins(&self) -> &'static [SinkPin] {
+        self.sink_pins_for()
+    }
+
+    fn send(&mut self, pin: &str, value: Signal) {
+        crate::apply_pin(&mut self.pins, pin, value);
+    }
+
+    fn flush(&mut self) {
+        let Some(input) = self.input.as_mut() else {
+            return;
+        };
+        let state = self.pins.state();
+        // For XInput/Xbox360 pads the XUSB companion derives state SOLELY from the
+        // GipData[14] region — and it ALSO reads the HID Data[] for its sibling
+        // node. If we publish a populated HID report there too, the descriptor's
+        // (different) byte layout bleeds into XInput state (symptom: only the first
+        // axis tracks, everything else garbage, stick deflection clipped square).
+        // So for the companion path send an EMPTY Data[] and let GIP be the only
+        // source — exactly what the validated self-test does (`[0u8; N]` report).
+        let gip = self
+            .profile
+            .requires_xusb_companion
+            .then(|| gip_from_state(&state));
+        let data: &[u8] = if gip.is_some() {
+            // Neutral HID payload: zeros. (Length is cosmetic for the companion;
+            // keep it the report size so the sibling node sees a sane frame.)
+            self.report_buf.fill(0);
+            &self.report_buf[..]
+        } else {
+            encode_report_into(&self.profile, &state, &mut self.report_buf);
+            // The SHM frame strips the Report-ID byte (driver re-prepends it).
+            if self.profile.report.report_id != 0 {
+                &self.report_buf[1..]
+            } else {
+                &self.report_buf[..]
+            }
+        };
+        input.write_frame(data, gip.as_ref());
+    }
+
+    fn reset_outputs(&mut self) {
+        self.pins.reset();
+        self.flush();
+    }
+
+    fn is_connected(&self) -> bool {
+        self.input.is_some()
+    }
+
+    fn source_pins(&self) -> &'static [SourcePin] {
+        if self.profile.requires_xusb_companion {
+            // XInput feedback is rumble strong/weak only (no lightbar).
+            layouts::XINPUT_SOURCE_PINS
+        } else if self.profile.id.contains("dualsense") {
+            // DualSense adds player/mic LEDs + both adaptive triggers on top of
+            // the DS4 rumble+lightbar set.
+            layouts::DUALSENSE_SOURCE_PINS
+        } else {
+            layouts::DS4_SOURCE_PINS
+        }
+    }
+
+    fn persist_on_drop(&mut self) {
+        // Forget the helper-created node so Drop won't call helper::destroy:
+        // the node stays alive past app exit and is reclaimed (by device_id)
+        // on next launch. Closing the section handles here is fine — the helper
+        // keeps the node; we reopen on reclaim.
+        self.helper_instance_id = None;
+        self.input = None;
+        self.output = None;
+    }
+
+    fn feedback_sequence(&self) -> u64 { self.feedback_sequence }
+    fn poll_outputs(&mut self) -> Vec<(&'static str, Signal)> {
+        if self.profile.requires_xusb_companion {
+            // XInput (Xbox 360) rumble-in. The driver forwards the game's
+            // vibration packet to the output ring as Source=XINPUT(2).
+            // `classify_rumble_frame` parses it (layout confirmed empirically).
+            //
+            // Rumble is LEVEL-triggered, latched with a TIMEOUT, because the two
+            // APIs signal "stop" differently:
+            //   * A non-zero `Command` latches the level AND refreshes a hold
+            //     timer. WGI re-sends the command ~every 700 ms while active, so
+            //     the timer keeps refreshing → sustained vibration.
+            //   * Steam's legacy path sends an explicit `Command(0,0)` on release
+            //     → we zero immediately.
+            //   * WGI has NO explicit stop: it just CEASES re-sending and reverts
+            //     to the idle heartbeat. `Idle` is therefore ignored here (it must
+            //     not refresh the timer), and a non-zero level that goes
+            //     un-refreshed for `RUMBLE_HOLD` decays to zero — that's how WGI
+            //     "off" is detected.
+            if let Some(output) = self.output.as_mut() {
+                while let Some(frame) = output.try_read() {
+                    match classify_rumble_frame(&frame.data) {
+                        RumbleFrame::Command(s, w) => {
+                            self.feedback_sequence = self.feedback_sequence.wrapping_add(1);
+                            self.rumble = (s, w);
+                            self.last_rumble_cmd =
+                                if s > 0.0 || w > 0.0 { Some(Instant::now()) } else { None };
+                        }
+                        RumbleFrame::Idle | RumbleFrame::Other => {}
+                    }
+                }
+            }
+            // Decay a stale non-zero level to zero once the hold window lapses
+            // with no fresh non-zero command (covers WGI's implicit stop).
+            if let Some(t) = self.last_rumble_cmd {
+                if t.elapsed() >= RUMBLE_HOLD {
+                    self.feedback_sequence = self.feedback_sequence.wrapping_add(1);
+                    self.rumble = (0.0, 0.0);
+                    self.last_rumble_cmd = None;
+                }
+            }
+            return vec![
+                ("rumble_strong", Signal::Float(self.rumble.0)),
+                ("rumble_weak", Signal::Float(self.rumble.1)),
+            ];
+        }
+        // Drain the output ring (frames arrive with the report id stripped) and
+        // fold this tick's output reports into the feedback pins. Only output
+        // reports (Source 0): the v2.0 driver also publishes a feature-read
+        // notice, empty, for every Sony feature report a host reads (Source 3),
+        // and an empty frame would stand as the last output report the LEDs are
+        // decoded from.
+        let mut frames = Vec::new();
+        if let Some(output) = self.output.as_mut() {
+            while let Some(frame) = output.try_read() {
+                if frame.source == OUTPUT_SOURCE_HID_OUTPUT {
+                    self.feedback_sequence = self.feedback_sequence.wrapping_add(1);
+                    frames.push(frame.data);
+                }
+            }
+        }
+        self.sony.poll(&self.profile, &mut self.rumble, frames.iter().map(Vec::as_slice))
+    }
+
+    fn inject_rumble_ping(&mut self, strong: f32, weak: f32) {
+        self.feedback_sequence=self.feedback_sequence.wrapping_add(1);
+        // Set the level directly so the next poll_outputs() reports it. The ping
+        // handler drives this each tick (level while active, 0 when done), so we
+        // must NOT arm the auto-decay timer — that's only for real game commands
+        // whose "stop" is implicit. Clearing last_rumble_cmd also prevents the
+        // companion path's decay from fighting the ping. For an xinput-companion
+        // device this feeds the same `self.rumble` poll_outputs returns; for a
+        // plain-HID (DS4/DS) device it likewise overrides until the next real
+        // frame, which is fine for a momentary ping.
+        self.rumble = (strong, weak);
+        self.last_rumble_cmd = None;
+    }
+}
+
+impl Drop for HidMaestroDevice {
+    fn drop(&mut self) {
+        // If this device was created via the helper, ask it to tear the node
+        // down. Drop the section handles first so the helper's removal isn't
+        // blocked by our mapped views.
+        if let Some(id) = self.helper_instance_id.take() {
+            self.input = None;
+            self.output = None;
+            if let Err(e) = helper::destroy(&id) {
+                eprintln!("[hidmaestro] destroy via helper failed for {id}: {e}");
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "upstream-output-tests"))]
+mod tests {
+    use super::*;
+    use crate::sony_feedback::{
+        decode_player_led, decode_trigger_effect, DsFeedback, Trig, DS_FLAG0_RIGHT_TRIGGER,
+    };
+    use crate::VirtualDevice;
+    use flexinput_core::Signal;
+    use flexinput_hidmaestro::profile::presets::DUALSHOCK_4_V2_JSON;
+    use glam::Vec2;
+
+    fn ds4_device() -> HidMaestroDevice {
+        // controller index that almost certainly has no live section in CI →
+        // input/output open as None; we test the pin→encode path, not the SHM.
+        // open() (not create()) so no helper is spawned.
+        HidMaestroDevice::open("virtual.ds4", "Virtual DualShock 4", DUALSHOCK_4_V2_JSON, 250)
+            .expect("valid DS4 profile")
+    }
+
+    #[test]
+    fn disconnected_when_no_section() {
+        let dev = ds4_device();
+        assert!(!dev.is_connected(), "no live section → disconnected");
+    }
+
+    #[test]
+    fn advertises_ds4_sink_pins() {
+        let dev = ds4_device();
+        let pins = dev.sink_pins();
+        assert!(pins.iter().any(|p| p.id == "left_stick"));
+        assert!(pins.iter().any(|p| p.id == "btn_south"));
+    }
+
+    fn dualsense_device() -> HidMaestroDevice {
+        HidMaestroDevice::open(
+            "virtual.dualsense", "Virtual DualSense",
+            flexinput_hidmaestro::profile::presets::DUALSENSE_JSON, 251,
+        ).expect("valid DualSense profile")
+    }
+
+    /// An output frame as the ring hands it over (report id stripped), with the
+    /// flag byte at RID-inclusive `flag_at` and an rgb lightbar at `rgb_at`.
+    fn out_frame(len: usize, flag_at: usize, flag: u8, rgb_at: usize, rgb: [u8; 3]) -> Vec<u8> {
+        let mut d = vec![0u8; len];
+        d[flag_at - 1] = flag;
+        d[rgb_at - 1..rgb_at + 2].copy_from_slice(&rgb);
+        d
+    }
+
+    fn lightbar_pins(fb: &DsFeedback) -> Vec<&'static str> {
+        fb.as_pins().into_iter().map(|(p, _)| p).filter(|p| p.starts_with("lightbar")).collect()
+    }
+
+    // A game that never sets the lightbar must leave it unset — no pins — so the
+    // physical pad keeps its default colour; a rumble-only report must not
+    // blank a colour already set.
+    #[test]
+    fn ds4_lightbar_follows_its_valid_flag() {
+        let dev = ds4_device();
+        let mut fb = DsFeedback::default();
+        let rumble_only = out_frame(31, 1, 0x01, 6, [0, 0, 0]);
+        fb.update_lightbar(&dev.profile, &rumble_only);
+        assert!(lightbar_pins(&fb).is_empty(), "no lightbar until the game sets one");
+        fb.update_lightbar(&dev.profile, &out_frame(31, 1, 0x02, 6, [255, 0, 128]));
+        assert_eq!(fb.lightbar, Some((1.0, 0.0, 128.0 / 255.0)));
+        fb.update_lightbar(&dev.profile, &rumble_only);
+        assert_eq!(fb.lightbar, Some((1.0, 0.0, 128.0 / 255.0)), "rumble-only frame keeps it");
+        assert_eq!(lightbar_pins(&fb), ["lightbar_r", "lightbar_g", "lightbar_b"]);
+    }
+
+    #[test]
+    fn dualsense_lightbar_follows_valid_flag1() {
+        let dev = dualsense_device();
+        let mut fb = DsFeedback::default();
+        fb.update_lightbar(&dev.profile, &out_frame(47, 2, 0x00, 45, [9, 9, 9]));
+        assert_eq!(fb.lightbar, None);
+        fb.update_lightbar(&dev.profile, &out_frame(47, 2, 0x04, 45, [0, 255, 0]));
+        assert_eq!(fb.lightbar, Some((0.0, 1.0, 0.0)));
+    }
+
+    // The DualSense virtual exposes LED + adaptive-trigger feedback source pins
+    // (so a game driving the virtual can route them to a physical pad). DS4 does
+    // not (no such hardware).
+    #[test]
+    fn dualsense_exposes_led_and_trigger_source_pins() {
+        let ds = dualsense_device();
+        let ids: Vec<&str> = ds.source_pins().iter().map(|p| p.id).collect();
+        for want in ["player_led", "mic_led", "trigger_r_mode", "trigger_l_freq", "lightbar_r"] {
+            assert!(ids.contains(&want), "DualSense source pins missing {want}");
+        }
+        // DS4 stays rumble + lightbar only.
+        let ds4_ids: Vec<&str> = ds4_device().source_pins().iter().map(|p| p.id).collect();
+        assert!(!ds4_ids.contains(&"player_led"), "DS4 must not expose player_led");
+        assert!(!ds4_ids.contains(&"trigger_r_mode"), "DS4 must not expose triggers");
+    }
+
+    // The Edge sinks everything the DualSense does plus its back/Fn buttons,
+    // and feeds back the same set, read from its longer (63-byte) report 0x02.
+    #[test]
+    fn edge_adds_back_and_fn_sinks_and_keeps_dualsense_feedback() {
+        let edge = HidMaestroDevice::open(
+            "virtual.hm.dualsense_edge", "Virtual DualSense Edge",
+            flexinput_hidmaestro::profile::presets::DUALSENSE_EDGE_JSON, 251,
+        ).expect("valid Edge profile");
+        let ds = dualsense_device();
+        let sinks: Vec<&str> = edge.sink_pins().iter().map(|p| p.id).collect();
+        let ds_sinks: Vec<&str> = ds.sink_pins().iter().map(|p| p.id).collect();
+        let paddles = ["btn_paddle_l1", "btn_paddle_r1", "btn_paddle_l2", "btn_paddle_r2"];
+        for p in paddles {
+            assert!(sinks.contains(&p), "Edge sink pins missing {p}");
+            assert!(!ds_sinks.contains(&p), "plain DualSense must not offer {p}");
+        }
+        assert!(ds_sinks.iter().all(|p| sinks.contains(p)), "Edge keeps every DualSense sink");
+        assert_eq!(sinks.last(), Some(&"automap_in"), "Auto-Map port stays last");
+        let ids = |d: &HidMaestroDevice| d.source_pins().iter().map(|p| p.id).collect::<Vec<_>>();
+        assert_eq!(ids(&edge), ids(&ds));
+
+        let mut fb = DsFeedback::default();
+        fb.update_lightbar(&edge.profile, &out_frame(63, 2, 0x04, 45, [0, 0, 255]));
+        assert_eq!(fb.lightbar, Some((0.0, 0.0, 1.0)));
+    }
+
+    // A game that never sets a trigger's valid-flag bit publishes no trigger
+    // pins; one that does publishes them, and a later report without the bit
+    // (rumble only) leaves the effect as it was.
+    #[test]
+    fn trigger_effects_follow_the_valid_flags() {
+        let has = |ds: &HidMaestroDevice, pin: &str| ds.sony.fb.as_pins().iter().any(|(p, _)| *p == pin);
+        let mut ds = dualsense_device();
+        // USB report 0x02 without its id: flag0 @0, right trigger block @10.
+        let mut frame = vec![0u8; 47];
+        ds.sony.fb.update_triggers(&ds.profile.extended, &frame);
+        assert!(!has(&ds, "trigger_r_mode") && !has(&ds, "trigger_l_mode"));
+
+        frame[0] = DS_FLAG0_RIGHT_TRIGGER;
+        frame[10] = 0x21; // feedback (resistance)
+        frame[11] = 0x01;
+        frame[13] = 0x07;
+        ds.sony.fb.update_triggers(&ds.profile.extended, &frame);
+        let r = ds.sony.fb.trig_r.expect("right trigger set");
+        assert_ne!(r.mode, 0.0);
+        assert!(!has(&ds, "trigger_l_mode"), "left trigger never set");
+
+        let rumble_only = vec![0u8; 47];
+        ds.sony.fb.update_triggers(&ds.profile.extended, &rumble_only);
+        assert_eq!(ds.sony.fb.trig_r, Some(r), "a report without the flag keeps the effect");
+    }
+
+    #[test]
+    fn dualsense_parses_output_feedback_offsets() {
+        let ds = dualsense_device();
+        let e = &ds.profile.extended;
+        // From the DualSense output report: lightbar@45, playerIndicator@44,
+        // muteLed@9, trigger effects @11 / @22.
+        assert_eq!(e.out_lightbar_r, Some(45));
+        assert_eq!(e.out_player_led, Some(44));
+        assert_eq!(e.out_mic_led, Some(9));
+        assert_eq!(e.out_trigger_r, Some(11));
+        assert_eq!(e.out_trigger_l, Some(22));
+    }
+
+    // Replicate the physical-side `encode_trigger_effect` bit-packing exactly so
+    // `decode_trigger_effect` is verified against the real wire format. (Encoder
+    // lives in flexinput-devices, so we re-encode here rather than cross-call.)
+    fn encode_feedback(start: u8, strength: u8) -> [u8; 11] {
+        let mut p = [0u8; 11];
+        p[0] = 0x21;
+        let s = start.min(9) as u16;
+        let f = strength.min(7) as u32;
+        let active: u16 = if s < 10 { ((1u16 << (10 - s)) - 1) << s } else { 0 };
+        let mut force = 0u32;
+        for z in s..10 { force |= f << (z * 3); }
+        p[1] = (active & 0xFF) as u8;
+        p[2] = ((active >> 8) & 0xFF) as u8;
+        p[3] = (force & 0xFF) as u8;
+        p[4] = ((force >> 8) & 0xFF) as u8;
+        p[5] = ((force >> 16) & 0xFF) as u8;
+        p[6] = ((force >> 24) & 0xFF) as u8;
+        p
+    }
+
+    #[test]
+    fn decode_trigger_feedback_recovers_params() {
+        // Feedback mode, start zone 3, strength 5.
+        let block = encode_feedback(3, 5);
+        let t = decode_trigger_effect(&block);
+        assert!((t.mode - 1.0 / 3.0).abs() < 0.01, "mode = Feedback");
+        assert!((t.start - 3.0 / 9.0).abs() < 0.02, "start zone 3, got {}", t.start);
+        assert!((t.strength - 5.0 / 7.0).abs() < 0.02, "strength 5, got {}", t.strength);
+        assert_eq!(t.freq, 0.0, "feedback has no freq");
+        // Off block decodes to all-zero.
+        assert_eq!(decode_trigger_effect(&[0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]), Trig::default());
+    }
+
+    /// The three two-force effects, from blocks laid out by hand the way Nielk1's
+    /// `TriggerEffectGenerator` writes them (which is what games and JSM send),
+    /// not by our own encoder — so a shared mistake can't pass both ways.
+    #[test]
+    fn decode_trigger_two_force_effects_from_reference_blocks() {
+        use flexinput_core::automap::TriggerMode;
+        let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+        // Bow(start 1, end 6, strength 5, snapForce 8): zones 0x42, forces packed
+        // (5-1) | (8-1)<<3 = 0x3C.
+        let t = decode_trigger_effect(&[0x22, 0x42, 0x00, 0x3C, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(TriggerMode::from_pin(t.mode), TriggerMode::Bow);
+        assert!(near(t.start, 1.0 / 9.0) && near(t.end, 6.0 / 9.0), "{t:?}");
+        assert!(near(t.strength, 4.0 / 7.0) && near(t.strength2, 1.0), "{t:?}");
+        // Galloping(start 2, end 8, firstFoot 3, secondFoot 6, freq 20): zones
+        // 0x104, second foot LOW and first above it: 6 | 3<<3 = 0x1E.
+        let t = decode_trigger_effect(&[0x23, 0x04, 0x01, 0x1E, 20, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(TriggerMode::from_pin(t.mode), TriggerMode::Galloping);
+        assert!(near(t.start, 2.0 / 9.0) && near(t.end, 8.0 / 9.0), "{t:?}");
+        assert!(near(t.strength, 3.0 / 7.0) && near(t.strength2, 6.0 / 7.0), "{t:?}");
+        assert!(near(t.freq, 20.0 / 255.0), "{t:?}");
+        // Machine(start 1, end 9, A 2, B 5, freq 30, period 12): zones 0x202,
+        // amplitudes 2 | 5<<3 = 0x2A.
+        let t = decode_trigger_effect(&[0x27, 0x02, 0x02, 0x2A, 30, 12, 0, 0, 0, 0, 0]);
+        assert_eq!(TriggerMode::from_pin(t.mode), TriggerMode::Machine);
+        assert!(near(t.start, 1.0 / 9.0) && near(t.end, 1.0), "{t:?}");
+        assert!(near(t.strength, 2.0 / 7.0) && near(t.strength2, 5.0 / 7.0), "{t:?}");
+        assert!(near(t.freq, 30.0 / 255.0) && near(t.period, 12.0 / 255.0), "{t:?}");
+    }
+
+    #[test]
+    fn decode_player_led_known_patterns() {
+        assert_eq!(decode_player_led(0x00), 0.0);
+        assert_eq!(decode_player_led(0x04), 0.25); // P1
+        assert_eq!(decode_player_led(0x1B), 1.0);  // P4
+    }
+
+    #[test]
+    fn pin_writes_drive_the_encoder() {
+        // Exercise send() → PinState → encoder, independent of the SHM section.
+        let mut dev = ds4_device();
+        dev.send("left_stick", Signal::Vec2(Vec2::new(1.0, 0.0))); // full right
+        dev.send("btn_south", Signal::Bool(true));
+
+        let state = dev.pins.state();
+        let mut buf = vec![0u8; dev.profile.input_report_size];
+        encode_report_into(&dev.profile, &state, &mut buf);
+        // X (left_stick_x = +1 → 0xFF) at byte 1 (after RID byte 0x01).
+        assert_eq!(buf[0], 0x01, "report id");
+        assert_eq!(buf[1], 255, "left_stick full right → X max");
+        // Cross (btn_south) → DS4 buttonMap[0]=1 → Btn2 at bit 37 → byte 5 bit 5.
+        assert_eq!(buf[5] & (1 << 5), 1 << 5, "btn_south sets Cross");
+    }
+
+    #[test]
+    fn flush_is_noop_when_disconnected() {
+        // Must not panic when there is no input section.
+        let mut dev = ds4_device();
+        dev.send("left_stick", Signal::Vec2(Vec2::new(0.5, -0.5)));
+        dev.flush();
+        dev.reset_outputs();
+    }
+
+    // ── XInput rumble decode (layout verified live 2026-06-20) ────────────────
+
+    fn cmd(data: &[u8]) -> Option<(f32, f32)> {
+        match classify_rumble_frame(data) {
+            RumbleFrame::Command(s, w) => Some((s, w)),
+            _ => None,
+        }
+    }
+    fn is_idle(data: &[u8]) -> bool {
+        matches!(classify_rumble_frame(data), RumbleFrame::Idle)
+    }
+    fn is_other(data: &[u8]) -> bool {
+        matches!(classify_rumble_frame(data), RumbleFrame::Other)
+    }
+
+    #[test]
+    fn xinput_5byte_frame_is_command() {
+        // 5-byte legacy XInput/XInputSetState (Steam) path: [00 00 L R 02].
+        // Observed live for (L,R) = (0xFFFF,0), (0,0xFFFF), (0x1111,0x8888).
+        assert_eq!(cmd(&[0, 0, 255, 0, 2]), Some((1.0, 0.0)));
+        assert_eq!(cmd(&[0, 0, 0, 255, 2]), Some((0.0, 1.0)));
+        let (s, w) = cmd(&[0, 0, 0x11, 0x88, 2]).unwrap();
+        assert!((s - 17.0 / 255.0).abs() < 1e-6);
+        assert!((w - 136.0 / 255.0).abs() < 1e-6);
+        // A 5-byte all-zero frame IS a real stop command (no heartbeat on this path).
+        assert_eq!(cmd(&[0, 0, 0, 0, 2]), Some((0.0, 0.0)));
+    }
+
+    #[test]
+    fn wgi_9byte_command_vs_idle_heartbeat() {
+        // Real WGI command: [00 XX L R 02 01 01 00 00], motors at [2]/[3], data[1]
+        // is a command marker (≠0), NOT a motor. Observed `00 67 FF FF ...`.
+        assert_eq!(cmd(&[0, 0x67, 0xFF, 0xFF, 2, 1, 1, 0, 0]), Some((1.0, 1.0)));
+        // Explicit WGI stop (data[1]≠0, motors 0) IS a command (clears rumble).
+        assert_eq!(cmd(&[0, 0xF7, 0, 0, 2, 1, 1, 0, 0]), Some((0.0, 0.0)));
+        // Idle keep-alive heartbeat (data[1]==0, motors 0): IGNORED, not a stop.
+        assert!(is_idle(&[0, 0, 0, 0, 2, 1, 1, 0, 0]));
+    }
+
+    #[test]
+    fn rejects_non_vibration_frames() {
+        // Gate is the 0x02 marker at data[4]. An LED/other frame (`…01` marker)
+        // and malformed/short frames are Other (ignored).
+        assert!(is_other(&[0, 6, 0, 0, 1])); // marker 0x01
+        assert!(is_other(&[0, 0, 255])); // too short
+        assert!(is_other(&[]));
+    }
+}
+
+#[cfg(test)]
+mod offline_feedback_tests {
+    use super::*;
+    use crate::VirtualDevice;
+    #[test]
+    fn original_rumble_ping_is_fresh_without_opening_any_shared_section() {
+        let json=flexinput_hidmaestro::profile::presets::XBOX360_JSON;
+        let profile=Profile::from_json(json).unwrap();
+        let mut device=HidMaestroDevice{id:"offline".into(),display_name:"offline".into(),report_buf:vec![0;profile.input_report_size],profile,profile_json:json.into(),pins:PinState::new(),input:None,output:None,rumble:(0.,0.),feedback_sequence:0,last_rumble_cmd:None,helper_instance_id:None,sony:SonyFeedback::default()};
+        assert!(!device.is_connected());device.inject_rumble_ping(0.5,0.25);let first=device.poll_outputs();assert_eq!(device.feedback_sequence(),1);
+        device.inject_rumble_ping(0.5,0.25);assert_eq!(device.poll_outputs(),first);assert_eq!(device.feedback_sequence(),2);
+        device.inject_rumble_ping(0.,0.);assert_eq!(device.poll_outputs()[0].1.as_float(),0.);assert_eq!(device.feedback_sequence(),3);
+    }
+}

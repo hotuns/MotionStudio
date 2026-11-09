@@ -1,0 +1,26 @@
+.profileCard { display: flex; flex-direction: column; gap: 20px; }
+.profileLibrary { display: flex; flex-direction: column; gap: 18px; }
+.profileLibraryHeader { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.profileLibraryHeader h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.profileLibraryHeader p { margin: 7px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
+.profileLibraryLoading { font-size: 12px; color: var(--text-muted); }
+.profileLibraryActionsRow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 18px; border-bottom: 1px solid var(--border-1); }
+.profileLibraryActionsRow > button:last-child { margin-left: auto; }
+.profileLibraryActionsRow button { font-size: 12px; }
+.profileSearch { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border-1); border-radius: 7px; padding: 9px 12px; background: var(--bg-input); color: var(--text-muted); }
+.profileSearch input { flex: 1; width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text-strong); font-size: 12px; }
+.profileSearch span { font-size: 11px; color: var(--text-muted); }
+.profileSearch:focus-within { border-color: var(--accent); }
+.profileLibraryList { display: flex; flex-direction: column; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.profileLibraryItem { display: flex; justify-content: space-between; align-items: center; gap: 15px; padding: 17px; border: 1px solid var(--border-1); border-radius: 8px; background: var(--bg-2); }
+.profileLibraryItemActive { border-color: color-mix(in srgb, var(--accent) 35%, var(--border-1)); background: color-mix(in srgb, var(--accent) 3%, var(--bg-2)); }
+.profileLibraryName { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+.profileIcon { color: var(--text-muted); display: flex; }.profileLibraryItemActive .profileIcon { color: var(--accent); }
+.profileNameText { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
+.profileLibraryName input { min-width: 60px; width: 240px; max-width: 100%; padding: 7px 10px; color: var(--text-strong); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 5px; font-size: 12px; }
+.profileLibraryActiveBadge { color: var(--accent); font-size: 11px; white-space: nowrap; border-radius: 4px; background: color-mix(in srgb, var(--accent) 9%, transparent); padding: 3px 7px; }
+.profileLibraryButtons { display: flex; flex-wrap: wrap; gap: 7px; }.profileLibraryButtons button { font-size: 12px; padding: 6px 10px; }.profileLibraryButtons :global(.danger-btn) { background: transparent; border-color: transparent; color: var(--text-muted); }.profileLibraryButtons :global(.danger-btn:hover) { color: var(--danger-text); background: var(--danger-bg); }
+.profileLibraryEmpty { padding: 30px; text-align: center; border: 1px dashed var(--border-1); color: var(--text-muted); font-size: 12px; border-radius: 8px; margin: 0; }
+.profileFlags { display: flex; align-items: center; }.profileWarning, .profileNotApplied { color: var(--text-muted); font-size: 12px; }
+@media (max-width: 1000px) { .profileLibraryItem { flex-wrap: wrap; }.profileLibraryButtons { margin-left: auto; } }
+@media (max-width: 600px) { .profileLibraryName { flex-wrap: wrap; }.profileLibraryActionsRow > button:last-child { margin-left: 0; } }

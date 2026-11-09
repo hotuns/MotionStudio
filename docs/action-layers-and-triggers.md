@@ -1,0 +1,84 @@
+# 配置层、触发方式与运行中录入（0.9.0）
+
+## 按住配置层
+
+配置层属于当前游戏配置，适合“按住 LB 开镜时降低体感灵敏度”“按住某键把一组动作变成另一组动作”等用途。它采用 Steam Input action set layer 的继承思路，不是专门的开镜功能。按住启用输入时叠加覆盖，松开恢复；既有全局快捷键的整份配置切换仍独立工作。
+
+操作示例：
+
+1. 在顶部当前配置右侧的「编辑层」选择「基础层」。在「游戏配置 → 动作映射」把左肩键映射到鼠标右键，在「体感」设置平时的灵敏度。
+2. 点击「编辑层」旁的齿轮，打开「管理配置层」，点击「添加配置层」，命名为“精确瞄准”，启用输入选择 LB／左肩键。点击「完成」返回编辑。
+3. 保持顶栏正在编辑此层，进入「游戏配置 → 体感」，把灵敏度调低。基础层的值保持原样。各页签使用同一编辑层，管理窗口内可以调整优先级、恢复继承或删除层。
+4. 保存并启用映射。按住 LB 时，鼠标右键保持按下，同时使用此层的灵敏度；松开后回到基础值。
+
+修改层时只存储实际改变的字段。未覆盖的体感、摇杆参数及动作继续继承基础层；以后修改基础层，这些项目也会跟随。编辑器选择某层只是编辑覆盖项，不会强制让运行中的层生效。足够宽的顶栏在映射当前配置时显示「运行：」指示，管理窗口也显示实际运行层。切换游戏配置时重置为新配置的基础层。
+
+管理窗口的「完成」与动作窗口的「完成」会更新当前草稿；点击工作台底部「保存配置」才持久保存。编辑当前运行配置时保存会应用修改；需要改用正在编辑的其他配置时，点击「应用修改」。
+
+- 最多 8 个按住层，启用输入支持最多 4 个成员的组合。扳机与摇杆方向可设置触发阈值和释放回差。
+- 多层同时按住时按列表顺序叠加，后面的优先。可用提高／降低优先级调整。保存时校验全部可能的叠加组合，避免只在某种组合下出现无效参数。
+- 层可以覆盖体感、摇杆鼠标、死区、摇杆区域和防回弹，并添加、替换或禁用键鼠动作。层的启用依据实体按键、轴和基础层的摇杆区域；层修改区域或滤波不会反过来改变自己的启用条件。
+- 此层添加某个手柄输入的动作，会替换较低层中相同输入的全部触发方式；其余输入继续继承。组合成员顺序不影响匹配。例如 `LB+A` 和 `A+LB` 是同一输入。
+- 删除覆盖动作即恢复继承；需要完全禁用该输入的继承键鼠动作时，用「在此层禁用」。这里禁用的是自定义键鼠动作，不会取消虚拟 Xbox／DS4 的标准自动映射。
+- 「恢复继承：体感」等按钮删除对应类别的覆盖。可先修改基础层再切回此层确认继承效果。
+- 输出设备属于基础层。按住层不会创建、销毁或切换虚拟手柄，不会改变 HidHide 会话。
+
+切层保留输入会话、采样时钟、未修改动作的长按进度与滤波状态，并由输出分发器比较按住集合。示例中的鼠标右键不会因灵敏度变化先松开再按下。新覆盖的边沿动作不会因为切层时已按住输入而补触发滚轮、双击等操作；松开再按才触发。
+
+可读取并分享的完整示例在 `examples/hold-layer.toml`。参考 [Steam Input action set layers](https://partner.steamgames.com/doc/features/steam_controller/action_set_layers?l=english)。
+
+## 动作编辑器
+
+「游戏配置 → 动作映射 → 添加动作」打开双栏编辑器，交互参考 JSM Studio 的按键快速选择与完整编辑方式：
+
+- 左侧点击大录入区域读取手柄输入，或直接点击常用手柄按钮；展开「完整输入与组合设置」可使用全部输入选项。模拟扳机或摇杆方向会显示触发阈值。
+- 六种触发方式直接点击选择，长按、双击和边沿触发按所需设置时间；同一方式再次点击不会重置时间。可选按住连发。
+- 右侧点击大录入区域读取键鼠，或使用键盘布局、「鼠标」「滚轮」分类选择。鼠标包含左右中键与两个侧键，滚轮包含四个方向及连续滚动间隔。
+- Ctrl／Alt／Shift 可以独立叠加；需要多个普通键或鼠标操作时开启「组合输出」。输入组合和输出组合各最多四个成员，已选成员以标签显示，可逐项移除。滚轮组合最多包含一个方向，选择另一方向会替换原方向。
+- 新动作的输出从空白开始，必须明确选择后才能完成；只选择 Ctrl 等修饰键不会自动附加空格。
+- 「完整输出与组合设置」保留全部按键与组合选项。小窗口通过内容区滚动操作，底部取消／完成始终可达；手柄 LB／RB 可切换输入、输出与底部操作区域。
+
+窗口显示正在编辑的层，动作会保存到该层的覆盖中。切换编辑层不会激活对应运行层。
+
+## 六种动作触发方式
+
+在动作设置中选择「触发方式」。组合输入也能使用这些方式，计时从整个组合成立时开始。
+
+| 方式 | 行为 | 适合的用途 |
+|---|---|---|
+| 按住 | 输入成立时立即按下，松开时释放 | 移动、开火、开镜、奔跑 |
+| 短按 | 在最长时间内松开后确认，并输出这次按住的时长 | 与同输入的长按区分 |
+| 长按 | 超过设定时间后生效；可保持到松开，或仅触发一次短脉冲 | 长按交互、备用动作 |
+| 双击 | 第一次按下后的时间窗内，再次按下时生效；保持到第二次松开 | 双击切换或快捷动作 |
+| 按下时触发 | 按下边沿输出一次，持续设定时间 | 固定时长点按 |
+| 松开时触发 | 松开边沿输出一次，持续设定时间 | 释放后确认 |
+
+时间范围为 10–5000 ms。同一输入可以添加多个触发方式。例如 X 短按 300 ms 输出 R、X 长按 300 ms 输出 E。要区分这两个动作时，不再给 X 添加立即生效的普通按住动作，否则普通动作仍会先执行。不同触发方式不会自动撤销已经发出的输入。
+
+「按住连发」使用单独的 20–2000 ms 周期，先判断触发方式，再连发；因此长按动作要达到长按时间后才开始连发。滚轮还有独立的「按住连续滚动」，用于控制每格滚动间隔，通常选择其中一种重复方式即可。
+
+长按、双击、短按、边沿脉冲与连发直接使用固定 FlexInput 的状态机。双击的时间窗只限制两次按下之间的识别，第二次已按住后不会因时间窗到期突然释放。参考 [Steam Input activators](https://partner.steamgames.com/doc/features/steam_controller/activators?l=english&language=english)。
+
+## 摇杆外圈与内圈
+
+「游戏配置 → 摇杆」可调左右摇杆外圈阈值及回差。默认外圈半径 0.85、回差 0.05，推到外圈触发，回到约 0.80 内释放，减少边界附近反复开关。
+
+要让左摇杆推到外圈时触发奔跑，在「动作映射」添加动作，将手柄输入选为「左摇杆外圈」，键盘输出选为 Shift。内圈和外圈按半径判定，斜推也生效。内圈排除中心死区，摇杆回中不会误触发。
+
+防回弹复用 FlexInput `StickRebound`，默认关闭，可选 10–150 ms。用于抑制摇杆快速回中后短暂越过另一侧造成的误方向；开启初始值为 40 ms。过滤到期即使轴数值没有再次变化，也会恢复正常判断。它会影响摇杆手感，先用默认关闭状态比较，再决定是否启用。
+
+## 映射运行中录入
+
+运行中点击「录入手柄」或「录入键鼠」时，只暂停映射输出，保留 SDL 输入、输出设备及 HidHide 会话。已按住的输出先释放，录入的按键不会继续发送给游戏；光标和全局快捷键自动切换同时暂停。
+
+完成、取消、失焦或录入租约超时后，界面会提示松开手柄按键、松开扳机并让摇杆回中，再自动恢复原映射。不会因为一次录入进入“断开再连接”。5 秒租约由界面每秒续期，WebView 中断也能退出录入。F12 仍会完整停止映射。
+
+录入时禁止保存，避免尚未完成的录入与热更新交错；外部配置更新延后应用。恢复后先保存修改，才把新绑定应用到运行中的配置。
+
+## Interface language
+
+Use the **Interface language** selector in the lower-left sidebar, beside the theme button, and choose **English** or **简体中文**. It remains visible while the navigation scrolls. The change applies immediately, preserves unsaved edits and is saved locally. Profile names, action names, layer names, binding identifiers and exported TOML are user data and remain unchanged. Controller navigation, search, accessibility labels and native profile-switch notifications follow the selected language.
+
+In English, use **Edit layer** beside the current profile in the top bar. Its settings button opens **Manage action layers**. Add a hold layer, set its activation input, then edit gyro or stick settings while that layer is selected. Unchanged fields inherit the base profile. Selecting an editing layer does not activate it in the running mapping. Use **Activation type** in action settings for hold, short press, long press, double press, press-edge and release-edge actions. The editor also offers direct controller buttons, keyboard keys, mouse and scroll categories, removable chord members and full settings.
+
+Application messages are translated. Operating-system errors, third-party diagnostics and text written by users may retain their original language.

@@ -1,0 +1,610 @@
+//! Controller profile model — the subset of HIDMaestro's profile JSON that the
+//! preset backends need.
+//!
+//! A profile JSON (see `crates/hidmaestro/profiles/*.json`, vendored from
+//! HIDMaestro, MIT) carries everything required to deploy and drive a virtual
+//! device: VID/PID, the raw HID **report descriptor** (hex), the input report
+//! size, and the axis/button maps. Per the Phase-1 finding, the descriptor is
+//! *data we carry verbatim*, not something we generate — so this module loads
+//! it, parses it with [`crate::descriptor`], and exposes a usage-addressed
+//! field set for the preset encoders.
+//!
+//! The fiddly semantic-axis *resolution* heuristics are intentionally not ported
+//! yet; presets address fields by HID usage directly via [`Profile::field`].
+
+use serde::Deserialize;
+
+use crate::descriptor::{parse_descriptor, InputReport};
+
+/// Raw deserialization shape of a HIDMaestro profile JSON (subset of fields).
+#[derive(Debug, Deserialize)]
+struct RawProfile {
+    id: String,
+    name: String,
+    /// VID/PID are JSON strings like "0x054C".
+    vid: String,
+    pid: String,
+    #[serde(rename = "inputReportSize")]
+    input_report_size: Option<usize>,
+    #[serde(rename = "productString")]
+    product_string: Option<String>,
+    #[serde(rename = "deviceDescription")]
+    device_description: Option<String>,
+    #[serde(rename = "versionNumber")]
+    version_number: Option<u32>,
+    /// HID report descriptor as a hex string.
+    descriptor: String,
+    /// Usage (hex string, e.g. "0x32") → semantic role (e.g. "rightStickX").
+    #[serde(rename = "axisMap")]
+    axis_map: Option<std::collections::HashMap<String, String>>,
+    /// HMButton bit index → descriptor button index (1-based in the descriptor).
+    #[serde(rename = "buttonMap")]
+    button_map: Option<Vec<i32>>,
+    /// The real device's full input-report layout (byte-addressed). Carries the
+    /// gyro/accel/touchpad regions the HID *descriptor* exposes only as opaque
+    /// vendor blobs, so the encoder can drive IMU + neutralize the touchpad.
+    #[serde(rename = "extendedReport")]
+    extended_report: Option<RawExtendedReport>,
+    /// The real device's output report layout — used to locate the rumble motor
+    /// bytes (which differ between DS4 and DualSense) for feedback decode.
+    #[serde(rename = "extendedOutputReport")]
+    extended_output_report: Option<RawExtendedReport>,
+    /// True for Xbox360/XInput profiles that need an XUSB companion devnode
+    /// (created alongside the HID node so `xinput`/Steam discover the pad).
+    #[serde(rename = "requiresXusbCompanion")]
+    requires_xusb_companion: Option<bool>,
+    /// HIDMaestro driver `FunctionMode`: 0 = plain HID, 1 = XUSB/XInput. Defaults
+    /// to 1 when `requiresXusbCompanion`, else 0. An explicit value overrides
+    /// (lets us test the mode independently of companion creation).
+    #[serde(rename = "functionMode")]
+    function_mode: Option<u32>,
+    /// Create the node in its own device container, like a plugged-in USB device,
+    /// rather than the PC's (keyboard, mouse). See `create_own_container_node`.
+    #[serde(rename = "ownContainer")]
+    own_container: Option<bool>,
+    /// Fixed on-wire bytes laid over every built input report (byte 0 is the
+    /// report ID). The DualSense Edge's active-profile byte lives here.
+    #[serde(rename = "inputDefaults")]
+    input_defaults: Option<Vec<RawInputDefault>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawInputDefault {
+    byte: usize,
+    value: u8,
+}
+
+/// Raw `extendedReport` shape (subset). Byte offsets are 1-based in the JSON
+/// (byte 0 is the report ID), matching the on-wire report including the RID.
+#[derive(Debug, Deserialize)]
+struct RawExtendedReport {
+    fields: Vec<RawExtField>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawExtField {
+    byte: Option<usize>,
+    /// Range form, e.g. "45-47" for an rgb24 lightbar. We only need its start.
+    bytes: Option<String>,
+    #[serde(rename = "type")]
+    ty: Option<String>,
+    semantic: Option<String>,
+    /// Bit range within `byte`, e.g. "4-7". A `button-mask` lists its buttons
+    /// from the range's first bit (bit 0 when absent).
+    bits: Option<String>,
+    /// A `button-mask`'s button names in bit order; "_" marks an unused bit.
+    buttons: Option<Vec<String>>,
+}
+
+impl RawExtField {
+    /// The field's starting byte offset, from either `byte` (scalar) or the start
+    /// of a `bytes:"lo-hi"` range.
+    fn start_byte(&self) -> Option<usize> {
+        if let Some(b) = self.byte {
+            return Some(b);
+        }
+        let r = self.bytes.as_deref()?;
+        let lo = r.split('-').next()?.trim();
+        lo.parse().ok()
+    }
+
+    /// The first bit of the field's `bits` range, or 0.
+    fn start_bit(&self) -> u8 {
+        self.bits
+            .as_deref()
+            .and_then(|r| r.split('-').next())
+            .and_then(|lo| lo.trim().parse().ok())
+            .unwrap_or(0)
+    }
+}
+
+/// Button bit ([`crate::encode::button`]) for a `button-mask` name that only
+/// the byte-addressed layout can place: the DualSense Edge's back and Fn
+/// buttons, which sit in the descriptor's vendor-defined bits rather than its
+/// Button page. Names the descriptor's buttons already carry return `None`.
+fn extended_only_button(name: &str) -> Option<u32> {
+    use crate::encode::button;
+    Some(match name {
+        "LeftPaddle" => button::PADDLE_L1,
+        "RightPaddle" => button::PADDLE_R1,
+        "LeftPaddle2" => button::PADDLE_L2,
+        "RightPaddle2" => button::PADDLE_R2,
+        _ => return None,
+    })
+}
+
+/// Byte offsets (into the on-wire report, RID included at byte 0) for the IMU
+/// and touchpad regions the descriptor doesn't expose as drivable fields.
+/// A field the profile doesn't declare is `None`; offsets address the low byte
+/// of each little-endian int16.
+#[derive(Debug, Clone, Default)]
+pub struct ExtendedLayout {
+    pub gyro_pitch: Option<usize>,
+    pub gyro_yaw: Option<usize>,
+    pub gyro_roll: Option<usize>,
+    pub accel_x: Option<usize>,
+    pub accel_y: Option<usize>,
+    pub accel_z: Option<usize>,
+    /// First byte of each touchpad finger record (the active-flag/counter byte).
+    /// A real device sets bit 7 of this byte when the finger is NOT touching.
+    pub touch_fingers: Vec<usize>,
+    /// Output-report byte of the strong/left (large) rumble motor, RID-inclusive.
+    pub out_left_motor: Option<usize>,
+    /// Output-report byte of the weak/right (small) rumble motor, RID-inclusive.
+    pub out_right_motor: Option<usize>,
+    /// Input-report byte carrying the battery level (RID-inclusive). The virtual
+    /// pad stamps this to "full" every frame — a low reported battery makes some
+    /// hosts disable haptics, and there's nothing to gain from a virtual pad
+    /// reporting anything else. `None` when the profile declares no battery field.
+    pub battery_level: Option<usize>,
+    /// OUTPUT-report byte of the lightbar's first (R) channel, RID-inclusive; G/B
+    /// follow at +1/+2 (the report packs them as a contiguous rgb24). DS4 +
+    /// DualSense. Lets `poll_outputs` surface the game's lightbar colour so it can
+    /// route to a physical pad's light bar. `None` when the profile has no lightbar.
+    pub out_lightbar_r: Option<usize>,
+    /// OUTPUT-report byte of the DualSense player-indicator LED field (RID-inclusive).
+    pub out_player_led: Option<usize>,
+    /// OUTPUT-report byte of the DualSense mic-mute LED field (RID-inclusive).
+    pub out_mic_led: Option<usize>,
+    /// OUTPUT-report byte where the DualSense RIGHT adaptive-trigger effect block
+    /// begins (RID-inclusive). The block is 11 bytes: `[mode, params..]`.
+    pub out_trigger_r: Option<usize>,
+    /// OUTPUT-report byte where the LEFT adaptive-trigger effect block begins.
+    pub out_trigger_l: Option<usize>,
+    /// OUTPUT-report `validFlag0` / `validFlag1` bytes (RID-inclusive): which
+    /// fields a report actually sets. The lightbar's bit lives in flag 0 on a
+    /// DS4 and flag 1 on a DualSense.
+    pub out_valid_flag0: Option<usize>,
+    pub out_valid_flag1: Option<usize>,
+    /// Buttons the input report carries outside the descriptor's Button page:
+    /// `(button bit, byte, bit)`, the byte RID-inclusive. The DualSense Edge's
+    /// back and Fn buttons. Empty for every other profile.
+    pub extra_buttons: Vec<(u32, usize, u8)>,
+}
+
+impl ExtendedLayout {
+    fn from_raw(input: Option<&RawExtendedReport>, output: Option<&RawExtendedReport>) -> Self {
+        let mut out = ExtendedLayout::default();
+        if let Some(raw) = input {
+            for f in &raw.fields {
+                let (Some(byte), Some(sem)) = (f.byte, f.semantic.as_deref()) else {
+                    continue;
+                };
+                match sem {
+                    "gyroPitch" => out.gyro_pitch = Some(byte),
+                    "gyroYaw" => out.gyro_yaw = Some(byte),
+                    "gyroRoll" => out.gyro_roll = Some(byte),
+                    "accelX" => out.accel_x = Some(byte),
+                    "accelY" => out.accel_y = Some(byte),
+                    "accelZ" => out.accel_z = Some(byte),
+                    "batteryLevel" => out.battery_level = Some(byte),
+                    _ => {}
+                }
+                if f.ty.as_deref() == Some("touchpad-finger") {
+                    out.touch_fingers.push(byte);
+                }
+            }
+            for f in &raw.fields {
+                let (Some(byte), Some(names)) = (f.byte, f.buttons.as_ref()) else {
+                    continue;
+                };
+                if f.ty.as_deref() != Some("button-mask") {
+                    continue;
+                }
+                for (i, name) in names.iter().enumerate() {
+                    let bit = f.start_bit() as usize + i;
+                    if bit >= 8 {
+                        break;
+                    }
+                    if let Some(mask) = extended_only_button(name) {
+                        out.extra_buttons.push((mask, byte, bit as u8));
+                    }
+                }
+            }
+        }
+        if let Some(raw) = output {
+            for f in &raw.fields {
+                let (Some(byte), Some(sem)) = (f.start_byte(), f.semantic.as_deref()) else {
+                    continue;
+                };
+                match sem {
+                    "leftMotor" => out.out_left_motor = Some(byte),
+                    "rightMotor" => out.out_right_motor = Some(byte),
+                    "lightbar" => out.out_lightbar_r = Some(byte),
+                    "playerIndicator" => out.out_player_led = Some(byte),
+                    "muteLed" => out.out_mic_led = Some(byte),
+                    "rightTriggerEffect" => out.out_trigger_r = Some(byte),
+                    "leftTriggerEffect" => out.out_trigger_l = Some(byte),
+                    "validFlag0" => out.out_valid_flag0 = Some(byte),
+                    "validFlag1" => out.out_valid_flag1 = Some(byte),
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    /// True if the profile declares a gyro region (all three axes present).
+    pub fn has_gyro(&self) -> bool {
+        self.gyro_pitch.is_some() && self.gyro_yaw.is_some() && self.gyro_roll.is_some()
+    }
+    /// True if the profile declares an accelerometer region.
+    pub fn has_accel(&self) -> bool {
+        self.accel_x.is_some() && self.accel_y.is_some() && self.accel_z.is_some()
+    }
+}
+
+/// A loaded, descriptor-parsed controller profile ready to encode reports for.
+#[derive(Debug, Clone)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub vid: u16,
+    pub pid: u16,
+    /// On-wire input report size in bytes (from JSON; falls back to the parsed
+    /// descriptor's byte size when the JSON omits it).
+    pub input_report_size: usize,
+    /// USB product string (e.g. "Wireless Controller"). Used for the device's
+    /// registry config + friendly name.
+    pub product_string: Option<String>,
+    /// Optional device description (defaults to `product_string`).
+    pub device_description: Option<String>,
+    /// USB bcdDevice version (defaults to 0x0100, the Sony USB convention).
+    pub version_number: u32,
+    /// Raw descriptor bytes (hex-decoded).
+    pub descriptor: Vec<u8>,
+    /// Parsed first-input-report layout.
+    pub report: InputReport,
+    /// usage-hex → role (verbatim from JSON; consumed by the encoder later).
+    pub axis_map: std::collections::HashMap<String, String>,
+    /// HMButton bit index → 1-based descriptor button index.
+    pub button_map: Option<Vec<i32>>,
+    /// Byte-addressed IMU + touchpad layout from `extendedReport` (the regions
+    /// the HID descriptor exposes only as opaque vendor blobs). Empty when the
+    /// profile declares no `extendedReport`.
+    pub extended: ExtendedLayout,
+    /// True if this profile needs an XUSB/XInput companion devnode (Xbox360).
+    pub requires_xusb_companion: bool,
+    /// HIDMaestro driver `FunctionMode` (0 = plain HID, 1 = XUSB).
+    pub function_mode: u32,
+    /// True if the node goes in its own device container instead of the PC's
+    /// (`orchestrator::create_own_container_node`): the virtual keyboard and mouse.
+    pub own_container: bool,
+    /// `(byte, value)` laid over every encoded input report, the byte
+    /// RID-inclusive (`inputDefaults`). Empty for most profiles.
+    pub input_defaults: Vec<(usize, u8)>,
+}
+
+#[derive(Debug)]
+pub enum ProfileError {
+    Json(String),
+    Hex(String),
+    Vidpid(String),
+}
+
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProfileError::Json(e) => write!(f, "profile JSON parse error: {e}"),
+            ProfileError::Hex(e) => write!(f, "descriptor hex decode error: {e}"),
+            ProfileError::Vidpid(e) => write!(f, "VID/PID parse error: {e}"),
+        }
+    }
+}
+impl std::error::Error for ProfileError {}
+
+fn parse_hex_u16(s: &str) -> Result<u16, ProfileError> {
+    let t = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+    u16::from_str_radix(t, 16).map_err(|e| ProfileError::Vidpid(format!("{s}: {e}")))
+}
+
+fn decode_hex(s: &str) -> Result<Vec<u8>, ProfileError> {
+    let cleaned: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    if !cleaned.len().is_multiple_of(2) {
+        return Err(ProfileError::Hex("odd number of hex digits".into()));
+    }
+    (0..cleaned.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&cleaned[i..i + 2], 16)
+                .map_err(|e| ProfileError::Hex(format!("at {i}: {e}")))
+        })
+        .collect()
+}
+
+impl Profile {
+    /// Parse a profile from its JSON text.
+    pub fn from_json(json: &str) -> Result<Self, ProfileError> {
+        let raw: RawProfile =
+            serde_json::from_str(json).map_err(|e| ProfileError::Json(e.to_string()))?;
+        let descriptor = decode_hex(&raw.descriptor)?;
+        let report = parse_descriptor(&descriptor);
+        let input_report_size = raw.input_report_size.unwrap_or_else(|| report.byte_size());
+        let extended = ExtendedLayout::from_raw(
+            raw.extended_report.as_ref(),
+            raw.extended_output_report.as_ref(),
+        );
+        let requires_xusb_companion = raw.requires_xusb_companion.unwrap_or(false);
+        let function_mode = raw
+            .function_mode
+            .unwrap_or(if requires_xusb_companion { 1 } else { 0 });
+        Ok(Profile {
+            id: raw.id,
+            name: raw.name,
+            vid: parse_hex_u16(&raw.vid)?,
+            pid: parse_hex_u16(&raw.pid)?,
+            input_report_size,
+            product_string: raw.product_string,
+            device_description: raw.device_description,
+            version_number: raw.version_number.unwrap_or(0x0100),
+            descriptor,
+            report,
+            axis_map: raw.axis_map.unwrap_or_default(),
+            button_map: raw.button_map,
+            extended,
+            requires_xusb_companion,
+            function_mode,
+            own_container: raw.own_container.unwrap_or(false),
+            input_defaults: raw
+                .input_defaults
+                .unwrap_or_default()
+                .into_iter()
+                .map(|d| (d.byte, d.value))
+                .collect(),
+        })
+    }
+
+    /// Look up a descriptor input field by `(usage_page, usage)`.
+    pub fn field(&self, usage_page: u16, usage: u16) -> Option<&crate::descriptor::InputField> {
+        self.report.field(usage_page, usage)
+    }
+}
+
+/// Bundled preset profiles (vendored JSON). Add more as backends ship.
+pub mod presets {
+    /// DualShock 4 v2 (CUH-ZCT2), USB — a plain-HID Report-0x01 gamepad. Chosen
+    /// as the Phase-2 validation target because its legacy `Data[]` report IS
+    /// the wire report (no XUSB companion, unlike Xbox360).
+    pub const DUALSHOCK_4_V2_JSON: &str = include_str!("../profiles/dualshock-4-v2.json");
+
+    /// DualSense (CFI-ZCT1), USB — plain-HID Sony pad, `VID_054C&PID_0CE6`. The
+    /// HIDMaestro capability ViGEm can't provide.
+    pub const DUALSENSE_JSON: &str = include_str!("../profiles/dualsense.json");
+
+    /// DualSense Edge (CFI-ZCP1), USB — `VID_054C&PID_0DF2`. The DualSense's
+    /// report plus the two back buttons and two Fn buttons, which ride in the
+    /// descriptor's vendor-defined bits. The driver answers the Edge's own
+    /// firmware-info reply by PID.
+    pub const DUALSENSE_EDGE_JSON: &str = include_str!("../profiles/dualsense-edge.json");
+
+    /// Xbox 360 / XInput (`VID_045E&PID_028E`). Needs the XUSB companion node;
+    /// input flows through the SHM `GipData[]` (XINPUT_GAMEPAD) region, not the
+    /// HID descriptor. This is the capability that lets FlexInput drop ViGEm.
+    pub const XBOX360_JSON: &str = include_str!("../profiles/xbox360.json");
+
+    /// Virtual keyboard — plain-HID 8-byte boot-style report (modifiers +
+    /// 6KRO array). Driven with raw reports by `flexinput-virtual`'s
+    /// keymouse_hm, NOT the gamepad encode path. Exists because SendInput-based
+    /// synthetic input is silently eaten on some systems (ASUS hook stack /
+    /// hardened Win11) — a kernel-level HID device is immune.
+    pub const KEYBOARD_JSON: &str = include_str!("../profiles/keyboard.json");
+
+    /// Virtual relative mouse — plain-HID 7-byte report (5 buttons, int16 X/Y
+    /// mickeys, int8 wheel + AC Pan in whole notches). Same
+    /// raw-report path + rationale as KEYBOARD_JSON.
+    pub const MOUSE_JSON: &str = include_str!("../profiles/mouse.json");
+
+    /// Virtual media keys — a plain-HID Consumer Control collection, 4-byte
+    /// report of two 16-bit Consumer-page usages. Beside the keyboard rather
+    /// than in it, so the keyboard's boot report stays as it was.
+    pub const CONSUMER_JSON: &str = include_str!("../profiles/consumer.json");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_ds4v2_preset() {
+        let p = Profile::from_json(presets::DUALSHOCK_4_V2_JSON).expect("load DS4v2");
+        assert_eq!(p.id, "dualshock-4-v2");
+        assert_eq!(p.vid, 0x054C);
+        assert_eq!(p.pid, 0x09CC);
+        assert_eq!(p.input_report_size, 64);
+        assert_eq!(p.report.report_id, 0x01);
+        // Plain-HID Sony pad: no XUSB companion, FunctionMode 0.
+        assert!(!p.requires_xusb_companion);
+        assert_eq!(p.function_mode, 0);
+        // Gamepads stay ROOT-enumerated (persisted across runs, own reclaim path).
+        assert!(!p.own_container);
+    }
+
+    // The Edge shares the DualSense's input and output layouts; what it adds is
+    // its PID, its product string and the four buttons outside the Button page.
+    #[test]
+    fn loads_dualsense_edge_preset() {
+        let p = Profile::from_json(presets::DUALSENSE_EDGE_JSON).expect("load Edge");
+        let ds = Profile::from_json(presets::DUALSENSE_JSON).expect("load DualSense");
+        assert_eq!((p.vid, p.pid), (0x054C, 0x0DF2));
+        assert_eq!(p.product_string.as_deref(), Some("DualSense Edge Wireless Controller"));
+        assert_eq!(p.descriptor.len(), 389);
+        assert_eq!(p.button_map, ds.button_map, "same FlexInput button bits");
+        let mut extra = p.extended.extra_buttons.clone();
+        extra.sort();
+        assert_eq!(extra, vec![
+            (crate::encode::button::PADDLE_R1, 10, 7),
+            (crate::encode::button::PADDLE_L1, 10, 6),
+            (crate::encode::button::PADDLE_R2, 10, 5),
+            (crate::encode::button::PADDLE_L2, 10, 4),
+        ]);
+        assert!(ds.extended.extra_buttons.is_empty());
+        // Feedback decode reads the same output bytes on both pads.
+        let out = |l: &ExtendedLayout| (l.out_left_motor, l.out_right_motor, l.out_lightbar_r,
+            l.out_player_led, l.out_mic_led, l.out_trigger_l, l.out_trigger_r,
+            l.out_valid_flag0, l.out_valid_flag1);
+        assert_eq!(out(&p.extended), out(&ds.extended));
+    }
+
+    #[test]
+    fn loads_xbox360_preset() {
+        let p = Profile::from_json(presets::XBOX360_JSON).expect("load xbox360");
+        assert_eq!(p.id, "xbox360");
+        assert_eq!(p.vid, 0x045E);
+        // PID is 0x02FF (Xbox One wired family), deliberately != the real 360's
+        // 0x028E so the read side can distinguish our virtual from a physical Xbox
+        // 360; VID stays 045E so it still classifies + works as XInput.
+        assert_eq!(p.pid, 0x02FF);
+        // XUSB companion + FunctionMode 1 (defaulted from requiresXusbCompanion).
+        assert!(p.requires_xusb_companion);
+        assert_eq!(p.function_mode, 1);
+        // The identity HID face is a VENDOR-DEFINED usage page on purpose: game
+        // APIs (WGI/GameInput, DirectInput, SDL, Steam) must never enumerate it
+        // as a gamepad — the SWD XUSB companion is the sole game-visible
+        // identity. A gamepad TLC here resurfaces the Win11 double-pad bugs
+        // (xinputhid.inf phantom slot / 26H1 GameInput second controller); see
+        // the profile JSON notes.
+        let r = &p.report;
+        assert!(
+            !r.fields.iter().any(|f| f.usage_page == 0x01 || f.usage_page == 0x09),
+            "identity face must expose NO Generic Desktop/Button usages"
+        );
+        assert!(
+            r.fields.iter().all(|f| f.usage_page == 0xFF00),
+            "identity face fields must live on the vendor-defined page"
+        );
+        // Wire size must stay 12 (inputReportSize / SHM frame contract).
+        assert_eq!(p.input_report_size, 12);
+        assert_eq!(r.byte_size(), 12);
+        assert_eq!(r.report_id, 0);
+    }
+
+    #[test]
+    fn loads_keyboard_preset() {
+        let p = Profile::from_json(presets::KEYBOARD_JSON).expect("load keyboard");
+        assert_eq!(p.id, "hm-keyboard");
+        // Plain HID: no companion, FunctionMode 0.
+        assert!(!p.requires_xusb_companion);
+        assert_eq!(p.function_mode, 0);
+        // In the PC's own container Windows takes it for the built-in keyboard,
+        // which arms touchpad typing protection (left clicks dropped while typing).
+        assert!(p.own_container);
+        // Standard boot-style keyboard report: 8 bytes, no Report ID, keyboard
+        // usage page fields only (modifiers bitfield + 6KRO array).
+        assert_eq!(p.input_report_size, 8);
+        assert_eq!(p.report.byte_size(), 8);
+        assert_eq!(p.report.report_id, 0);
+        assert!(p.report.fields.iter().all(|f| f.usage_page == 0x07));
+    }
+
+    #[test]
+    fn loads_consumer_preset() {
+        let p = Profile::from_json(presets::CONSUMER_JSON).expect("load consumer");
+        assert_eq!(p.id, "hm-consumer");
+        assert!(!p.requires_xusb_companion);
+        assert_eq!(p.function_mode, 0);
+        assert!(p.own_container);
+        // Two 16-bit Consumer-page usage slots = 4 bytes, no Report ID: the
+        // layout keymouse_hm's media report builder writes.
+        assert_eq!(p.input_report_size, 4);
+        assert_eq!(p.report.byte_size(), 4);
+        assert_eq!(p.report.report_id, 0);
+        assert!(p.report.fields.iter().all(|f| f.usage_page == 0x0C));
+        // Its own PID, in the family the physical-input listeners skip.
+        assert_eq!((p.vid, p.pid), (0x1209, 0xF1E7));
+    }
+
+    #[test]
+    fn loads_mouse_preset() {
+        let p = Profile::from_json(presets::MOUSE_JSON).expect("load mouse");
+        assert_eq!(p.id, "hm-mouse");
+        assert!(!p.requires_xusb_companion);
+        assert_eq!(p.function_mode, 0);
+        assert!(p.own_container, "an internal-looking mouse has its left clicks dropped while typing");
+        // [buttons, X lo/hi, Y lo/hi, wheel, hwheel] = 7 bytes, no Report ID.
+        assert_eq!(p.input_report_size, 7);
+        assert_eq!(p.report.byte_size(), 7);
+        assert_eq!(p.report.report_id, 0);
+        // X/Y must parse as 16-bit signed relative axes at the layout the
+        // report builder in keymouse_hm hardcodes (bytes 1..5 after buttons).
+        let x = p.report.field(0x01, 0x30).expect("X axis");
+        let y = p.report.field(0x01, 0x31).expect("Y axis");
+        assert_eq!((x.bit_offset, x.bit_size), (8, 16));
+        assert_eq!((y.bit_offset, y.bit_size), (24, 16));
+        assert!(x.logical_min < 0, "X is signed/relative");
+        // Buttons: 5 button bits at byte 0 (LMB = bit 0) must survive the AC Pan
+        // addition — otherwise the OS mouse loses its buttons.
+        let b1 = p.report.field(0x09, 0x01).expect("button 1 (LMB)");
+        assert_eq!((b1.bit_offset, b1.bit_size), (0, 1), "LMB must be bit 0");
+        let b2 = p.report.field(0x09, 0x02).expect("button 2 (RMB)");
+        assert_eq!((b2.bit_offset, b2.bit_size), (1, 1), "RMB must be bit 1");
+        // Wheel (vertical): int8 at byte 5.
+        let w = p.report.field(0x01, 0x38).expect("wheel");
+        assert_eq!((w.bit_offset, w.bit_size), (40, 8));
+        // Horizontal wheel (Consumer AC Pan 0x0238): int8 at byte 6.
+        let hw = p.report.field(0x0c, 0x0238).expect("hwheel (AC Pan)");
+        assert_eq!((hw.bit_offset, hw.bit_size), (48, 8));
+        assert!(hw.logical_min < 0, "hwheel is signed/relative");
+        // No feature reports: the Resolution Multiplier Windows never applied
+        // is gone (see the profile notes).
+        assert!(!p.descriptor.windows(2).any(|w| w == [0x09, 0x48]), "no Resolution Multiplier");
+    }
+
+    /// Golden: our parser must reproduce the exact field layout HIDMaestro's C#
+    /// `info dualshock-4-v2` prints (captured 2026-06-12, v1.3.17). These
+    /// offsets are load-bearing — a mismatch is the descriptor-side analog of
+    /// the input-tearing bug.
+    #[test]
+    fn ds4v2_field_layout_matches_csharp_golden() {
+        let p = Profile::from_json(presets::DUALSHOCK_4_V2_JSON).unwrap();
+        let r = &p.report;
+
+        // 504 input bits, Report ID 0x01, 76 fields, 64-byte wire report.
+        assert_eq!(r.report_id, 0x01);
+        assert_eq!(r.bit_size, 504);
+        assert_eq!(r.fields.len(), 76);
+        assert_eq!(r.byte_size(), 64);
+
+        // Generic Desktop axes (usage page 0x01).
+        let check = |up: u16, u: u16, off: i32, size: i32, lmax: i32| {
+            let f = r.field(up, u).unwrap_or_else(|| panic!("missing usage {up:#x}/{u:#x}"));
+            assert_eq!(
+                (f.bit_offset, f.bit_size, f.logical_max),
+                (off, size, lmax),
+                "usage {up:#x}/{u:#x}"
+            );
+        };
+        check(0x01, 0x30, 0, 8, 255); // X
+        check(0x01, 0x31, 8, 8, 255); // Y
+        check(0x01, 0x32, 16, 8, 255); // Z
+        check(0x01, 0x35, 24, 8, 255); // Rz
+        check(0x01, 0x39, 32, 4, 7); // Hat (4 bits, range 0..7)
+        check(0x01, 0x33, 56, 8, 255); // Rx
+        check(0x01, 0x34, 64, 8, 255); // Ry
+
+        // Buttons 1..14 start at bit 36, one bit each.
+        let b1 = r.field(0x09, 0x01).unwrap();
+        assert_eq!((b1.bit_offset, b1.bit_size), (36, 1));
+        let b14 = r.field(0x09, 0x0E).unwrap();
+        assert_eq!((b14.bit_offset, b14.bit_size), (49, 1));
+    }
+}

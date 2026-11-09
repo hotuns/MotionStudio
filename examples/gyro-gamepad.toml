@@ -1,0 +1,12 @@
+# 按住左扳机时，陀螺仪和实体右摇杆共同控制虚拟右摇杆。
+# 可把虚拟目标换成 "dualshock_4"。
+schema_version = 1
+name = "手柄与体感"
+virtual_gamepad = "xbox_360"
+stick_deadzone = 0.12
+
+[gyro]
+enabled = true
+output = "right_stick"
+activation = "left_trigger"
+stick_full_scale_dps = 360.0

@@ -1,0 +1,17 @@
+{
+  "所选手柄未连接，无法录入体感输入。": "The selected controller is disconnected. Connect it to record a gyro input.",
+  "触摸板 1 按下": "Touchpad 1 click",
+  "触摸板 2 按下": "Touchpad 2 click",
+  "其他手柄输入": "Other controller inputs",
+  "录入暂停输入": "Record gyro pause input",
+  "录入开启输入": "Record gyro activation input",
+  "监听手柄": "Listen to controller",
+  "开启和暂停不能使用同一个输入，请重新录入。": "Activation and pause need different inputs. Try recording again.",
+  "一次只录入一个体感输入，请重试。": "Record one gyro input at a time. Try again.",
+  "检测到多个输入，请全部松开。": "Multiple inputs detected. Release all controls.",
+  "请先松开当前输入并让摇杆回中。": "Release the controls and let the sticks return to center first.",
+  "· 松开后完成录入": "· Release to finish recording",
+  "请按下或接触要录入的手柄输入。": "Press a controller input or touch the touchpad.",
+  "录入期间暂停游戏输出，Esc 可取消。": "Game output pauses during recording. Press Esc to cancel.",
+  "触摸板按下与手指接触可以分别绑定。连接并选择手柄后，也可以直接监听录入。": "Touchpad clicks and finger contact can be bound separately. Connect and select a controller to record directly."
+}

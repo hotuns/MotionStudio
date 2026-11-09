@@ -1,0 +1,217 @@
+.visualizer {
+  width: 100%;
+  padding: 0.8rem 0;
+}
+
+.controllerSvg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.interactive {
+  cursor: pointer;
+  pointer-events: bounding-box;
+}
+
+.interactive:hover .control,
+.interactive:hover .triggerTrack,
+.interactive:hover .stickBase {
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 28%, transparent));
+}
+
+.shell {
+  fill: color-mix(in srgb, var(--bg-btn-hover) 72%, rgba(255, 255, 255, 0.08));
+  stroke: color-mix(in srgb, var(--accent) 22%, var(--border-strong));
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 24px 28px rgba(0, 0, 0, 0.32));
+}
+
+.shellLine {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 24%, var(--border-strong));
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 18px 24px rgba(0, 0, 0, 0.24));
+}
+
+.centerPanel {
+  fill: color-mix(in srgb, var(--bg-input) 72%, rgba(255, 255, 255, 0.05));
+  stroke: var(--border-strong);
+  stroke-width: 2.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.triggerTrack {
+  fill: color-mix(in srgb, var(--bg-input) 70%, rgba(255, 255, 255, 0.08));
+  stroke: var(--border-strong);
+  stroke-width: 2;
+  transition: fill 120ms ease, stroke 120ms ease;
+  vector-effect: non-scaling-stroke;
+}
+
+.triggerTrackBound {
+  fill: color-mix(in srgb, var(--telemetry-green) 14%, transparent);
+  stroke: color-mix(in srgb, var(--telemetry-green) 86%, white 8%);
+}
+
+.triggerTrackSelected {
+  fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 34%, transparent));
+}
+
+.triggerFill {
+  fill: color-mix(in srgb, var(--telemetry-green) 82%, var(--accent));
+}
+
+.triggerLabel,
+.controlText {
+  font-size: 28px;
+  font-weight: 700;
+  fill: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-anchor: middle;
+  dominant-baseline: central;
+  user-select: none;
+  pointer-events: none;
+}
+
+.triggerLabelSelected {
+  fill: var(--accent);
+}
+
+.controlTextCompact {
+  font-size: 20px;
+  letter-spacing: 0.04em;
+}
+
+.control {
+  fill: color-mix(in srgb, var(--bg-input) 72%, rgba(255, 255, 255, 0.08));
+  stroke: var(--border-strong);
+  stroke-width: 2.2;
+  transition: fill 120ms ease, stroke 120ms ease, filter 120ms ease;
+  vector-effect: non-scaling-stroke;
+}
+
+.controlCompact {
+  stroke-width: 1.8;
+}
+
+.paddleControl {
+  stroke-width: 1.9;
+}
+
+.paddleText {
+  font-size: 18px;
+  letter-spacing: 0.04em;
+}
+
+.controlBound {
+  fill: color-mix(in srgb, var(--telemetry-green) 14%, transparent);
+  stroke: color-mix(in srgb, var(--telemetry-green) 86%, white 8%);
+}
+
+.controlSelected {
+  fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 13px color-mix(in srgb, var(--accent) 36%, transparent));
+}
+
+.controlPressed {
+  fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 13px color-mix(in srgb, var(--accent) 36%, transparent));
+}
+
+.controlTextSelected,
+.controlTextPressed {
+  fill: var(--accent);
+}
+
+.stickBase {
+  fill: color-mix(in srgb, var(--bg-input) 72%, rgba(255, 255, 255, 0.08));
+  stroke: var(--border-strong);
+  stroke-width: 2.5;
+  transition: fill 120ms ease, stroke 120ms ease;
+  vector-effect: non-scaling-stroke;
+}
+
+.stickBaseBound {
+  fill: color-mix(in srgb, var(--telemetry-green) 14%, transparent);
+  stroke: color-mix(in srgb, var(--telemetry-green) 86%, white 8%);
+}
+
+.stickBaseSelected {
+  fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 13px color-mix(in srgb, var(--accent) 36%, transparent));
+}
+
+.stickRing {
+  fill: color-mix(in srgb, var(--bg-input) 58%, transparent);
+  stroke: var(--border-1);
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}
+
+.stickRingBound {
+  stroke: color-mix(in srgb, var(--telemetry-green) 70%, transparent);
+}
+
+.stickKnob {
+  fill: color-mix(in srgb, var(--text-strong) 84%, var(--bg-input));
+  stroke: var(--border-strong);
+  stroke-width: 2.2;
+  transition: cx 70ms linear, cy 70ms linear, fill 120ms ease, stroke 120ms ease;
+  vector-effect: non-scaling-stroke;
+}
+
+.stickKnobSelected,
+.stickKnobPressed {
+  fill: color-mix(in srgb, var(--accent) 20%, transparent);
+  stroke: var(--accent);
+}
+
+.sideMuted {
+  opacity: 0.28;
+}
+
+
+/* Neutral technical linework follows the reference in either application theme. */
+.shell {
+  fill: var(--bg-panel, var(--bg-input));
+  stroke: var(--text-strong);
+  stroke-width: 1.8;
+  filter: none;
+}
+.shellLine, .detailLine {
+  fill: none;
+  stroke: var(--text-muted);
+  stroke-width: 1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+  filter: none;
+}
+.control, .triggerTrack, .stickBase, .stickRing, .stickKnob {
+  fill: var(--bg-panel, var(--bg-input));
+  stroke: var(--text-muted);
+  stroke-width: 1.1;
+}
+.controlText { fill: var(--text-strong); font-family: system-ui, sans-serif; font-size: 54px; font-weight: 500; }
+.controlTextCompact { font-size: 30px; }
+.triggerLabel { font-size: 19px; font-weight: 500; }
+.paddleText { font-size: 18px; }
+.controlBound, .triggerTrackBound, .stickBaseBound, .stickRingBound { stroke: var(--telemetry-green); }
+.controlSelected, .controlPressed, .triggerTrackSelected, .stickBaseSelected, .stickKnobSelected, .stickKnobPressed {
+  fill: color-mix(in srgb, var(--accent) 20%, var(--bg-input));
+  stroke: var(--accent);
+}
+.controlTextSelected, .controlTextPressed { fill: var(--accent); }
+
+.buttonIcon { fill: var(--bg-panel, var(--bg-input)); stroke: var(--text-strong); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+.buttonIconActive { stroke: var(--accent); }

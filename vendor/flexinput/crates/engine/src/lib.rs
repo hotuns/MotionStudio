@@ -1,0 +1,60 @@
+use std::collections::HashMap;
+
+use flexinput_core::{Module, Patch};
+use uuid::Uuid;
+
+pub mod eval;
+pub mod graph;
+pub mod hr_timer;
+pub mod router;
+pub mod state;
+pub mod thread;
+pub mod thread_priority;
+
+pub use hr_timer::HrWaiter;
+pub use thread_priority::raise_input_thread;
+
+pub use eval::{
+    analog_axis_for_cardinal,
+    apply_curve, biases_from_params, curve_points_from_params, curve_points_from_params_keyed,
+    curve_insert_point, curve_remove_point, curve_scale, curve_scale_inv, envelope_flags, eval_graph_tick, eval_pure, get_b, get_f,
+    crossover_hz_to_pos, in_order_applies, multiband_collapse_band, multiband_collapse_carrier, namespaced_uid,
+    card_allows_analog_mode, osc_sample, pin_allows_analog_mode, pin_is_analog_input, read_scale_t, sample_curve, sig_to_f32,
+    vec_reshape_apply, VEC_RESHAPE_BOUNDARY_DEFAULT, VEC_RESHAPE_GAIN_DEFAULT,
+};
+pub use graph::{FeedbackSource, InlineSubgraph, NodeSnap, ProcessingGraph};
+pub use router::InputRouter;
+pub use state::NodeState;
+pub use thread::{ENGINE_TIMINGS, note_scope_taps_read, scope_taps_wanted, spawn_processing_thread, drain_sink_bus, drain_sink_bus_into, EngineSync, is_displacement_pin,current_sample_rate, current_io_rate, set_io_rate, engine_counters, new_device_rates, new_scope_taps, new_arc_graph, new_arc_signals, ArcGraph, ArcSignals, DeviceRates, ProcessingOutput, ScopeTaps, ScopeTapRing, SinkBus, UiSourceBlock, new_ui_source_block, DEFAULT_SAMPLE_RATE, SCOPE_TAP_PINS, SCOPE_TAP_RETAIN_MS, SCOPE_TAP_MAX_LEN};
+
+pub struct Engine {
+    modules: HashMap<Uuid, Box<dyn Module>>,
+    patch: Patch,
+    router: InputRouter,
+    pub pass_through_outputs: bool,
+}
+
+impl Engine {
+    pub fn new() -> Self {
+        Self {
+            modules: HashMap::new(),
+            patch: Patch::default(),
+            router: InputRouter::new(),
+            pass_through_outputs: false,
+        }
+    }
+
+    pub fn load_patch(&mut self, patch: Patch) {
+        self.patch = patch;
+        self.modules.clear();
+    }
+
+    pub fn patch(&self) -> &Patch { &self.patch }
+    pub fn router_mut(&mut self) -> &mut InputRouter { &mut self.router }
+
+    pub fn tick(&mut self) {}
+}
+
+impl Default for Engine {
+    fn default() -> Self { Self::new() }
+}

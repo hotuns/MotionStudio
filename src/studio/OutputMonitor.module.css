@@ -1,0 +1,25 @@
+.output { display: grid; gap: 10px; min-width: 0; }
+.heading, .caption, .footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.badge { padding: 3px 8px; border: 1px solid var(--border-1); border-radius: 999px; color: var(--text-mid); font-size: 12px; }
+.badge[data-live='true'] { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--bg-2)); }
+.trajectory { margin: 0; }
+.plot { position: relative; overflow: hidden; border: 1px solid var(--border-1); border-radius: 8px; background: var(--bg-2); }
+.plot svg { display: block; width: 100%; height: auto; max-height: 220px; }
+.gridLines, .trace { fill: none; vector-effect: non-scaling-stroke; }
+.gridLines { stroke: var(--border-1); }
+.trace { stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.start, .stickRing { fill: var(--bg-2); stroke: var(--border-1); }
+.start { stroke: var(--accent); }
+.end { fill: var(--accent); }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--text-muted); font-size: 12px; }
+.caption, .footer { color: var(--text-muted); font-size: 12px; }
+.caption { margin: 6px 0 0; }
+.caption strong { color: var(--text-strong); font-variant-numeric: tabular-nums; }
+.footer button { padding: 4px 8px; }
+.virtualOutput { display: grid; gap: 8px; border-top: 1px solid var(--border-1); padding-top: 10px; }
+.virtualOutput h4 { margin: 0; font-size: 13px; }
+.sticks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 104px), 1fr)); gap: 10px; }
+.stick { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.stick svg { width: 46px; height: 46px; flex: 0 0 46px; }
+.stick strong, .stick span { display: block; font-size: 12px; }
+.stick span { color: var(--text-muted); font-variant-numeric: tabular-nums; }

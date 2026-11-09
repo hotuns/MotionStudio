@@ -1,0 +1,10 @@
+node_modules/
+target/
+dist/
+artifacts/
+src-tauri/resources/motion-engine.exe
+src-tauri/resources/runtime-manifest.json
+*.log
+.test-data/
+test-results/
+src-tauri/gen/

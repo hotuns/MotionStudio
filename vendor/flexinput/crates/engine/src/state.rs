@@ -1,0 +1,219 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
+
+use glam::Vec2;
+use flexinput_core::{Signal, SigMap};
+
+/// Per-node computation state owned by the processing thread.
+/// Replaces the computation fields that were previously in NodeExtra.
+#[derive(Default)]
+pub struct NodeState {
+    /// Latest computed outputs for stateful nodes (oscillator, delay, etc.).
+    pub last_signals: Vec<Option<Signal>>,
+    /// JSM Config: the compiled config plus its running button state. Boxed and
+    /// created on first use, so no other node pays for it.
+    pub jsm: Option<Box<crate::eval::JsmState>>,
+    /// Optional per-sample timing supplied by a headless event host for its next tick.
+    pub jsm_gyro_clock: crate::eval::JsmGyroClock,
+    /// Gyro to Stick Rotation: the offset, the stabiliser and the gravity
+    /// estimate. Created on first use.
+    pub stick_rotation: Option<Box<crate::eval::StickRotationState>>,
+    /// Remapper with a card reading an IMU input (`imu_*`): the gravity
+    /// estimate those pins are derived from. Created on first use.
+    pub imu: Option<Box<flexinput_core::imu::ImuEstimator>>,
+    /// Mapping cards with timed outputs (`out_gap` / `out_dur`): each card's
+    /// sequence in flight, keyed by (card list, card index).
+    pub out_seq: HashMap<(u8, usize), crate::eval::OutSeqRun>,
+    /// Virtual KB/M sink with "Route gamepad touchpad" on: the trackpad's
+    /// gesture state. Created on first use, dropped when the toggle goes off.
+    pub trackpad: Option<Box<crate::eval::TrackpadState>>,
+    /// AutoMap Combiner with its Motion section on CORRELATE: each lower
+    /// port's learned mounting rotation. Created on first use, dropped on SORT.
+    pub combiner_motion: Option<Box<crate::eval::MotionCorrelator>>,
+    /// RWS Aim: the flick stick being circled during a 360° calibration sweep.
+    /// Created when a sweep starts, dropped when it ends.
+    pub rws_cal_flick: Option<Box<crate::eval::CalFlick>>,
+    /// RWS Aim: the flick's tracking stabiliser, while a flick is engaged.
+    pub rws_flick_stab: Option<crate::eval::AngleFilter>,
+    /// RWS Aim as a flick target: the turns cards have started, still paying out.
+    pub rws_turns: Vec<crate::eval::RwsTurn>,
+    /// RWS Aim as a flick target: the flick pins cards held last tick, so a turn
+    /// starts once per press.
+    pub rws_turn_held: HashSet<String>,
+    /// Physical pad with its trigger click on (Calibration window), where the
+    /// engine plays it: each trigger's crossing and click. Created on first use.
+    pub trigger_clicks: Option<Box<crate::eval::TriggerClicks>>,
+    /// Snapped digital triggers (on the reserved carry entry only): where each
+    /// device's stand between ticks. See `device_cal::preprocess_dev_sigs_into`.
+    pub digital_triggers: Option<Box<crate::eval::DigitalTriggers>>,
+    /// Device stick rebound filter (on the reserved carry entry only): every
+    /// device's trackers and their clock. See `eval::filter_stick_rebound`.
+    pub stick_rebound: Option<Box<crate::eval::StickReboundState>>,
+    /// Per-channel ring buffers of (timestamp, value) pairs for the delay module.
+    pub delay_bufs: Vec<VecDeque<(Instant, f32)>>,
+    /// Per-channel sample ring buffers for the moving-average module (float inputs).
+    pub avg_bufs: Vec<VecDeque<f32>>,
+    /// Per-channel sample ring buffers for the moving-average module (Vec2 inputs).
+    pub avg_bufs_v2: Vec<VecDeque<Vec2>>,
+    /// Per-channel fast EMA for the DC filter.
+    pub dc_fast: Vec<f64>,
+    /// Per-channel slow EMA for the DC filter — estimates DC level.
+    pub dc_estimates: Vec<f64>,
+    /// Per-channel correction being applied for the DC filter module.
+    pub dc_corrections: Vec<f64>,
+    /// Per-channel time (seconds) signal has been stable AND non-zero.
+    pub dc_timers: Vec<f32>,
+    /// Corrected output frozen at the moment input starts moving.
+    pub dc_frozen: Vec<f64>,
+    /// Crossfade blend factor 0→1, advances while input is moving.
+    pub dc_blend: Vec<f64>,
+    /// Previous-frame signal snapshot for edge-detection modules.
+    pub prev_signals: Vec<Option<Signal>>,
+    /// Generic f32 scratch space for stateful modules (timers, accumulators).
+    pub aux_f32: Vec<f32>,
+    /// Per-mapping state for Remapper / Map Action press modes (4 floats per
+    /// mapping — see `eval::press_state_get`). Kept separate from `aux_f32`
+    /// so it can grow with the mapping list without clashing with the touchpad
+    /// zone accumulators already living at `aux_f32[0..3]`.
+    pub press_state: Vec<f32>,
+    /// Per-mapping stick-gesture progress for Remapper / Map Action mappings
+    /// whose `in` set is entirely stick cardinals. Two `u8` bitmaps per
+    /// mapping (left_stick, right_stick), each bit indexed in `CARDINAL_BITS`
+    /// order. A bit becomes 1 when the matching cardinal has been visited
+    /// during the active gesture; the bitmap resets when the stick returns
+    /// to neutral (mag < 0.3). Gesture-mappings fire when every required
+    /// cardinal across both sticks has been visited at least once.
+    pub gesture_state: Vec<[u8; 2]>,
+    /// Per-mapping progress for Remapper cards whose input ORDER matters ("in
+    /// order" chords and Sequence mode). Indexed like `gesture_state`; unused
+    /// entries for order-agnostic cards stay default.
+    pub order_state: Vec<OrderTrack>,
+    /// Per-mapping gesture timing for Remapper cards timed from where their
+    /// input starts: one-input analog cards in Short or Sequence mode (from
+    /// where the input leaves zero), and "in order" chords in Short or Double
+    /// mode (from where the chord's first input goes down).
+    pub move_state: Vec<MoveTrack>,
+    /// Per-pin hold-back state for a Remapper: inputs kept from the rest of the
+    /// node while a card is still deciding on them ("in order", Sequence, or a
+    /// Short / Long / Double press), and the late replay of a press it gave up on.
+    pub hold_back: HashMap<String, HoldBackPin>,
+    // ── Two-way Response Curve ────────────────────────────────────────────────
+    /// Per-channel current lane: +1 = rising, -1 = falling.
+    pub twoway_lane: Vec<i8>,
+    /// Per-channel held input the curves are read at: the furthest point
+    /// reached in the lane's direction, kept while the input wanders back by
+    /// less than the hysteresis band. NaN until the first sample.
+    pub twoway_held: Vec<f32>,
+    /// Per-channel interpolation blend factor [0, 1] (0 = fully on old lane output).
+    pub twoway_blend: Vec<f32>,
+    /// Per-channel output emitted last tick — where a lane switch blends from.
+    pub twoway_last_out: Vec<f32>,
+    /// Per-channel blended output frozen at the moment a lane switch begins.
+    pub twoway_old_output: Vec<f32>,
+    /// Per-channel Peak hold: the curve height being held (NaN = none), and
+    /// how long it has been held, in seconds (bounded by the hold time).
+    pub twoway_peak_y: Vec<f32>,
+    pub twoway_peak_age: Vec<f32>,
+    // ── Macro-namespace carry-over (stored on a single reserved sentinel uid) ──
+    /// Previous tick's macro-namespace values (`macro:` / `menu:` control pins).
+    /// `collector_sigs` is rebuilt from empty every tick, so a macro READER that
+    /// is forced to evaluate BEFORE its producer — e.g. a Virtual Menu that sits
+    /// upstream of the Remapper mapping to its Select target, a genuine feedback
+    /// cycle — would never observe the value this tick. This snapshot lets such a
+    /// reader fall back to the last published value (one tick stale, imperceptible
+    /// at kHz rates). Only the reserved `MACRO_CARRY_UID` entry uses this field.
+    pub macro_prev: SigMap,
+    /// Virtual Menu SOURCE-BLOCK request, `(device_id, pin_id)` pairs an open
+    /// menu asked to zero at the source so those analog inputs reach ONLY the
+    /// menu's navigation (not a mouse mapping, another module, or the pad).
+    /// Rebuilt each tick from `collector_sigs` and applied to `dev_sigs` at the
+    /// START of the NEXT tick — one tick stale, imperceptible. Only the reserved
+    /// `MACRO_CARRY_UID` entry uses this field.
+    pub source_block: HashSet<(String, String)>,
+    /// Pre-block values of the pins in `source_block`, snapshotted when the block
+    /// is applied so the menu can still READ its navigation inputs (it's the
+    /// reason they're blocked for everyone else). Only the reserved
+    /// `MACRO_CARRY_UID` entry uses this field.
+    pub unblocked_src: SigMap,
+    /// Devices a card asked to Set Neutral Forward last tick
+    /// (`flexinput_core::imu::ORIENT_NEUTRAL_PIN`), drained from
+    /// `collector_sigs` like `source_block`. Only `MACRO_CARRY_UID` uses this.
+    pub orient_neutral_req: HashSet<String>,
+    /// Per device, the yaw correction Set Neutral Forward last captured,
+    /// applied to that device's `orientation` pin every tick. Session-only —
+    /// the Calibration window's baseline is the persisted part. Only
+    /// `MACRO_CARRY_UID` uses this.
+    pub orient_neutral: HashMap<String, glam::Quat>,
+    /// Devices a card was sending Calibrate Gyro to last tick
+    /// (`flexinput_core::imu::GYRO_CAL_PIN`), so only a fresh press reaches
+    /// the UI. Only `MACRO_CARRY_UID` uses this.
+    pub gyro_cal_held: HashSet<String>,
+}
+
+/// Progress of one order-aware Remapper card (see `NodeState::order_state`).
+#[derive(Default, Clone)]
+pub struct OrderTrack {
+    /// Each `in` pin's held state last tick, for edge detection.
+    pub prev_held: Vec<bool>,
+    /// How many leading `in` pins have matched, in order. Equal to the pin
+    /// count while the card is matched.
+    pub progress: usize,
+    /// Seconds since the last step matched.
+    pub since_step: f32,
+    /// "In order" chord with Hold (normal / Long): it fired and its last input
+    /// is still held, so the output stays on after the earlier inputs are let
+    /// go.
+    pub latched: bool,
+}
+
+/// Where a timed gesture stands (see `NodeState::move_state`). For an analog
+/// input "past" means past the card's threshold; for an "in order" chord it
+/// means the chord is completed.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub enum MovePhase {
+    /// At rest (zero / the chord's first input up).
+    #[default]
+    Idle,
+    /// Started, not past, still inside the time gap.
+    Moving,
+    /// Got past inside the time gap and is still past.
+    Fast,
+    /// Too slow, or done: nothing more from this gesture until it returns to
+    /// rest.
+    Spent,
+}
+
+/// Timing of a card's current gesture (see `NodeState::move_state`).
+#[derive(Default, Clone, Copy, Debug)]
+pub struct MoveTrack {
+    pub phase: MovePhase,
+    /// Seconds since the gesture started.
+    pub since_start: f32,
+    /// Seconds spent past during the current fast stretch.
+    pub above_s: f32,
+    /// Short mode: seconds of output left to play back after a qualifying tap.
+    pub replay_s: f32,
+    /// Double on a chord: how many times it's been completed in this gesture.
+    pub taps: u8,
+}
+
+/// Hold-back state of one input pin (see `NodeState::hold_back`).
+///
+/// `cap` only matters for a stick direction: how far the rest of the node
+/// still sees it deflect while hidden (0 = not at all).
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub enum HoldBackPin {
+    #[default]
+    Idle,
+    /// Hidden while a card is still deciding on it. `held_s` is the current
+    /// press's length so far; `released` means that press already ended (so
+    /// it's replayed if the card gives up).
+    Withheld { held_s: f32, released: bool, cap: f32 },
+    /// Used by a card that fired; stays hidden until the pin is released —
+    /// unless `restore`: an earlier input of an "in order" chord, which comes
+    /// back live as soon as the chord lets go while it's still held (the chord
+    /// works as a mode shift).
+    Consumed { cap: f32, restore: bool },
+    /// The card gave up after the press ended: the press plays back late.
+    Replaying { remaining_s: f32 },
+}

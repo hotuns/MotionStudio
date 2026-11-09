@@ -1,0 +1,1369 @@
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
+
+use glam::Vec2;
+use flexinput_core::{PinMapExt, PinSigs, Signal, SignalType, SigMap, BusMap, automap};
+use serde_json::Value;
+
+use crate::graph::{NodeSnap, ProcessingGraph};
+use crate::state::NodeState;
+
+// The evaluator is split across `eval/`; this file keeps the graph tick itself
+// (`eval_graph_tick` / `eval_subgraph`, which share a dispatch and must not be
+// separated) plus the module-body evaluators the tick calls into.
+//
+// Children are re-exported with `pub use` rather than `pub(crate) use` because
+// `eval::` is a public module: paths like `flexinput_engine::eval::sample_curve`
+// are consumed outside this crate, and a crate-restricted glob would narrow
+// them. Items the split promoted to `pub(crate)` simply stay crate-visible —
+// a glob re-export never widens.
+mod activation;
+mod combiner_motion;
+mod compute;
+mod config;
+mod curves;
+mod device_cal;
+mod feedback;
+mod midi_bus;
+mod modules;
+mod registry;
+mod trackpad;
+#[cfg(all(test, not(studio_headless)))]
+mod tests;
+mod publish;
+
+pub use activation::*;
+pub use compute::*;
+pub use config::*;
+pub use curves::*;
+pub use device_cal::*;
+pub use modules::*;
+pub use trackpad::TrackpadState;
+pub use feedback::TriggerClicks;
+pub use combiner_motion::MotionCorrelator;
+pub(crate) use registry::*;
+// Every publisher is crate-internal — nothing outside the engine publishes
+// into the bus — so this one glob is narrowed rather than `pub`.
+pub(crate) use publish::*;
+pub(crate) use feedback::*;
+pub(crate) use midi_bus::*;
+
+/// Namespaces inner node UIDs under their containing subpatch's UID to avoid
+/// collisions in the shared `state` map (and the `remap:`/`collector:` keys the
+/// UI's AutoMap resolver derives) when multiple subpatches — including nested
+/// ones — share inner node indices.
+///
+/// The previous `(outer << 20) + inner + 1` was NOT injective: a left-shift by
+/// 20 discards high bits, so two different `(outer, inner)` pairs (e.g. a
+/// top-level subpatch's Remapper and a differently-nested one) could alias to
+/// the same UID. That made the two distinct nodes write the SAME collector key,
+/// each clobbering the other's per-frame output (observed as a Remapper's
+/// suppressed D-pad direction leaking through). This uses a splitmix64-style
+/// finalizer over a 128→64 fold of the two operands, which is effectively
+/// collision-free for the small integer node ids in play.
+///
+/// MUST stay identical between the engine eval and the UI's `find_automap_device`
+/// walkers — both call this same function so their keys agree.
+#[inline]
+pub fn namespaced_uid(outer: usize, inner: usize) -> usize {
+    // Reserve a marker bit so a namespaced uid never collides with a raw
+    // top-level node uid (which are small snarl indices). +1 on inner keeps
+    // inner==0 distinguishable.
+    let mut z = (outer as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add((inner as u64).wrapping_add(1));
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    // Force the high bit set so these never alias a plain (small) node uid.
+    (z | 0x8000_0000_0000_0000) as usize
+}
+
+/// Evaluates the inner graph of a sub-patch node.
+/// Returns the per-node computed signal vectors in inner flat-graph order.
+/// `outer_uid` is the UID of the containing meta-module node, used for state namespacing.
+/// Inner display nodes (oscilloscope, response_curve, etc.) push samples into
+/// `scope_samples`/`last_inputs` keyed by `namespaced_uid` so the UI can render
+/// live feedback on inner module bodies (and their pinned mirrors on the outer body).
+/// AutoMap collectors inside the subpatch inject into `collector_sigs` using a
+/// namespaced key so downstream sinks can pick them up via the same routing path.
+fn eval_subgraph(
+    graph: &ProcessingGraph,
+    outer_inputs: &[Option<Signal>],
+    state: &mut HashMap<usize, NodeState>,
+    dev_sigs: &BusMap,
+    collector_sigs: &mut BusMap,
+    scope_samples: &mut Vec<(usize, Vec<Option<f32>>)>,
+    last_inputs: &mut HashMap<usize, Vec<Option<Signal>>>,
+    last_outputs: &mut HashMap<usize, Vec<Option<Signal>>>,
+    fb_routes: &mut HashMap<String, String>,
+    outer_uid: usize,
+    dt: f32,
+    display: bool,
+) -> Vec<Vec<Option<Signal>>> {
+    let n = graph.nodes.len();
+    let mut computed: Vec<Vec<Option<Signal>>> = vec![vec![]; n];
+    let mut inputs_buf: Vec<Option<Signal>> = Vec::new();
+
+    for (idx, snap) in graph.nodes.iter().enumerate() {
+        // Compute a namespaced UID for this inner node early so inner-node
+        // special cases can publish into `collector_sigs` using the same
+        // keying scheme the UI's AutoMap resolver expects.
+        let ns_uid = namespaced_uid(outer_uid, snap.node_uid);
+        // Inlet: produce the corresponding outer input signal.
+        if snap.module_id == "subpatch.inlet" {
+            let pin_idx = snap.params.get("pin_index")
+                .and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            computed[idx] = vec![outer_inputs.get(pin_idx).copied().flatten()];
+            continue;
+        }
+
+        // Nested subpatch within this subpatch.
+        if let Some(ref sg) = snap.inline_subgraph {
+            let inner_inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            let nested_uid = namespaced_uid(outer_uid, snap.node_uid);
+            let inner_computed = eval_subgraph(
+                &sg.graph, &inner_inputs, state, dev_sigs, collector_sigs,
+                scope_samples, last_inputs, last_outputs, fb_routes, nested_uid, dt, display,
+            );
+            computed[idx] = sg.outlet_locs.iter()
+                .map(|loc| loc.and_then(|(ni, np)| inner_computed.get(ni).and_then(|v| v.get(np)).copied().flatten()))
+                .collect();
+            continue;
+        }
+
+        // AutoMap collector inside a subpatch: inject signals into collector_sigs
+        // using a namespaced key so it matches what find_automap_device produced.
+        // Mirrors the top-level arm: pass-through upstream first, then apply
+        // explicit collected-pin overrides.
+        if snap.module_id == "module.automap_collect" {
+            let inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            let collect_ids = snap.params.get("_collect_pin_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let uid_key = format!("collector:{}", ns_uid);
+
+            // Phase 1: pass-through from upstream AutoMap source.
+            // See top-level arm for the rationale on iterating actual
+            // collector_sigs entries rather than `ALL_PINS`.
+            let upstream_dev = snap.params.get("_automap_device_id")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            let upstream_collector = snap.params.get("_automap_collector_id")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if !upstream_collector.is_empty() {
+                collector_sigs.copy_bus(upstream_collector, &uid_key, |_| true);
+                collector_sigs.fill_canonical(&uid_key, dev_sigs.view(upstream_dev));
+            } else if !upstream_dev.is_empty() {
+                collector_sigs.pass_canonical(&uid_key, "", dev_sigs.view(upstream_dev));
+            }
+            // A MIDI device's pins are dynamic (not in ALL_PINS).
+            fill_raw_dynamic(dev_sigs, &upstream_dev, &uid_key, collector_sigs);
+
+            // Phase 2: explicit collected-pin overrides.
+            for (i, pin_id) in collect_ids.iter().enumerate() {
+                if let Some(sig) = inputs.get(i + 1).and_then(|s| *s) {
+                    if !pin_id.is_empty() {
+                        collector_sigs.set_pin(&uid_key, &pin_id, sig);
+                        mark_produced(&uid_key, pin_id, collector_sigs);
+                    }
+                }
+            }
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // Handle remapper inside a subpatch the same way the top-level loop
+        // does, but publish under the namespaced remap key so downstream
+        // sinks (or outer graph routing) can pick up the overrides.
+        if snap.module_id == "module.remapper" {
+            // Shared Remapper evaluation (identical at top level and in sub-patches).
+            eval_remapper_node(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // Touch Zones mapping mode nested in a sub-patch — publish under the
+        // NAMESPACED uid so the touchmap key matches downstream lookups.
+        if snap.module_id == "module.touch_zones"
+            && snap.params.get("zone_mode").and_then(|v| v.as_str()) == Some("mapping")
+        {
+            eval_touch_zones_map_node(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // Virtual Menu nested in a sub-patch — publish under the NAMESPACED
+        // uid so the menumap key matches downstream lookups; mirror outputs
+        // into last_outputs so the outer body's zone-live highlight works.
+        if snap.module_id == "module.menu" {
+            let inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            computed[idx] = eval_menu_node(
+                snap, ns_uid, &inputs, dev_sigs, collector_sigs, state, dt);
+            if display { last_outputs.insert(ns_uid, computed[idx].clone()); }
+            continue;
+        }
+
+        // RWS Aim nested in a sub-patch — intercepted so its flick-stick
+        // source-suppression can publish under the namespaced uid.
+        if snap.module_id == "processing.rws" {
+            let inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            computed[idx] = eval_rws_node(snap, ns_uid, &inputs, collector_sigs, state, dt);
+            if display { last_outputs.insert(ns_uid, computed[idx].clone()); }
+            continue;
+        }
+
+        // AutoMap curves nested in a sub-patch — publish under the NAMESPACED uid
+        // so a downstream sink's `collector:` lookup finds the curved bus.
+        if snap.module_id == AUTOMAP_CURVE_ID || snap.module_id == AUTOMAP_TWOWAY_CURVE_ID {
+            let (inputs, outputs) = eval_automap_curve_node(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+            let inputs = if snap.module_id == AUTOMAP_TWOWAY_CURVE_ID { twoway_live_inputs(&inputs, state.get(&ns_uid)) } else { inputs };
+            if display { last_inputs.insert(ns_uid, inputs); }
+            if display { last_outputs.insert(ns_uid, outputs); }
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // Area Mapper nested in a sub-patch — publish under the NAMESPACED uid
+        // so a downstream sink's `collector:` lookup finds the mapped bus.
+        if snap.module_id == AREA_MAPPER_ID {
+            let out = eval_area_mapper_node(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+            if display { last_outputs.insert(ns_uid, out); }
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // Gyro to Stick Rotation nested in a sub-patch — the same, keyed by the
+        // namespaced uid. Its live values ride in last_outputs for the body.
+        if snap.module_id == STICK_ROT_ID {
+            let out = eval_stick_rotation_node(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+            if display { last_outputs.insert(ns_uid, out); }
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // module.map_action inside subpatch: mirror top-level behaviour but
+        // write last_outputs keyed by the namespaced UID so UI/outer bodies
+        // can observe inner output state.
+        if snap.module_id == "module.map_action" {
+            // Shared Map Action evaluation (identical at top level and sub-patch).
+            computed[idx] = eval_map_action_node(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+            if display { last_outputs.insert(ns_uid, computed[idx].clone()); }
+            continue;
+        }
+
+        // AutoMap fork / combiner / selector inside a sub-patch. Same helpers
+        // as the top-level loop, but keyed under `ns_uid` so downstream sinks
+        // (and the UI's `find_automap_device_rec` walker, which folds the outer
+        // chain when it crosses the subpatch boundary) look up the right entry
+        // in `collector_sigs`. Without these arms, the sub-patch falls through
+        // to `compute_node` which doesn't touch `collector_sigs` at all —
+        // upstream Remapper / Collector overrides get dropped on the floor.
+        if snap.module_id == "module.automap_fork" {
+            automap_fork_publish(snap, ns_uid, &computed, dev_sigs, collector_sigs);
+            computed[idx] = vec![None; snap.n_outputs];
+            if display { last_outputs.insert(ns_uid, computed[idx].clone()); }
+            continue;
+        }
+        if snap.module_id == "module.automap_combiner" {
+            automap_combiner_publish(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+            computed[idx] = vec![None];
+            if display { last_outputs.insert(ns_uid, computed[idx].clone()); }
+            continue;
+        }
+        if snap.module_id == "module.automap_selector" {
+            automap_selector_publish(snap, ns_uid, &computed, dev_sigs, collector_sigs, fb_routes);
+            computed[idx] = vec![None];
+            if display { last_outputs.insert(ns_uid, computed[idx].clone()); }
+            continue;
+        }
+        // Feedback Control inside a sub-patch — the common case (device pins
+        // aren't reachable there, which is the whole reason this node exists).
+        // The injection key is the PHYSICAL device id (stamped at build time),
+        // not the uid, so no namespacing is needed; outlets read dev_sigs by the
+        // stamped virtual destination id. Identical to the top-level arm.
+        if snap.module_id == "module.feedback_control" {
+            let out = feedback_control_publish(snap, &computed, dev_sigs, collector_sigs);
+            if display { last_outputs.insert(ns_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        // Module-registry seam (Phase C): a module that registered an injector
+        // publisher is dispatched here BEFORE the hardcoded arms below (which stay
+        // as fallback for un-migrated modules). Nested case: publish under the
+        // NAMESPACED uid (ns_uid) so it matches the capture manager's nested
+        // registration and the downstream sink's collector lookup. Migrated: Audio
+        // Stream Haptics (was a doesn't-work-when-nested bug before it got this uid).
+        if let Some(publish) = eval_hooks(&snap.module_id).and_then(|h| h.publish) {
+            let out = publish(snap, ns_uid, dev_sigs, collector_sigs);
+            if display { last_outputs.insert(ns_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        // Same seam, for a module that runs a state machine over its own node
+        // state (and so needs `state` + `dt`). Migrated: module.jsm.
+        if let Some(publish) = eval_hooks(&snap.module_id).and_then(|h| h.publish_stateful) {
+            let out = publish(snap, ns_uid, dev_sigs, collector_sigs, state, dt);
+            if display { last_outputs.insert(ns_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        // Network Send / Receive nested in a sub-patch. Publish under the
+        // NAMESPACED uid so the socket, collector pass-through, and downstream
+        // sink lookup all agree (mirrors ASTH's nested arm above).
+        #[cfg(not(studio_headless))]
+if snap.module_id == NET_SEND_ID {
+            let out = net_send_publish(snap, ns_uid, dev_sigs, collector_sigs);
+            if display { last_outputs.insert(ns_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        #[cfg(not(studio_headless))]
+if snap.module_id == NET_RECV_ID {
+            let out = net_recv_publish(snap, ns_uid, dev_sigs, collector_sigs);
+            if display { last_outputs.insert(ns_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+
+        inputs_buf.clear();
+        inputs_buf.extend(snap.input_sources.iter()
+            .map(|src| src.and_then(|(si, op)| {
+                computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+            })));
+        let inputs = &inputs_buf;
+
+        let node_state = state.entry(ns_uid).or_insert_with(NodeState::default);
+        if let Some(ref vals) = snap.aux_f32_override {
+            node_state.aux_f32 = vals.clone();
+        }
+        let node_outputs = compute_node(snap, &inputs, node_state, dev_sigs, collector_sigs, dt);
+
+        // ── 3DOF lean dispatch (subgraph eval) ───────────────────────────
+        //
+        // Mirror of the top-level dispatch — the 3DOF module commonly sits
+        // inside a sub-patch (gyro pre-processing wrapped behind a clean
+        // interface). Without this block, lean mappings inside a subpatch
+        // wouldn't fire even though their UI works the same way.
+        //
+        // Uses `ns_uid` (namespaced UID) so the collector key matches what
+        // `find_automap_device_rec` in app.rs computes when something
+        // downstream traces back through the subpatch boundary.
+        if snap.module_id == "processing.gyro_3dof" {
+            lean_dispatch_into_collector_sigs(
+                snap, ns_uid, &node_outputs, node_state, collector_sigs, dt,
+            );
+        }
+
+        // Display state for inner nodes — keyed by namespaced UID so the UI walk
+        // can find them when populating `node.extra.last_signals` / `history`.
+        match snap.module_id.as_str() {
+            "display.oscilloscope" => {
+                let sample = inputs.iter().map(|s| sig_to_f32(*s)).collect();
+                scope_samples.push((ns_uid, sample));
+                if display { last_inputs.insert(ns_uid, inputs.clone()); }
+            }
+            // A readout shows only its latest value: no per-tick scope samples
+            // (the UI kept 20k of them per readout that nothing read).
+            "display.readout" => {
+                if display { last_inputs.insert(ns_uid, inputs.clone()); }
+            }
+            "display.trigscope" => {
+                // inputs[0] is trigger; inputs[1..] are data channels.
+                // Emit all inputs so the UI can do trigger-edge detection.
+                let sample = inputs.iter().map(|s| sig_to_f32(*s)).collect();
+                scope_samples.push((ns_uid, sample));
+                if display { last_inputs.insert(ns_uid, inputs.clone()); }
+            }
+            "display.vectorscope" => {
+                let sample = inputs.iter().flat_map(|sig| match sig {
+                    Some(Signal::Vec2(v)) => [Some(v.x), Some(v.y)],
+                    _ => [None, None],
+                }).collect();
+                scope_samples.push((ns_uid, sample));
+                if display { last_inputs.insert(ns_uid, inputs.clone()); }
+            }
+            // The 3D controller viewer reads its Orientation quaternion (input
+            // pin 1, a Vec4) from the mirrored inputs.
+            "display.controller3d" => {
+                if display { last_inputs.insert(ns_uid, inputs.clone()); }
+            }
+            "module.response_curve" | "module.vec_response_curve" | "module.vec_reshape" => {
+                if display { last_inputs.insert(ns_uid, inputs.clone()); }
+            }
+            "module.twoway_response_curve" => {
+                if display { last_inputs.insert(ns_uid, twoway_live_inputs(&inputs, Some(node_state))); }
+            }
+            "generator.envelope" => {
+                if display { last_inputs.insert(ns_uid, node_state.last_signals.clone()); }
+            }
+            _ => {}
+        }
+        // Populate last_outputs for every node — used by the UI to drive the
+        // per-pin signal glow on downstream device-sink inputs.
+        if display { last_outputs.insert(ns_uid, node_outputs.clone()); }
+
+        computed[idx] = node_outputs;
+    }
+
+    computed
+}
+
+// ── Main graph tick ───────────────────────────────────────────────────────────
+
+/// Evaluate one tick into `out`. The caller owns `out` and is expected to
+/// reuse the same `TickOutput` across ticks — we `.clear()` at the top so
+/// the HashMaps keep their allocated capacity between calls instead of
+/// being dropped and reallocated. At the default 2 kHz rate this was a
+/// non-trivial source of allocator pressure even on empty graphs.
+pub fn eval_graph_tick<S: std::hash::BuildHasher>(
+    graph: &ProcessingGraph,
+    state: &mut HashMap<usize, NodeState>,
+    dev_sigs: &HashMap<(String, String), Signal, S>,
+    dt: f32,
+    out: &mut TickOutput,
+) {
+    puffin::profile_function!();
+    out.clear();
+    let display = !out.skip_display;
+    let n = graph.nodes.len();
+    let mut computed: Vec<Vec<Option<Signal>>> = vec![vec![]; n];
+    let mut inputs_buf: Vec<Option<Signal>> = Vec::new();
+
+    // Apply per-device source-side post-processing (stick deadzone + gyro
+    // multiplier) ONCE up front so every downstream consumer — direct wires,
+    // AutoMap split/collector, sink AutoMap, remapper — sees the processed
+    // values. Avoids the prior leak where AutoMap pulled raw dev_sigs and
+    // bypassed the source node's params.
+    let mut dev_sigs_owned: BusMap = std::mem::take(&mut out.dev_scratch);
+    {
+        puffin::profile_scope!("preprocess_dev_sigs");
+        if !out.same_input || device_params(graph).preprocessing_has_state {
+            // A snapped digital trigger lets go past its hysteresis and debounce,
+            // so it carries where it stands from tick to tick.
+            let carry = state.entry(MACRO_CARRY_UID).or_default();
+            let snaps = carry.digital_triggers.get_or_insert_with(Default::default);
+            out.dev_base.clear();
+            preprocess_dev_sigs_into(graph, dev_sigs, &mut out.dev_base, snaps, dt);
+        }
+        dev_sigs_owned.clone_from(&out.dev_base);
+    }
+    // Device-level stick rebound filter (opt-in per device.source): on the
+    // calibrated sticks, before anything — the source-block snapshot included —
+    // reads them.
+    {
+        let carry = state.entry(MACRO_CARRY_UID).or_default();
+        let st = carry.stick_rebound.get_or_insert_with(Default::default);
+        filter_stick_rebound(graph, &mut dev_sigs_owned, st, dt);
+    }
+    // Calibrated trackpads: reach, outer deadzone and offset.
+    filter_trackpads(graph, &mut dev_sigs_owned);
+    // Apply the Virtual Menu SOURCE-BLOCK (one tick stale): zero every pointer
+    // pin an open menu asked to block last tick, so those analog inputs reach
+    // ONLY the menu's navigation — not a mouse mapping, another module, or a
+    // sink. Snapshot their pre-block values first so the menu itself still reads
+    // them (it's the reason they're blocked for everyone else). See
+    // `NodeState::source_block` / `unblocked_src`.
+    {
+        let req: Vec<(String, String)> = state.get(&MACRO_CARRY_UID)
+            .map(|s| s.source_block.iter().cloned().collect())
+            .unwrap_or_default();
+        let mut snap: SigMap = SigMap::default();
+        for key in &req {
+            if let Some(&v) = dev_sigs_owned.get(key) {
+                snap.insert(key.clone(), v);
+            }
+            dev_sigs_owned.insert(key.clone(), pointer_block_off(&key.1));
+        }
+        let e = state.entry(MACRO_CARRY_UID).or_default();
+        e.unblocked_src = snap;
+    }
+    // Set Neutral Forward, requested by a card last tick (one tick stale).
+    apply_orient_neutral(state.entry(MACRO_CARRY_UID).or_default(), &mut dev_sigs_owned);
+    // Trigger clicks read the pad as it reports, the way a Steam Controller's
+    // backend does: a calibrated range or a menu's source block mustn't move them.
+    let raw_dev_sigs = dev_sigs;
+    let dev_sigs = &dev_sigs_owned;
+
+    // Destructure with `ref mut` so the rest of the function can keep
+    // using bare names (outputs, scope_samples, …) as mutable references.
+    // Borrows live until the end of the function; final
+    // `TickOutput { … }` packing is no longer needed.
+    // Signals injected by AutoMap Collector nodes, keyed by ("collector:{uid}", pin_id).
+    let mut collector_sigs: BusMap = std::mem::take(&mut out.bus_scratch);
+    let TickOutput {
+        ref mut outputs,
+        ref mut scope_samples,
+        ref mut last_inputs,
+        ref mut last_outputs,
+        ref mut sink_outputs,
+        ..
+    } = *out;
+    // What the game asks of each pad / bus this tick (and network peers'
+    // feedback), gathered before any node runs so feedback modules read it
+    // this tick. See eval/feedback.rs.
+    gather_game_feedback(&graph.nodes, dev_sigs, &mut collector_sigs);
+    // Reverse feedback routes: a synthetic AutoMap node's OUTPUT id (e.g.
+    // "forksel:5:0" from a Selector) → the SOURCE id it currently gates from
+    // (e.g. "collector:3" for a network recv, or "gilrs:…" for a pad). Populated
+    // by the Selector/Fork eval below; consumed by the reverse-feedback post-pass
+    // so an ASTH / Feedback Control node placed AFTER a Selector still reaches the
+    // pad or network back-channel (feedback flows backward along the gate).
+    let mut fb_routes: HashMap<String, String> = HashMap::new();
+
+    {
+    puffin::profile_scope!("main_node_loop");
+    for (idx, snap) in graph.nodes.iter().enumerate() {
+        // ── module.map_action: AutoMap in → Bool out based on stored mappings ──
+        if snap.module_id == "module.map_action" {
+            // Shared Map Action evaluation (identical at top level and sub-patch).
+            computed[idx] = eval_map_action_node(snap, snap.node_uid, dev_sigs, &collector_sigs, state, dt);
+            if display { last_outputs.insert(snap.node_uid, computed[idx].clone()); }
+            continue;
+        }
+
+        // ── module.remapper: pass-through + per-mapping override + consume ────
+        if snap.module_id == "module.remapper" {
+            // Shared Remapper evaluation (identical at top level and in sub-patches).
+            eval_remapper_node(snap, snap.node_uid, dev_sigs, &mut collector_sigs, state, dt);
+
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // ── module.touch_zones (mapping mode): inject per-zone behaviours ─────
+        // Ports mode falls through to compute_node (typed zone outputs); mapping
+        // mode publishes bus overrides under `touchmap:{uid}` like the Remapper.
+        if snap.module_id == "module.touch_zones"
+            && snap.params.get("zone_mode").and_then(|v| v.as_str()) == Some("mapping")
+        {
+            eval_touch_zones_map_node(snap, snap.node_uid, dev_sigs, &mut collector_sigs, state, dt);
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // ── module.menu: open/hover/select state machine + `menumap:{uid}`
+        // injector (cards, suppression). Runs in BOTH zone modes — ports mode
+        // still needs the state machine for its typed outputs and suppression.
+        if snap.module_id == "module.menu" {
+            let inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            computed[idx] = eval_menu_node(
+                snap, snap.node_uid, &inputs, dev_sigs, &mut collector_sigs, state, dt);
+            if display { last_outputs.insert(snap.node_uid, computed[idx].clone()); }
+            continue;
+        }
+
+        // ── processing.rws: flick-stick source-suppression (block the flick
+        // stick downstream, read it from the pre-block snapshot) + the aim math.
+        if snap.module_id == "processing.rws" {
+            let inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            computed[idx] = eval_rws_node(snap, snap.node_uid, &inputs, &mut collector_sigs, state, dt);
+            if display { last_outputs.insert(snap.node_uid, computed[idx].clone()); }
+            continue;
+        }
+
+        // ── AutoMap curves: hand the bus on with one picked pin reshaped. The
+        // picked signal's raw and curved values stand in for the plain curve's
+        // input/output channels (three for a gyro / accel pick), which the curve
+        // body draws its live dots from.
+        if snap.module_id == AUTOMAP_CURVE_ID || snap.module_id == AUTOMAP_TWOWAY_CURVE_ID {
+            let (inputs, outputs) = eval_automap_curve_node(snap, snap.node_uid, dev_sigs, &mut collector_sigs, state, dt);
+            let inputs = if snap.module_id == AUTOMAP_TWOWAY_CURVE_ID { twoway_live_inputs(&inputs, state.get(&snap.node_uid)) } else { inputs };
+            if display { last_inputs.insert(snap.node_uid, inputs); }
+            if display { last_outputs.insert(snap.node_uid, outputs); }
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // ── Area Mapper: hand the bus on with the picked XY pair mapped onto
+        // its cells. The live point and cell weights ride in last_outputs.
+        if snap.module_id == AREA_MAPPER_ID {
+            let out = eval_area_mapper_node(snap, snap.node_uid, dev_sigs, &mut collector_sigs, state, dt);
+            if display { last_outputs.insert(snap.node_uid, out); }
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // ── Gyro to Stick Rotation: hand the bus on with the picked stick turned
+        // by the gyro. The stick in and out, and the offset, ride in last_outputs
+        // for the body's circle.
+        if snap.module_id == STICK_ROT_ID {
+            let out = eval_stick_rotation_node(snap, snap.node_uid, dev_sigs, &mut collector_sigs, state, dt);
+            if display { last_outputs.insert(snap.node_uid, out); }
+            computed[idx] = vec![None];
+            continue;
+        }
+
+        // ── module.automap_collect: inject individual inputs into collector_sigs ──
+        //
+        // Two-phase write into collector_sigs[("collector:{uid}", pin)]:
+        //   1. Pass-through pins from the upstream AutoMap bus — pulled
+        //      either from upstream `collector_sigs` (if upstream is a
+        //      Remapper/Collector/Fork/Selector/Combiner/Lean) or from
+        //      raw `dev_sigs` (if upstream is a physical device). This
+        //      ensures mapped output pins from an upstream Remapper still
+        //      reach downstream sinks even though the user didn't add
+        //      those pins via the Collector's "+" dropdown.
+        //   2. Explicit collected-pin overrides — values wired by the user
+        //      to the collector's individual input ports. These win over
+        //      pass-through for the same pin id.
+        if snap.module_id == "module.automap_collect" {
+            let inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            let collect_ids = snap.params.get("_collect_pin_ids")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let uid_key = format!("collector:{}", snap.node_uid);
+
+            // Phase 1: pass-through from upstream AutoMap source.
+            // Iterating upstream's actual collector_sigs entries (not just
+            // `ALL_PINS`) is required so off-spec pin names — Remapper's
+            // mapped keyboard keys like `key_f`, custom mouse buttons, etc.
+            // — also flow through. `ALL_PINS` only covers canonical pin ids.
+            let upstream_dev = snap.params.get("_automap_device_id")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            let upstream_collector = snap.params.get("_automap_collector_id")
+                .and_then(|v| v.as_str()).unwrap_or("");
+            if !upstream_collector.is_empty() {
+                // Copy EVERY entry from the upstream collector key.
+                collector_sigs.copy_bus(upstream_collector, &uid_key, |_| true);
+                // For canonical pins not present on the upstream collector
+                // (e.g. when upstream is a Remapper that only writes mapped
+                // pins, not pass-through), fall back to raw device samples.
+                collector_sigs.fill_canonical(&uid_key, dev_sigs.view(upstream_dev));
+            } else if !upstream_dev.is_empty() {
+                // No upstream collector — pure raw device pass-through.
+                collector_sigs.pass_canonical(&uid_key, "", dev_sigs.view(upstream_dev));
+            }
+            // A MIDI device's pins are dynamic (not in ALL_PINS): copy its live
+            // ones too, under whatever the upstream collector already carried.
+            fill_raw_dynamic(dev_sigs, &upstream_dev, &uid_key, &mut collector_sigs);
+
+            // Phase 2: explicit collected-pin overrides (win over pass-through).
+            // A MIDI pin wired in here counts as PRODUCED, so a MIDI Out sink
+            // sends it even with Thru off.
+            for (i, pin_id) in collect_ids.iter().enumerate() {
+                if let Some(sig) = inputs.get(i + 1).and_then(|s| *s) {
+                    if !pin_id.is_empty() {
+                        collector_sigs.set_pin(&uid_key, &pin_id, sig);
+                        mark_produced(&uid_key, pin_id, &mut collector_sigs);
+                    }
+                }
+            }
+            computed[idx] = vec![None]; // AutoMap passthrough: no signal value
+            continue;
+        }
+
+        // ── module.automap_fork: gate AutoMap bus to selected output ─────────
+        if snap.module_id == "module.automap_fork" {
+            automap_fork_publish(snap, snap.node_uid, &computed, dev_sigs, &mut collector_sigs);
+            computed[idx] = vec![None; snap.n_outputs];
+            continue;
+        }
+
+        // ── module.automap_combiner: merge N AutoMap inputs per per-pin policy ──
+        // Default policy SORT: walk inputs top-down (lowest port = highest priority);
+        // first asserted value wins. Per-pin overrides in `combiner_pin_policy`:
+        //   - OR  : Bool = logical OR;  Float = max(|x|) preserving sign of max
+        //   - AND : Bool = logical AND; Float = min(|x|) preserving sign of min
+        //   - XOR : Bool = parity;      Float = |a - b| (folded across all inputs)
+        //   - ADD : sum, clamped per pin (triggers [0,1], sticks/axes [-1,1])
+        //   - MULT: product, clamped per pin
+        // Writes into collector_sigs under "combiner:{uid}".
+        if snap.module_id == "module.automap_combiner" {
+            automap_combiner_publish(snap, snap.node_uid, dev_sigs, &mut collector_sigs, state, dt);
+            computed[idx] = vec![None];
+            continue;
+        }
+        // ── module.automap_selector: gate selected AutoMap input to output ────
+        if snap.module_id == "module.automap_selector" {
+            automap_selector_publish(snap, snap.node_uid, &computed, dev_sigs, &mut collector_sigs, &mut fb_routes);
+            computed[idx] = vec![None];
+            continue;
+        }
+        // ── module.feedback_control: inject inlets into the physical pad's
+        //    feedback channel; tap outlets from the virtual destination. ──────
+        if snap.module_id == "module.feedback_control" {
+            let out = feedback_control_publish(snap, &computed, dev_sigs, &mut collector_sigs);
+            if display { last_outputs.insert(snap.node_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        // Module-registry seam (Phase C): a module with a registered injector
+        // publisher is dispatched here before the hardcoded arms below (fallback
+        // for un-migrated modules). Migrated: module.audio_stream_haptics — passes
+        // the AutoMap bus through, then injects audio-derived HD rumble into the
+        // target pad's feedback (output[0] = passthrough, output[1..] = band EFs +
+        // carrier freqs; see audio_stream_haptics_publish). Publishes under the
+        // node's top-level uid here.
+        if let Some(publish) = eval_hooks(&snap.module_id).and_then(|h| h.publish_stateful) {
+            let out = publish(snap, snap.node_uid, dev_sigs, &mut collector_sigs, state, dt);
+            if display { last_outputs.insert(snap.node_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        if let Some(publish) = eval_hooks(&snap.module_id).and_then(|h| h.publish) {
+            let out = publish(snap, snap.node_uid, dev_sigs, &mut collector_sigs);
+            if display { last_outputs.insert(snap.node_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        // ── module.network_send: pass the bus through locally + transmit it;
+        //    inject peer feedback into the upstream pad. ────────────────────────
+        #[cfg(not(studio_headless))]
+if snap.module_id == NET_SEND_ID {
+            let out = net_send_publish(snap, snap.node_uid, dev_sigs, &mut collector_sigs);
+            if display { last_outputs.insert(snap.node_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        // ── module.network_recv: publish the peer's bus into collector:{uid};
+        //    gather downstream feedback to ship back. ──────────────────────────
+        #[cfg(not(studio_headless))]
+if snap.module_id == NET_RECV_ID {
+            let out = net_recv_publish(snap, snap.node_uid, dev_sigs, &mut collector_sigs);
+            if display { last_outputs.insert(snap.node_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+        // ── device.sink: collect combined inputs, populate sink_outputs ──────
+        if let Some(ref st) = snap.sink_target {
+            // Pins that have at least one actual direct wire (non-empty multi_sources).
+            // These take priority over auto-mapped signals for the same pin.
+            let compiled = st.compiled();
+            let directly_wired = &compiled.directly_wired;
+
+            // Per-sink scaling params. Currently: mouse sensitivity on
+            // virtual.keymouse — applied to mouse_x / mouse_y / mouse pins.
+            let mouse_sens = snap.params.get("mouse_sensitivity")
+                .and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let scale_for_sink = |pin_id: &str, sig: Signal| -> Signal {
+                if st.device_id.starts_with("virtual.keymouse") && is_mouse_pin(pin_id)
+                    && (mouse_sens - 1.0).abs() > f32::EPSILON
+                {
+                    match sig {
+                        Signal::Float(v) => Signal::Float(v * mouse_sens),
+                        Signal::Vec2(v)  => Signal::Vec2(v * mouse_sens),
+                        other => other,
+                    }
+                } else { sig }
+            };
+
+            // Direct-wire inputs (possibly multi-source per pin, combined additively).
+            //
+            // Self-sink nodes (device.source whose feedback inputs loop back to
+            // their own outputs, directly or via a Splitter/Math chain) are
+            // deferred to a post-pass below: their upstream chain only fills
+            // `computed[]` after this iteration runs, so we wait until the main
+            // loop completes before reading.
+            if !st.is_self_sink {
+                for (in_idx, pin_id) in st.pin_ids.iter().enumerate() {
+                    if pin_id.is_empty() { continue; }
+                    let mut combined: Option<Signal> = None;
+                    if let Some(sources) = st.multi_sources.get(in_idx) {
+                        for &(src_idx, out_pin) in sources {
+                            if let Some(Some(sig)) = computed.get(src_idx).and_then(|v| v.get(out_pin)) {
+                                combined = Some(match combined {
+                                    None => *sig,
+                                    Some(prev) => combine_signals(prev, *sig),
+                                });
+                            }
+                        }
+                    }
+                    if let Some(sig) = combined {
+                        sink_outputs.set_pin(&st.device_id, &pin_id, scale_for_sink(pin_id, sig));
+                    }
+                }
+            }
+
+            // "Route gamepad touchpad" (Virtual KB/M, off by default): the
+            // Auto-Map source's touch fingers drive this sink as a trackpad.
+            // Read off the bus below, stepped after it — see `trackpad`.
+            let route_touchpad = st.device_id.starts_with("virtual.keymouse")
+                && snap.params.get("route_touchpad").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut touch_frame: Option<trackpad::TouchFrame> = None;
+            // "Joy-Con 2 mouse sensor" (Virtual KB/M, off by default): the
+            // Auto-Map source's optical sensor drives the pointer.
+            let route_optical = st.device_id.starts_with("virtual.keymouse")
+                && snap.params.get("route_optical_mouse").and_then(|v| v.as_bool()).unwrap_or(false);
+            let mut optical: Option<Vec2> = None;
+
+            // AutoMap: semantic-map source device pins → sink device pins.
+            // Uses resolve_mapping() for cross-family translation (e.g. btn_cross → btn_south).
+            if let Some((ref src_dev, _)) = st.automap_source {
+                let is_collector = is_namespaced_source(src_dev);
+                // Digital→analog trigger bridges (`btn_lt_dig`→`left_trigger`,
+                // `btn_rt_dig`→`right_trigger`) are a LOWEST-PRIORITY fallback:
+                // they only fill the analog trigger when no primary source — the
+                // real analog `left_trigger`/`right_trigger`, a manually-injected
+                // AutoMap value, or a Remapper analog mapping — already drove it.
+                // Deferred to a second pass so primaries (processed first) win.
+                let mut deferred_digital_triggers: Vec<(&str, &str)> = Vec::new();
+                let resolve_sig = |mapped_src: &str| -> Option<Signal> {
+                    if is_collector {
+                        collector_sigs.get_pin(&src_dev, &mapped_src).copied()
+                            .or_else(|| {
+                                st.automap_fallback_dev.as_ref().and_then(|fb| {
+                                    dev_sigs.get_pin(&fb, &mapped_src).copied()
+                                })
+                            })
+                    } else {
+                        dev_sigs.get_pin(&src_dev, &mapped_src).copied()
+                    }
+                };
+                let (first, second) = if is_collector {
+                    (collector_sigs.view(src_dev),
+                     dev_sigs.view(st.automap_fallback_dev.as_deref().unwrap_or("")))
+                } else {
+                    (dev_sigs.view(src_dev), dev_sigs.view(""))
+                };
+                let sink_bus = sink_outputs.bus_id(&st.device_id);
+                for p in &compiled.pairs {
+                    if p.wired { continue; }
+                    if p.digital_trigger_bridge {
+                        // Only honour the bridge when the upstream source opted in
+                        // (or is a digital-only pad). Otherwise a pad with real
+                        // analog triggers would have its digital button leak into
+                        // the analog trigger.
+                        if st.digital_trigger_bridge {
+                            deferred_digital_triggers.push((&p.src, &p.dst));
+                        }
+                        continue;
+                    }
+                    let sig = match p.src_ix {
+                        Some(ix) => first.at(ix).or_else(|| second.at(ix)).copied(),
+                        None => resolve_sig(&p.src),
+                    };
+                    if let Some(sig) = sig {
+                        // Type coercion (Bool↔Float) is performed by the virtual device's
+                        // send() via Signal::as_float / as_bool, so we just hand the raw
+                        // signal off — semantic groups already routed it to the right pin.
+                        match p.dst_ix {
+                            Some(ix) => {
+                                if sink_outputs.at(sink_bus, ix).is_none() {
+                                    sink_outputs.set_at(sink_bus, ix, scale_for_sink(&p.dst, sig));
+                                }
+                            }
+                            None => sink_outputs.set_pin_if_absent(&st.device_id, &p.dst, scale_for_sink(&p.dst, sig)),
+                        }
+                    }
+                }
+                // Second pass: digital-trigger fallback. Writes the analog trigger
+                // ONLY when a primary source didn't (real analog, manual injection,
+                // or Remapper analog). The digital button drives the FULL value —
+                // pressed → 1.0, released → 0.0. We must write the 0.0 on release
+                // too, otherwise the trigger latches at its last pressed value and
+                // never lets go. On a mixed pad the real analog trigger always
+                // writes a primary (even 0.0), so `contains_key` skips this and the
+                // real analog wins as intended.
+                for (mapped_src, mapped_dst) in deferred_digital_triggers {
+                    if sink_outputs.has_pin(&st.device_id, mapped_dst) { continue; }
+                    if let Some(sig) = resolve_sig(mapped_src) {
+                        let v = if sig.as_bool() { 1.0 } else { 0.0 };
+                        sink_outputs.set_pin(&st.device_id, mapped_dst, Signal::Float(v));
+                    }
+                }
+                // Wildcard pass-through for virtual keyboard/mouse sinks: forward EVERY
+                // collector-injected signal to the sink as-is (using the source pin name
+                // verbatim).  The sink's send() handles arbitrary key names through its
+                // learned_keys fallback, so users can drive any custom key (F1, Space,
+                // letters, …) by adding it to the Collector via the Learn-key UI.
+                if is_collector && st.device_id.starts_with("virtual.keymouse") {
+                    for (pin, &sig) in collector_sigs.pins_of(src_dev) {
+                        if directly_wired.contains(pin) { continue; }
+                        sink_outputs.set_pin_if_absent(&st.device_id, pin, scale_for_sink(pin, sig));
+                    }
+                }
+                // MIDI Out: forward the bus's MIDI pins — only PRODUCED ones
+                // unless the sink's Thru toggle is on, so raw MIDI never loops
+                // straight back out by default (see `midi_bus`).
+                if st.device_id.starts_with("midi_out:") {
+                    let thru = snap.params.get("midi_thru").and_then(|v| v.as_bool()).unwrap_or(false);
+                    for (pin, sig) in midi_out_pins(
+                        src_dev, is_collector, st.automap_fallback_dev.as_deref(), thru,
+                        dev_sigs, &collector_sigs,
+                    ) {
+                        if directly_wired.contains(pin.as_str()) { continue; }
+                        sink_outputs.set_pin_if_absent(&st.device_id, &pin, sig);
+                    }
+                }
+                if route_touchpad {
+                    let finger = |active: &str, x: &str, y: &str| -> Option<Vec2> {
+                        if !resolve_sig(active)?.as_bool() { return None; }
+                        Some(Vec2::new(resolve_sig(x)?.as_float(), resolve_sig(y)?.as_float()))
+                    };
+                    let down = |pin: &str| resolve_sig(pin).is_some_and(|s| s.as_bool());
+                    touch_frame = Some(trackpad::TouchFrame {
+                        fingers: [
+                            finger("touch1_active", "touch1_x", "touch1_y"),
+                            finger("touch2_active", "touch2_x", "touch2_y"),
+                        ],
+                        click: down("btn_touchpad"),
+                        // Two trackpads of their own (a Steam Controller): the
+                        // right one's click is SDL's Misc 2.
+                        split: resolve_sig(flexinput_core::automap::TOUCH_PADS_PIN).is_some(),
+                        click2: down("btn_misc2"),
+                    });
+                }
+                if route_optical {
+                    // The device already publishes it in `mouse` units (+Y up,
+                    // Mouse speed 100 = a pixel per count), so it passes as-is.
+                    let axis = |p: &str| resolve_sig(p).map(|s| s.as_float()).unwrap_or(0.0);
+                    optical = Some(Vec2::new(axis("optical_x"), axis("optical_y")));
+                }
+            }
+
+            // Step the trackpad — or, with routing off, let go of whatever it
+            // held — and ADD its output to what the sink already gets: a wire
+            // or mapping onto the same pin keeps working alongside it.
+            let tp_out = match touch_frame {
+                Some(frame) => {
+                    let natural = !snap.params.get("touchpad_reverse_scroll")
+                        .and_then(|v| v.as_bool()).unwrap_or(false);
+                    Some(state.entry(snap.node_uid).or_default()
+                        .trackpad.get_or_insert_with(Default::default)
+                        .step(&frame, dt, natural))
+                }
+                None => state.get_mut(&snap.node_uid).and_then(|ns| {
+                    let out = ns.trackpad.as_mut()?.release(dt);
+                    if out.is_none() { ns.trackpad = None; }
+                    out
+                }),
+            };
+            if let Some(mut o) = tp_out {
+                let param = |key: &str| snap.params.get(key)
+                    .and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                o.pointer *= param("touchpad_speed");
+                o.scroll *= param("touchpad_scroll_speed");
+                let mut put = |pin: &str, sig: Signal| {
+                    sink_outputs.merge_pin(&st.device_id, pin, sig, |cur| *cur = combine_signals(*cur, sig));
+                };
+                if o.pointer != Vec2::ZERO { put("mouse_move", Signal::Vec2(o.pointer)); }
+                if o.scroll.y != 0.0 { put("scroll_move_y", Signal::Float(o.scroll.y)); }
+                if o.scroll.x != 0.0 { put("scroll_move_x", Signal::Float(o.scroll.x)); }
+                put("mouse_left", Signal::Bool(o.left));
+                put("mouse_right", Signal::Bool(o.right));
+                put("mouse_middle", Signal::Bool(o.middle));
+            }
+            // Like the trackpad: ADDED to whatever else drives the pointer.
+            // Mouse speed applies as it would to a wire; Sensor × on top.
+            if let Some(v) = optical.filter(|v| *v != Vec2::ZERO) {
+                let speed = snap.params.get("optical_mouse_speed")
+                    .and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                let sig = scale_for_sink("mouse", Signal::Vec2(v * speed));
+                sink_outputs.merge_pin(&st.device_id, "mouse", sig, |cur| *cur = combine_signals(*cur, sig));
+            }
+
+            // Resolve Vec2 vs individual axis conflicts (they write the same hardware registers).
+            // Priority: directly-wired axes beat auto-mapped Vec2; Vec2 wins in all other cases.
+            const STICK_GROUPS: &[(&str, &[&str])] = &[
+                ("left_stick",  &["left_stick_x", "left_stick_y"]),
+                ("right_stick", &["right_stick_x", "right_stick_y"]),
+                ("dpad",        &["dpad_x", "dpad_y"]),
+            ];
+            for &(vec2_pin, axis_pins) in STICK_GROUPS {
+                let has_vec2     = sink_outputs.has_pin(&st.device_id, &vec2_pin);
+                let has_any_axis = axis_pins.iter().any(|p| sink_outputs.has_pin(&st.device_id, &p));
+                if !has_vec2 || !has_any_axis { continue; }
+                let vec2_direct     = directly_wired.contains(vec2_pin);
+                let any_axis_direct = axis_pins.iter().any(|p| directly_wired.contains(*p));
+                if any_axis_direct && !vec2_direct {
+                    sink_outputs.remove_pin(&st.device_id, &vec2_pin);
+                } else {
+                    for &axis_pin in axis_pins {
+                        sink_outputs.remove_pin(&st.device_id, &axis_pin);
+                    }
+                }
+            }
+
+            // AutoMap feedback channel: signals flow BACKWARD along AutoMap wires
+            // from virtual sinks to physical haptic inputs. Each virtual sink that
+            // auto-maps FROM this device contributes its rumble/lightbar outputs
+            // to matching haptic input pins on this device, silently and without
+            // explicit user wiring. Direct wires (in `directly_wired`) take priority.
+            if !st.feedback_sources.is_empty() {
+                let dst_pins: Vec<&str> = st.pin_ids.iter()
+                    .filter(|p| !p.is_empty())
+                    .map(|p| p.as_str())
+                    .collect();
+                for fb in &st.feedback_sources {
+                    for (virt_out_pin, _) in flexinput_core::automap::FEEDBACK_PAIRS.iter() {
+                        let Some(&sig) = dev_sigs.get_pin(&fb.device_id, &virt_out_pin) else {
+                            continue;
+                        };
+                        let Some(dst_pin) = flexinput_core::automap::resolve_feedback_pin(
+                            virt_out_pin, &dst_pins
+                        ) else { continue; };
+                        if directly_wired.contains(dst_pin) { continue; }
+                        // Perceptual shaping for HD voice-coil amplitude pins only.
+                        // A game's classic rumble is often weak (0.1–0.3); mapped
+                        // straight onto a Switch Pro / DualSense HD coil — which is
+                        // then run through a power-law amp curve in the encoder —
+                        // it's below the perceptible threshold and can't be felt.
+                        // Shape ONLY the feedback path to the HD amp pins (direct
+                        // knob wiring and ERM `rumble_strong`/lightbar are
+                        // untouched), using the source virtual device's per-device
+                        // floor/max/exp. Only classic rumble: an amplitude a
+                        // virtual pad measured from a game's haptic waveform is
+                        // already the authored level, and a lifted floor would
+                        // turn its decaying tail into a steady buzz.
+                        let classic = matches!(*virt_out_pin, "rumble_strong" | "rumble_weak");
+                        let routed = if classic && matches!(dst_pin, "hd_l_amp" | "hd_r_amp") {
+                            shape_hd_feedback(sig, fb.rumble_floor, fb.rumble_max, fb.rumble_exp)
+                        } else {
+                            sig
+                        };
+                        // COMBINE, don't first-wins. Multiple virtual sinks can
+                        // auto-map FROM the same physical device (e.g. a virtual
+                        // DS4 AND a virtual DualSense both fed by one Switch Pro);
+                        // each contributes feedback to the same physical haptic
+                        // pin. A plain `or_insert` kept only whichever source the
+                        // `feedback_sources` iteration hit first — so only ONE
+                        // virtual's rumble/ping reached the physical, and which one
+                        // flipped across restarts as graph/enumeration order
+                        // changed (the "only one passes ping" flakiness). Take the
+                        // max so any active source drives the pad (haptics are
+                        // level-triggered; loudest wins, matching rumble peak).
+                        sink_outputs.merge_pin(&st.device_id, dst_pin, routed,
+                            |cur| *cur = combine_feedback_max(*cur, routed));
+                    }
+                }
+            }
+
+            // (Feedback Control injection is drained in a post-pass after the
+            //  main loop — see below — so every injector node has run first.)
+
+            // device.source nodes with haptic inputs, and device.sink nodes with
+            // feedback output pins, still need output computation — don't skip them.
+            if snap.module_id != "device.source" && snap.n_outputs == 0 {
+                computed[idx] = vec![];
+                continue;
+            }
+        }
+
+        // ── inline sub-patch: run inner graph and map outlet outputs ──────────
+        if let Some(ref sg) = snap.inline_subgraph {
+            let outer_inputs: Vec<Option<Signal>> = snap.input_sources.iter()
+                .map(|src| src.and_then(|(si, op)| {
+                    computed.get(si).and_then(|v| v.get(op)).copied().flatten()
+                }))
+                .collect();
+            let inner_computed = eval_subgraph(
+                &sg.graph, &outer_inputs, state, dev_sigs, &mut collector_sigs,
+                scope_samples, last_inputs, last_outputs, &mut fb_routes, snap.node_uid, dt, display,
+            );
+            let out: Vec<Option<Signal>> = sg.outlet_locs.iter()
+                .map(|loc| loc.and_then(|(ni, np)| inner_computed.get(ni).and_then(|v| v.get(np)).copied().flatten()))
+                .collect();
+            if display { last_outputs.insert(snap.node_uid, out.clone()); }
+            computed[idx] = out;
+            continue;
+        }
+
+        inputs_buf.clear();
+        inputs_buf.extend(snap.input_sources.iter()
+            .map(|src| src.and_then(|(src_idx, out_pin)| {
+                computed.get(src_idx).and_then(|v| v.get(out_pin)).copied().flatten()
+            })));
+        let inputs = &inputs_buf;
+
+        let node_state = state.entry(snap.node_uid).or_insert_with(NodeState::default);
+
+        // Apply any pending state override (e.g. counter reset from UI).
+        if let Some(ref vals) = snap.aux_f32_override {
+            node_state.aux_f32 = vals.clone();
+        }
+
+        let node_outputs = compute_node(snap, &inputs, node_state, dev_sigs, &collector_sigs, dt);
+
+        // ── 3DOF lean dispatch: emit per-pin signals via the Map output ──
+        //
+        // The lean_left / lean_right sections each own an array of mappings
+        // (Map-Action-shaped: `{ out, mode, window_ms, sustain, turbo }`).
+        // A mapping's raw-held bool is whether the lean magnitude has
+        // crossed `lean_threshold` on the corresponding side. The held
+        // value flows through the standard press-mode pipeline (down /
+        // short / long / double / on_press / on_release / turbo) the same
+        // way Map Action does. Asserted output pins are written into
+        // `collector_sigs` under "lean:{uid}" so a downstream AutoMap
+        // collector (or subpatch outlet) routes them to gamepad/KB sinks.
+        //
+        // Analog mode is special: instead of treating the side as a
+        // raw_held bool, it drives the destination through the shared
+        // `analog_digital_pulse` modulator — Hold → PWM (duty = |lean|),
+        // Turbo → ×2 max frequency, plain → tap train whose frequency
+        // tracks |lean|. Released mappings and below-threshold leans
+        // produce no pulses. Press-state slot [0] tracks the phase seconds.
+        if snap.module_id == "processing.gyro_3dof" {
+            lean_dispatch_into_collector_sigs(
+                snap, snap.node_uid, &node_outputs, node_state,
+                &mut collector_sigs, dt,
+            );
+        }
+
+        match snap.module_id.as_str() {
+            "display.oscilloscope" => {
+                let sample = inputs.iter().map(|s| sig_to_f32(*s)).collect();
+                scope_samples.push((snap.node_uid, sample));
+                if display { last_inputs.insert(snap.node_uid, inputs.clone()); }
+            }
+            // A readout shows only its latest value: no per-tick scope samples
+            // (the UI kept 20k of them per readout that nothing read).
+            "display.readout" => {
+                if display { last_inputs.insert(snap.node_uid, inputs.clone()); }
+            }
+            "display.trigscope" => {
+                let sample = inputs.iter().map(|s| sig_to_f32(*s)).collect();
+                scope_samples.push((snap.node_uid, sample));
+                if display { last_inputs.insert(snap.node_uid, inputs.clone()); }
+            }
+            "display.vectorscope" => {
+                let sample = inputs.iter().flat_map(|sig| match sig {
+                    Some(Signal::Vec2(v)) => [Some(v.x), Some(v.y)],
+                    _ => [None, None],
+                }).collect();
+                scope_samples.push((snap.node_uid, sample));
+                if display { last_inputs.insert(snap.node_uid, inputs.clone()); }
+            }
+            // The 3D controller viewer reads its Orientation quaternion (input
+            // pin 1, a Vec4) from the mirrored inputs.
+            "display.controller3d" => {
+                if display { last_inputs.insert(snap.node_uid, inputs.clone()); }
+            }
+            "module.response_curve" | "module.vec_response_curve" | "module.vec_reshape" => {
+                if display { last_inputs.insert(snap.node_uid, inputs.clone()); }
+            }
+            "module.twoway_response_curve" => {
+                if display { last_inputs.insert(snap.node_uid, twoway_live_inputs(&inputs, Some(node_state))); }
+            }
+            "generator.envelope" => {
+                // last_signals = [output, phase]; UI reads phase from index 1 for playhead
+                if display { last_inputs.insert(snap.node_uid, node_state.last_signals.clone()); }
+            }
+            _ => {}
+        }
+        // Populate last_outputs for every node — used by the UI to drive the
+        // per-pin signal glow on downstream device-sink inputs.
+        if display { last_outputs.insert(snap.node_uid, node_outputs.clone()); }
+
+        // Exclude device.source from the exported outputs; UI evaluates those fresh.
+        if snap.module_id != "device.source" {
+            for (out_pin, sig) in node_outputs.iter().enumerate() {
+                if display { outputs.insert((snap.node_uid, out_pin), *sig); }
+            }
+        }
+
+        computed[idx] = node_outputs;
+    }
+    } // end main_node_loop
+
+    // Post-pass: device.source self-sinks (feedback inputs wired back to their
+    // own outputs, possibly through Splitter/Math chains). Their multi_sources
+    // can only be read after the main loop has filled `computed[]` for the
+    // whole graph — by then any chain that loops through this node has its
+    // value, and we can route it into sink_outputs like any other sink.
+    puffin::profile_scope!("self_sink_post_pass");
+    for (idx, snap) in graph.nodes.iter().enumerate() {
+        let Some(ref st) = snap.sink_target else { continue; };
+        if !st.is_self_sink { continue; }
+        for (in_idx, pin_id) in st.pin_ids.iter().enumerate() {
+            if pin_id.is_empty() { continue; }
+            let mut combined: Option<Signal> = None;
+            if let Some(sources) = st.multi_sources.get(in_idx) {
+                for &(src_idx, out_pin) in sources {
+                    let sig_opt: Option<Signal> = computed.get(src_idx)
+                        .and_then(|v| v.get(out_pin))
+                        .copied()
+                        .flatten()
+                        .or_else(|| {
+                            // Direct self-wire: source's own `computed[idx]` is
+                            // the result of this same tick's compute_node, which
+                            // for device.source mirrors dev_sigs anyway.
+                            if src_idx != idx { return None; }
+                            let src_pin = snap.output_pin_ids.get(out_pin)?;
+                            if src_pin.is_empty() { return None; }
+                            dev_sigs.get_pin(&st.device_id, &src_pin).copied()
+                        });
+                    if let Some(sig) = sig_opt {
+                        combined = Some(match combined {
+                            None => sig,
+                            Some(prev) => combine_signals(prev, sig),
+                        });
+                    }
+                }
+            }
+            if let Some(sig) = combined {
+                sink_outputs.set_pin(&st.device_id, &pin_id, sig);
+            }
+        }
+    }
+
+    // Post-pass: reverse-feedback routing through AutoMap Selectors. An ASTH /
+    // Feedback Control / Network Send node placed AFTER a Selector writes its
+    // feedback layers under the selector's OUTPUT id (e.g.
+    // `feedback_override:forksel:{uid}:{out}`). Copy them to the source the
+    // selector is currently gating from — following the route chain — so they
+    // land under the physical pad id (drained by the feedback-layers post-pass
+    // below) or the network recv's `collector:{uid}` (drained by the recv
+    // feedback post-pass). Runs BEFORE those drains so a terminal is delivered
+    // this tick. Only fires when a Selector recorded a route.
+    if !fb_routes.is_empty() {
+        for from_id in fb_routes.keys().cloned().collect::<Vec<_>>() {
+            // Resolve the terminal source through the (short) route chain.
+            let mut terminal = from_id.clone();
+            for _ in 0..8 {
+                match fb_routes.get(&terminal) {
+                    Some(next) => terminal = next.clone(),
+                    None => break,
+                }
+            }
+            if terminal == from_id { continue; }
+            for channel in FEEDBACK_WRITE_CHANNELS {
+                let from_key = format!("{channel}{from_id}");
+                let to_key = format!("{channel}{terminal}");
+                let entries: Vec<(String, Signal)> = collector_sigs.pins_of(&from_key)
+                    .map(|(p, s)| (p.to_string(), *s))
+                    .collect();
+                for (pin, sig) in entries {
+                    collector_sigs.merge_pin(&to_key, &pin, sig, |cur| *cur = combine_signals(*cur, sig));
+                }
+            }
+        }
+    }
+
+    // Post-pass: feedback layers on each physical pad. Runs AFTER the main loop
+    // so every feedback module — at the top level or nested in any sub-patch —
+    // has written its values: network game feedback, then overrides (which take
+    // over a kind of feedback from the game), then additive injections, on top
+    // of the main loop's local game feedback. Direct wires always win. See
+    // eval/feedback.rs.
+    //
+    // Cheap early-out: skip entirely unless a module or peer wrote a layer this
+    // tick (the common case is no feedback modules at all).
+    if any_feedback_layer(&collector_sigs) {
+        puffin::profile_scope!("feedback_layers_post_pass");
+        for snap in graph.nodes.iter() {
+            let Some(ref st) = snap.sink_target else { continue; };
+            if st.device_id.starts_with("virtual.") { continue; }
+            apply_pad_feedback(st, &collector_sigs, sink_outputs);
+        }
+    }
+
+    // Post-pass: each pad's default trigger effect (Calibration window), under
+    // every other layer — it fills in only where nothing asks for an effect.
+    for snap in graph.nodes.iter() {
+        let Some(ref st) = snap.sink_target else { continue; };
+        if st.device_id.starts_with("virtual.") { continue; }
+        #[cfg(not(studio_headless))]
+        apply_default_trigger_effects(st, &snap.params, &collector_sigs, sink_outputs);
+        let clicks = &mut state.entry(snap.node_uid).or_default().trigger_clicks;
+        apply_trigger_click(st, &snap.params, raw_dev_sigs, clicks, dt, sink_outputs);
+        apply_pad_click(st, &snap.params, sink_outputs);
+        apply_trackpad_tracking(st, &snap.params, sink_outputs);
+        apply_grip_sensor(st, &snap.params, sink_outputs);
+    }
+
+    // Post-pass: network Receive feedback aggregation. Runs AFTER the
+    // feedback_inject post-pass so ASTH / Feedback Control nodes on the RECEIVER
+    // (which target a recv node's synthetic `collector:{uid}` id) have already
+    // written `feedback_inject:collector:{uid}`. Recurses into sub-patches, and
+    // uses a whole-graph source→sinks index so a recv node reaches its downstream
+    // virtual sinks even when they sit on a different sub-patch level.
+    //
+    // Cheap early-out: only build the index + walk if a network_recv node exists.
+    #[cfg(not(studio_headless))]
+if graph_has_net_recv(&graph.nodes) {
+        let mut sink_sources: HashMap<String, Vec<String>> = HashMap::new();
+        collect_sink_sources(&graph.nodes, &mut sink_sources);
+        publish_recv_feedback_frames(&graph.nodes, 0, false, dev_sigs, &collector_sigs, &sink_sources);
+    }
+
+    // Snapshot this tick's macro-namespace values onto the reserved carry-over
+    // entry so next tick a macro READER that runs before its producer (a menu
+    // upstream of the Remapper targeting its Select/Show — a feedback cycle)
+    // still observes the value, one tick stale. Rebuilt from empty each tick so a
+    // released macro clears after one tick. See `NodeState::macro_prev`.
+    {
+        use flexinput_core::macros::{SIGS_NS, SIGS_NS_VEC2};
+        let carry = state.entry(MACRO_CARRY_UID).or_default();
+        carry.macro_prev.clear();
+        carry.source_block.clear();
+        carry.orient_neutral_req.clear();
+        let mut gyro_cal: HashSet<String> = HashSet::new();
+        for k in collector_sigs.buses() {
+            if k == SIGS_NS || k == SIGS_NS_VEC2 {
+                for (pin, sig) in collector_sigs.pins_of(k) {
+                    carry.macro_prev.insert((k.to_string(), pin.to_string()), *sig);
+                }
+            } else if let Some(dev) = k.strip_prefix(SRC_BLOCK_PREFIX) {
+                for (pin, _) in collector_sigs.pins_of(k) {
+                    carry.source_block.insert((dev.to_string(), pin.to_string()));
+                }
+            } else if let Some(dev) = k.strip_prefix(ORIENT_NEUTRAL_PREFIX) {
+                carry.orient_neutral_req.insert(dev.to_string());
+            } else if let Some(dev) = k.strip_prefix(GYRO_CAL_PREFIX) {
+                gyro_cal.insert(dev.to_string());
+            }
+        }
+        // Calibrate Gyro runs in the UI (it owns the calibration params);
+        // hand it one request per press.
+        let fresh = gyro_cal_edges(carry, gyro_cal);
+        out.gyro_cal_requests.extend(fresh);
+    }
+
+    // Hand the working maps back, emptied, for the next tick to reuse.
+    collector_sigs.clear();
+    out.bus_scratch = collector_sigs;
+    out.dev_scratch = dev_sigs_owned;
+}
+
+/// True if any network_recv node exists anywhere in the graph (recurses into
+/// sub-patches). Gates the recv feedback post-pass so patches without networking
+/// pay nothing.
+#[cfg(not(studio_headless))]
+fn graph_has_net_recv(nodes: &[NodeSnap]) -> bool {
+    nodes.iter().any(|n| {
+        n.module_id == NET_RECV_ID
+            || n.inline_subgraph.as_ref().is_some_and(|sg| graph_has_net_recv(&sg.graph.nodes))
+    })
+}
+
+/// Typed OFF value for a canonical pin the sink forces to zero because an open
+/// Virtual Menu is blocking it at the game boundary.
+fn pointer_block_off(pin_id: &str) -> Signal {
+    match automap::ALL_PINS.iter().find(|ap| ap.id == pin_id).map(|ap| ap.signal_type) {
+        Some(SignalType::Vec2) => Signal::Vec2(Vec2::ZERO),
+        Some(SignalType::Bool) => Signal::Bool(false),
+        Some(SignalType::Int)  => Signal::Int(0),
+        _ => Signal::Float(0.0),
+    }
+}

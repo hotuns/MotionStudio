@@ -1,0 +1,3465 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::{Duration, Instant};
+use hidapi::{HidApi, HidDevice};
+use crate::spike::SpikeFilter;
+
+#[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+use crate::dualsense_haptic;
+
+const SONY_VID: u16           = 0x054C;
+const DS4_PIDS: &[u16]       = &[0x05C4, 0x09CC];
+const DUALSENSE_PIDS: &[u16] = &[0x0CE6, 0x0DF2]; // standard + DualSense Edge
+const SWITCH_VID: u16     = 0x057E;
+const SWITCH_PRO_PID: u16 = 0x2009;
+
+const USAGE_PAGE_GENERIC_DESKTOP: u16 = 0x0001;
+const USAGE_GAMEPAD: u16 = 0x0005;
+
+// ── IMU sensitivity constants ─────────────────────────────────────────────────
+// Normalized signal graph values: ±1.0 means ±GYRO_REF_DPS deg/s or ±ACCEL_REF_G G.
+// Virtual devices that consume gyro/accel signals assume this common reference so
+// they can rescale to their own hardware spec without knowing the source device.
+
+/// ±1.0 in the signal graph corresponds to this many degrees per second.
+pub const GYRO_REF_DPS: f32 = 2000.0;
+/// ±1.0 in the signal graph corresponds to this many standard gravity units.
+pub const ACCEL_REF_G: f32 = 8.0;
+
+// Per-device sensitivities (physical deg/s or G per raw sensor LSB).
+// DS4 / DualSense: factory ±2000 dps gyro, ±8 G accel.
+const DS4_GYRO_DPS_PER_LSB: f32 = 2000.0 / 32767.0;
+const DS4_ACCEL_G_PER_LSB: f32  = 8.0   / 32767.0;
+// Switch Pro (ICM-20689): ±2000 dps, matching DS4/DualSense so a physical
+// rotation produces the SAME normalized value on every known controller (the
+// 3D orientation view confirmed the old 4000-based scale read exactly 2× too
+// large — it needed a 0.5 display scale to track reality). Uniformity beats
+// preserving old patches' feel per user decision 2026-07-17.
+const SWITCH_GYRO_DPS_PER_LSB: f32 = 2000.0 / 32767.0;
+const SWITCH_ACCEL_G_PER_LSB: f32  = 8.0   / 32767.0;
+
+// Retry open no more than once per N seconds to avoid hammering HidHide.
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
+/// A stalled handle (open, reads succeed, but no report parses) is logged at 2s
+/// but only auto-reopened after this longer window — comfortably past the Switch
+/// Pro's known transient ~3s Bluetooth input gaps, which recover on their own.
+/// Past this, the stall is the permanent "HidHide cloaked the pad after we
+/// opened its raw-HID handle" freeze, so we drop the handle and let the open
+/// worker re-open it (now with the cloak in place) — what a manual reconnect does.
+const STALL_REOPEN: Duration = Duration::from_millis(5000);
+
+/// Monotonic epoch for the Switch HD-rumble amplitude-modulation phase. Set on the
+/// first rumble flush; the AM flutter phase is `elapsed_secs * 2π·rate_hz` so it
+/// stays smooth and continuous regardless of when individual packets are sent.
+static SWITCH_AM_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct TouchPoint {
+    /// Active flag — touchpad currently sees this finger.
+    pub active: bool,
+    /// Normalized X in roughly [-1, 1] (left edge = -1, right edge = +1).
+    pub x: f32,
+    /// Normalized Y in roughly [-1, 1] (top edge = -1, bottom edge = +1).
+    pub y: f32,
+}
+
+/// Full DualSense input state parsed directly from the raw HID input report.
+/// Used to override gilrs, which mis-maps axes on the Windows HID path.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct DualSenseState {
+    // Sticks: normalized [-1, 1]
+    pub lx: f32, pub ly: f32,
+    pub rx: f32, pub ry: f32,
+    // Triggers: normalized [0, 1]
+    pub l2: f32, pub r2: f32,
+    // Face buttons
+    pub btn_south: bool, pub btn_east: bool, pub btn_west: bool, pub btn_north: bool,
+    // Shoulder / trigger digital
+    pub btn_l1: bool, pub btn_r1: bool,
+    pub btn_l2: bool, pub btn_r2: bool,
+    // Stick clicks
+    pub btn_ls: bool, pub btn_rs: bool,
+    // Menu / special
+    pub btn_options: bool, pub btn_create: bool, pub btn_ps: bool,
+    // DPad
+    pub dpad_up: bool, pub dpad_down: bool, pub dpad_left: bool, pub dpad_right: bool,
+    // DualSense Edge only: back buttons and Fn buttons (buttons[2] bits 4-7).
+    // Read on every DualSense; only an Edge's publish (gilrs backend) uses them.
+    pub btn_back_l: bool, pub btn_back_r: bool,
+    pub btn_fn_l: bool, pub btn_fn_r: bool,
+}
+
+/// Switch Pro button state read directly from input report 0x30 bytes 3/4/5.
+/// Used to bypass gilrs's WGI backend which loses diagonal D-Pad positions and
+/// has unreliable Home/Capture/Plus/Minus mapping in BT mode.
+/// Naming uses Nintendo's physical labels (A=east, B=south, X=north, Y=west).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct SwitchProButtons {
+    pub btn_a: bool, pub btn_b: bool, pub btn_x: bool, pub btn_y: bool,
+    pub btn_l: bool, pub btn_r: bool, pub btn_zl: bool, pub btn_zr: bool,
+    pub btn_lstick: bool, pub btn_rstick: bool,
+    pub btn_minus: bool, pub btn_plus: bool,
+    pub btn_home: bool, pub btn_capture: bool,
+    pub dpad_up: bool, pub dpad_down: bool, pub dpad_left: bool, pub dpad_right: bool,
+    /// L-Stick analog X normalized to [-1, 1] (raw 12-bit calibrated value).
+    pub lstick_x: f32,
+    pub lstick_y: f32,
+    pub rstick_x: f32,
+    pub rstick_y: f32,
+}
+
+/// # Canonical IMU frame (the AutoMap contract)
+///
+/// Every device's parser MUST fill `gyro_*` / `accel_*` in ONE shared body
+/// frame, so that nothing downstream — the 3DOF module, AutoMap, the canvas —
+/// ever has to know which pad produced a value. This is the entire point of
+/// AutoMap; a device that deviates here is a bug at the source, not something
+/// for a consumer to special-case.
+///
+/// Axes (right = the player's right, holding the pad normally):
+/// - **x = forward / longitudinal.** `accel_x > 0` when the nose (USB port)
+///   tilts up. `gyro_x` is ROLL (rotation about this axis), + clockwise.
+/// - **y = side / lateral.** `accel_y > 0` when the right grip drops.
+///   `gyro_y` is PITCH (about this axis), + nose-up.
+/// - **z = vertical.** `accel_z > 0` when the pad lies flat, face up
+///   (gravity ≈ +1 g). `gyro_z` is YAW (about this axis), + clockwise.
+///
+/// Accel and gyro therefore share the same axis assignment: roll is about the
+/// forward axis, pitch about the side axis, yaw about vertical. The reference
+/// device is the Switch Pro, whose raw report already lands in this frame; the
+/// Sony parser permutes and signs its raw accel to match (see `build`).
+#[derive(Clone, Copy, Default, Debug)]
+pub struct HidReading {
+    pub gyro_x: f32,
+    pub gyro_y: f32,
+    pub gyro_z: f32,
+    pub accel_x: f32,
+    pub accel_y: f32,
+    pub accel_z: f32,
+    /// True when the source device exposes a touchpad (DS4 / DualSense).
+    pub has_touchpad: bool,
+    pub touch1: TouchPoint,
+    pub touch2: TouchPoint,
+    /// Touchpad click (the whole touchpad is also a button on DS4 / DualSense).
+    /// Read straight from the HID report because gilrs's Windows backend doesn't
+    /// expose it reliably.
+    pub touchpad_click: bool,
+    /// Microphone mute button (DualSense only).
+    pub mic_button: bool,
+    /// Switch Pro full button state, parsed from raw HID. None for non-Switch devices.
+    pub switch_buttons: Option<SwitchProButtons>,
+    /// DualSense full input state, parsed from raw HID. None for non-DualSense devices.
+    pub dualsense: Option<DualSenseState>,
+    /// Battery charge as a fraction 0.0..1.0, decoded from the DS4/DualSense
+    /// report (`None` for devices we don't decode battery for, e.g. Switch Pro).
+    /// Surfaced as the `battery` source pin so FlexInput can show the PHYSICAL
+    /// pad's real charge. (Virtual pads always report 100% — see encode.rs — so
+    /// this read path is purely informational and never feeds a virtual report.)
+    pub battery: Option<f32>,
+}
+
+/// The mean of the IMU samples since the last poll. Gyro is a rate that aim adds
+/// up over time, so with a pad reporting faster than it's polled, keeping only the
+/// newest sample throws rotation away; the mean over the poll adds up to the same
+/// turn. Sticks and triggers are positions, where the newest is simply the truth
+/// and a mean would only lag, so they stay out of this.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ImuAverage {
+    sum: [f32; 6],
+    samples: u32,
+}
+
+impl ImuAverage {
+    pub(crate) fn add(&mut self, sample: [f32; 6]) {
+        for (s, v) in self.sum.iter_mut().zip(sample) {
+            *s += v;
+        }
+        self.samples += 1;
+    }
+
+    /// The mean, once there's more than one sample to take it of.
+    pub(crate) fn mean(&self) -> Option<[f32; 6]> {
+        (self.samples > 1).then(|| self.sum.map(|s| s / self.samples as f32))
+    }
+}
+
+impl DualSenseState {
+    fn hold_presses_from(&mut self, earlier: &Self) {
+        self.btn_south |= earlier.btn_south;
+        self.btn_east |= earlier.btn_east;
+        self.btn_west |= earlier.btn_west;
+        self.btn_north |= earlier.btn_north;
+        self.btn_l1 |= earlier.btn_l1;
+        self.btn_r1 |= earlier.btn_r1;
+        self.btn_l2 |= earlier.btn_l2;
+        self.btn_r2 |= earlier.btn_r2;
+        self.btn_ls |= earlier.btn_ls;
+        self.btn_rs |= earlier.btn_rs;
+        self.btn_options |= earlier.btn_options;
+        self.btn_create |= earlier.btn_create;
+        self.btn_ps |= earlier.btn_ps;
+        self.dpad_up |= earlier.dpad_up;
+        self.dpad_down |= earlier.dpad_down;
+        self.dpad_left |= earlier.dpad_left;
+        self.dpad_right |= earlier.dpad_right;
+        self.btn_back_l |= earlier.btn_back_l;
+        self.btn_back_r |= earlier.btn_back_r;
+        self.btn_fn_l |= earlier.btn_fn_l;
+        self.btn_fn_r |= earlier.btn_fn_r;
+    }
+}
+
+impl SwitchProButtons {
+    fn hold_presses_from(&mut self, earlier: &Self) {
+        self.btn_a |= earlier.btn_a;
+        self.btn_b |= earlier.btn_b;
+        self.btn_x |= earlier.btn_x;
+        self.btn_y |= earlier.btn_y;
+        self.btn_l |= earlier.btn_l;
+        self.btn_r |= earlier.btn_r;
+        self.btn_zl |= earlier.btn_zl;
+        self.btn_zr |= earlier.btn_zr;
+        self.btn_lstick |= earlier.btn_lstick;
+        self.btn_rstick |= earlier.btn_rstick;
+        self.btn_minus |= earlier.btn_minus;
+        self.btn_plus |= earlier.btn_plus;
+        self.btn_home |= earlier.btn_home;
+        self.btn_capture |= earlier.btn_capture;
+        self.dpad_up |= earlier.dpad_up;
+        self.dpad_down |= earlier.dpad_down;
+        self.dpad_left |= earlier.dpad_left;
+        self.dpad_right |= earlier.dpad_right;
+    }
+}
+
+impl HidReading {
+    /// Keep a button pressed in an earlier report since the last poll, so a tap
+    /// shorter than the polling period still reads as a press for that poll.
+    fn hold_presses_from(&mut self, earlier: &Self) {
+        self.touchpad_click |= earlier.touchpad_click;
+        self.mic_button |= earlier.mic_button;
+        if let (Some(now), Some(then)) = (self.switch_buttons.as_mut(), earlier.switch_buttons.as_ref()) {
+            now.hold_presses_from(then);
+        }
+        if let (Some(now), Some(then)) = (self.dualsense.as_mut(), earlier.dualsense.as_ref()) {
+            now.hold_presses_from(then);
+        }
+    }
+
+    fn set_imu(&mut self, imu: [f32; 6]) {
+        self.gyro_x = imu[0];
+        self.gyro_y = imu[1];
+        self.gyro_z = imu[2];
+        self.accel_x = imu[3];
+        self.accel_y = imu[4];
+        self.accel_z = imu[5];
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Connection { Usb, Bt }
+
+/// Per-axis stick calibration. center is the raw resting value; min/max are the
+/// raw extents at full deflection (each ~1500 LSB away from center, but varies
+/// per controller and per side). Values normalize raw → [-1, 1] as:
+///   raw < center: (raw - center) / (center - min)
+///   raw > center: (raw - center) / (max - center)
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub(crate) struct AxisCalib {
+    pub(crate) min: u16,
+    pub(crate) center: u16,
+    pub(crate) max: u16,
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct SwitchProCalib {
+    pub(crate) l_x: AxisCalib,
+    pub(crate) l_y: AxisCalib,
+    pub(crate) r_x: AxisCalib,
+    pub(crate) r_y: AxisCalib,
+}
+
+enum DeviceKind {
+    Ds4,
+    DualSense {
+        connection: Option<Connection>,
+        /// 4-bit sequence counter for BT output reports (low 4 bits used).
+        bt_seq: u8,
+        /// The lightbar setup (fade out the firmware's connect animation, so
+        /// a colour we set shows) has gone out. Once per open: sent with every
+        /// report it faded the bar out every heartbeat, and on Linux, where the
+        /// kernel driver or Steam then sets it again, the bar flashed.
+        lightbar_set_up: bool,
+        /// Lazily-initialized haptic stream (USB only; WASAPI, or ALSA on
+        /// Linux). `None` while the audio endpoint hasn't been resolved yet.
+        #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+        haptic: Option<dualsense_haptic::HapticStream>,
+        /// The pad's device container (on Linux its USB device), read at
+        /// open: the haptic stream opens the audio endpoint that shares it.
+        /// `None` if the system couldn't say.
+        #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+        container: Option<dualsense_haptic::ContainerId>,
+    },
+    SwitchPro {
+        initialized: bool,
+        packet_counter: u8,
+        /// Stick calibration read from SPI flash during init. None until the
+        /// SPI read succeeds; parsing falls back to a centered 12-bit identity
+        /// (center=2048, half-range=1500) when None so sticks still work even
+        /// if calibration read failed.
+        calib: Option<SwitchProCalib>,
+    },
+}
+
+struct HidEntry {
+    device: HidDevice,
+    kind: DeviceKind,
+    last: HidReading,
+    out: OutputState,
+    /// Output state at the time of the last successful HID write. If `out`
+    /// matches this, the controller already has the current state and we
+    /// can skip the USB write entirely — the I/O thread runs at hundreds
+    /// of Hz but real-world rumble / lightbar / trigger updates happen at
+    /// dozens of Hz at most, so 99 %+ of writes are redundant. Sending
+    /// only on change drops gyro_flush_outputs from ~8 ms/iter to a few
+    /// microseconds when nothing's changing. Also kinder to USB bandwidth.
+    /// `None` forces the first write after connect / option change.
+    last_sent: Option<OutputState>,
+    /// Last Instant we successfully wrote to the device. Used together
+    /// with `last_sent` to enforce a minimum heartbeat (~1 Hz) — some
+    /// firmware (DS4) drops back to safe defaults if it doesn't see a
+    /// host output report for a while, so we re-send the current state
+    /// every second even when unchanged.
+    last_sent_at: Option<std::time::Instant>,
+    output_active: bool,
+    /// Number of HID input reports successfully parsed since the last drain
+    /// of `take_event_count`. Used to feed the per-device polling-rate readout
+    /// so gyro-only devices (and IMU activity in general) show real Hz.
+    event_count: u32,
+    /// Outlier spike filter for this device's six IMU axes. All other
+    /// fields of `last` (buttons, sticks, touchpad) are written straight
+    /// from the freshest packet and never filtered.
+    spike: SpikeFilter,
+    /// Diagnostics for the "frozen until reconnect" report (a Switch Pro paired
+    /// over Bluetooth BEFORE launch comes up dead). `last_report_at` is the last
+    /// time a report actually parsed; `stalled` latches so the stall onset /
+    /// recovery is logged once, not every poll.
+    last_report_at: std::time::Instant,
+    stalled: bool,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct OutputState {
+    /// Big / heavy / low-frequency motor (DS4 "left", DualSense `motor_left`).
+    rumble_strong: u8,
+    /// Small / light / high-frequency motor (DS4 "right", DualSense `motor_right`).
+    rumble_weak: u8,
+    lightbar_r: u8,
+    lightbar_g: u8,
+    lightbar_b: u8,
+    // DualSense adaptive trigger — right
+    // mode: index into `TriggerMode::ALL` — 0 Off, 1 Bow, 2 Feedback,
+    // 3 Galloping, 4 Weapon, 5 Machine, 6 Vibration
+    trigger_r_mode:      u8,
+    trigger_r_start:     u8, // zone 0–9 (stored as raw zone; caller passes 0–9 already scaled)
+    trigger_r_end:       u8, // zone 0–9 (Bow, Galloping, Weapon, Machine)
+    trigger_r_strength:  u8, // force 0–7
+    trigger_r_freq:      u8, // 0–255 (Galloping, Machine, Vibration)
+    trigger_r_strength2: u8, // second force 0–7 (Bow snap, Galloping 2nd foot, Machine B)
+    trigger_r_period:    u8, // 0–255 (Machine only)
+    // DualSense adaptive trigger — left
+    trigger_l_mode:      u8,
+    trigger_l_start:     u8,
+    trigger_l_end:       u8,
+    trigger_l_strength:  u8,
+    trigger_l_freq:      u8,
+    trigger_l_strength2: u8,
+    trigger_l_period:    u8,
+    // DualSense LEDs
+    // player_led: 0=off, 1=P1(0x04), 2=P2(0x0A), 3=P3(0x15), 4=P4(0x1B)
+    player_led: u8,
+    // mic_led: 0=off, 1=on(orange), 2=pulsing
+    mic_led:    u8,
+    // HD Rumble carrier 1 (LF) — per-side amplitude + frequency (0–255 each, mapped at encode).
+    // hd_l/r_amp:  0=silent, 255=max safe; perceptual power-law curve applied at encode.
+    // hd_l/r_freq: 0–255 over the Switch Pro's table, 82–1253 Hz (indices 32–158,
+    // an octave every 32); a DualSense reads it linearly over 80–500 Hz.
+    // Device-agnostic: a Switch Pro packs this into its HD-rumble packet; a USB
+    // DualSense synthesizes it as a PCM sine on the LRA.
+    hd_l_amp:  u8,
+    hd_l_freq: u8,
+    hd_r_amp:  u8,
+    hd_r_freq: u8,
+    // HD Rumble carrier 2 (HF) — the SECOND simultaneous carrier per actuator.
+    // Both LRA families play two carriers at once that mix on the actuator. Zero
+    // amplitude ⇒ single-carrier behavior (carrier 1 only). The legacy ds_*_amp/freq
+    // pins are routed to carrier 1 (hd_*) in set_output_byte.
+    hd2_l_amp:  u8,
+    hd2_l_freq: u8,
+    hd2_r_amp:  u8,
+    hd2_r_freq: u8,
+    /// Which LEDs something in FlexInput has set ([`LED_LIGHTBAR`] …). Only
+    /// those go out flagged valid: an LED nobody set stays the pad's own (or
+    /// its kernel driver's, or Steam's) instead of being written dark every
+    /// heartbeat.
+    leds_owned: u8,
+}
+
+/// The least time between reports that change nothing but the lights: about 30 a
+/// second, more than an eye can follow, where a game animating its lightbar would
+/// otherwise take a report every output pass, on Bluetooth too. Rumble and
+/// triggers aren't held to this, and a report for them carries the latest lights.
+pub(crate) const LED_MIN_GAP: std::time::Duration = std::time::Duration::from_millis(33);
+
+/// [`OutputState::leds_owned`] bits.
+const LED_LIGHTBAR: u8 = 1 << 0;
+const LED_PLAYER: u8 = 1 << 1;
+const LED_MIC: u8 = 1 << 2;
+
+impl OutputState {
+    /// Whether the two differ, if at all, only in their lights.
+    fn differs_only_in_lights(&self, other: &Self) -> bool {
+        let mut lit = *other;
+        lit.lightbar_r = self.lightbar_r;
+        lit.lightbar_g = self.lightbar_g;
+        lit.lightbar_b = self.lightbar_b;
+        lit.player_led = self.player_led;
+        lit.mic_led = self.mic_led;
+        lit.leds_owned = self.leds_owned;
+        lit == *self
+    }
+
+    /// Stage one output byte by pin name. `false` for a pin this state does
+    /// not carry. Shared by every transport that writes these reports, so a
+    /// pin added here reaches all of them.
+    pub(crate) fn stage(&mut self, pin_id: &str, byte: u8) -> bool {
+        match pin_id {
+            "rumble_strong" => { self.rumble_strong = byte; true }
+            "rumble_weak"   => { self.rumble_weak   = byte; true }
+            // Legacy amplitude-only HD rumble pins — route to per-side amp field.
+            "hd_rumble_l" => { self.hd_l_amp = byte; true }
+            "hd_rumble_r" => { self.hd_r_amp = byte; true }
+            // HD rumble carrier 1 (LF) — amplitude + frequency per side. Shared by
+            // Switch Pro (table encode) and DualSense (PCM synth).
+            "hd_l_amp"  => { self.hd_l_amp  = byte; true }
+            "hd_l_freq" => { self.hd_l_freq  = byte; true }
+            "hd_r_amp"  => { self.hd_r_amp   = byte; true }
+            "hd_r_freq" => { self.hd_r_freq  = byte; true }
+            // HD rumble carrier 2 (HF) — the second simultaneous carrier.
+            "hd2_l_amp"  => { self.hd2_l_amp  = byte; true }
+            "hd2_l_freq" => { self.hd2_l_freq = byte; true }
+            "hd2_r_amp"  => { self.hd2_r_amp  = byte; true }
+            "hd2_r_freq" => { self.hd2_r_freq = byte; true }
+            // DualSense HD haptics legacy aliases — amplitude + frequency per side
+            // (USB only). Route to carrier 1 so old patches keep working.
+            "ds_l_amp"  => { self.hd_l_amp  = byte; true }
+            "ds_l_freq" => { self.hd_l_freq = byte; true }
+            "ds_r_amp"  => { self.hd_r_amp  = byte; true }
+            "ds_r_freq" => { self.hd_r_freq = byte; true }
+            "lightbar_r"    => { self.lightbar_r = byte; self.leds_owned |= LED_LIGHTBAR; true }
+            "lightbar_g"    => { self.lightbar_g = byte; self.leds_owned |= LED_LIGHTBAR; true }
+            "lightbar_b"    => { self.lightbar_b = byte; self.leds_owned |= LED_LIGHTBAR; true }
+            // Adaptive trigger pins — caller passes Float 0–1 already scaled to
+            // the appropriate range before calling set_output_byte:
+            //   mode:      0–6  (index into `TriggerMode::ALL`)
+            //   start/end: 0–9 (zone index along trigger travel)
+            //   strength, strength2: 0–7 (force levels)
+            //   freq, period: 0–255 (raw bytes)
+            "trigger_r_mode"      => { self.trigger_r_mode      = byte; true }
+            "trigger_r_start"     => { self.trigger_r_start     = byte; true }
+            "trigger_r_end"       => { self.trigger_r_end       = byte; true }
+            "trigger_r_strength"  => { self.trigger_r_strength  = byte; true }
+            "trigger_r_freq"      => { self.trigger_r_freq      = byte; true }
+            "trigger_r_strength2" => { self.trigger_r_strength2 = byte; true }
+            "trigger_r_period"    => { self.trigger_r_period    = byte; true }
+            "trigger_l_mode"      => { self.trigger_l_mode      = byte; true }
+            "trigger_l_start"     => { self.trigger_l_start     = byte; true }
+            "trigger_l_end"       => { self.trigger_l_end       = byte; true }
+            "trigger_l_strength"  => { self.trigger_l_strength  = byte; true }
+            "trigger_l_freq"      => { self.trigger_l_freq      = byte; true }
+            "trigger_l_strength2" => { self.trigger_l_strength2 = byte; true }
+            "trigger_l_period"    => { self.trigger_l_period    = byte; true }
+            // DualSense LEDs — caller passes scaled byte
+            "player_led" => { self.player_led = byte; self.leds_owned |= LED_PLAYER; true }
+            "mic_led"    => { self.mic_led    = byte; self.leds_owned |= LED_MIC; true }
+            _ => false,
+        }
+    }
+}
+
+pub struct GyroManager {
+    /// Shared with the gilrs backend's background classification worker — the
+    /// ONLY place allowed to call the slow (~110-200 ms on Windows)
+    /// `refresh_devices()`. Everything on the I/O thread reads the cached list
+    /// under a short lock and never refreshes inline.
+    api: Option<Arc<Mutex<HidApi>>>,
+    // key: (vid, pid, instance_index)
+    devices: HashMap<(u16, u16, usize), HidEntry>,
+    // tracks the last failed open attempt to rate-limit retries
+    failed_opens: HashMap<(u16, u16, usize), Instant>,
+    /// Set when an open retry would previously have refreshed the device list
+    /// inline (a ~110-200 ms stall ON the I/O loop, every RETRY_INTERVAL
+    /// while a gyro-capable pad persistently failed to open — the "variable
+    /// gaps" polling freeze). Drained by the gilrs backend, which turns it into
+    /// an async refresh+reclassify job on the worker instead.
+    refresh_wanted: bool,
+    /// Job side of the "hid-open" worker: device opens AND the Switch Pro init
+    /// handshake run off-thread. The handshake is the ~600 ms io-stall
+    /// fingerprint over Bluetooth (100 ms USB-probe timeout + subcommand acks
+    /// + four 50 ms×N SPI calibration reads) — a BT pad that hiccups every few
+    /// seconds used to freeze ALL input for that long on every reopen.
+    open_tx: Option<mpsc::Sender<(u16, u16, usize)>>,
+    /// Result side: `(key, opened)` — `None` payload = open/init failed
+    /// (stamped into `failed_opens` for the normal rate-limited retry).
+    open_rx: Option<mpsc::Receiver<((u16, u16, usize), Option<OpenedDevice>)>>,
+    /// Keys with an open in flight, so `read()` doesn't re-request every tick.
+    opens_pending: HashSet<(u16, u16, usize)>,
+}
+
+/// The `Send`-safe parts of a freshly opened device, produced by the
+/// "hid-open" worker. `HidEntry` itself is assembled on the I/O thread because
+/// `DeviceKind::DualSense`'s lazily-created WASAPI haptic stream must never
+/// cross threads — the worker only ever ships the raw handle + init results.
+struct OpenedDevice {
+    device: HidDevice,
+    kind_tag: KindTag,
+    /// Switch Pro only: SPI calibration + subcommand counter from the init
+    /// handshake (run to completion on the worker).
+    calib: Option<SwitchProCalib>,
+    packet_counter: u8,
+    /// DualSense only: the pad's device container (see `DeviceKind::DualSense`).
+    #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+    container: Option<dualsense_haptic::ContainerId>,
+}
+
+/// Background worker loop: performs `open_and_init` (device-list read + open
+/// under a short api lock, then the slow Switch Pro handshake with the lock
+/// RELEASED) and ships the result back. One job at a time — opens are rare
+/// (connect/reconnect) and ordering doesn't matter.
+fn open_worker(
+    api: Arc<Mutex<HidApi>>,
+    jobs: mpsc::Receiver<(u16, u16, usize)>,
+    done: mpsc::Sender<((u16, u16, usize), Option<OpenedDevice>)>,
+) {
+    while let Ok((vid, pid, idx)) = jobs.recv() {
+        let opened = open_and_init(&api, vid, pid, idx);
+        if done.send(((vid, pid, idx), opened)).is_err() {
+            break; // manager dropped — exit the thread
+        }
+    }
+}
+
+impl GyroManager {
+    pub fn new() -> Self {
+        let api = HidApi::new().ok().map(|a| Arc::new(Mutex::new(a)));
+        let mut open_tx = None;
+        let mut open_rx = None;
+        if let Some(api) = api.clone() {
+            let (jtx, jrx) = mpsc::channel();
+            let (dtx, drx) = mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("hid-open".into())
+                .spawn(move || open_worker(api, jrx, dtx))
+                .is_ok();
+            if spawned {
+                open_tx = Some(jtx);
+                open_rx = Some(drx);
+            }
+        }
+        Self {
+            api,
+            devices: HashMap::new(),
+            failed_opens: HashMap::new(),
+            refresh_wanted: false,
+            open_tx,
+            open_rx,
+            opens_pending: HashSet::new(),
+        }
+    }
+
+    /// Adopt finished opens from the worker: successes become live entries
+    /// (unless the key raced back in), failures get the normal rate-limited
+    /// retry stamp.
+    fn drain_finished_opens(&mut self) {
+        let Some(rx) = &self.open_rx else { return };
+        while let Ok((key, opened)) = rx.try_recv() {
+            self.opens_pending.remove(&key);
+            match opened {
+                Some(o) if !self.devices.contains_key(&key) => {
+                    let kind = match o.kind_tag {
+                        KindTag::Ds4 => DeviceKind::Ds4,
+                        KindTag::DualSense => DeviceKind::DualSense {
+                            connection: None,
+                            bt_seq: 0,
+                            lightbar_set_up: false,
+                            #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+                            haptic: None,
+                            #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+                            container: o.container,
+                        },
+                        KindTag::SwitchPro => DeviceKind::SwitchPro {
+                            initialized: true, // handshake ran on the worker
+                            packet_counter: o.packet_counter,
+                            calib: o.calib,
+                        },
+                    };
+                    self.devices.insert(key, HidEntry {
+                        device: o.device,
+                        kind,
+                        last: HidReading::default(),
+                        out: OutputState::default(),
+                        last_sent: None,
+                        last_sent_at: None,
+                        output_active: false,
+                        event_count: 0,
+                        spike: SpikeFilter::new(),
+                        last_report_at: Instant::now(),
+                        stalled: false,
+                    });
+                }
+                Some(_) => {} // key already live again — drop the duplicate handle
+                None => { self.failed_opens.insert(key, Instant::now()); }
+            }
+        }
+    }
+
+    /// Handle to the shared hidapi instance for the background refresh/classify
+    /// worker. `None` when hidapi failed to initialize (classification then
+    /// stays empty and gyro reads are unavailable, same as before).
+    pub(crate) fn shared_api(&self) -> Option<Arc<Mutex<HidApi>>> {
+        self.api.clone()
+    }
+
+    /// True once per request: an open retry wanted a fresh device list. The
+    /// gilrs backend drains this in `enumerate()` and kicks the async worker.
+    pub(crate) fn take_refresh_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.refresh_wanted)
+    }
+
+    /// Returns the latest IMU + touchpad reading for the Nth physical device with this VID/PID.
+    pub fn read(&mut self, vid: u16, pid: u16, idx: usize) -> Option<HidReading> {
+        puffin::profile_function!();
+        if classify(vid, pid).is_none() {
+            return None;
+        }
+
+        if !self.devices.contains_key(&(vid, pid, idx)) {
+            // Opens run on the "hid-open" worker: open_path on a flaky BT link
+            // plus the Switch Pro init handshake cost ~600 ms, and doing them
+            // here froze ALL input on every reconnect. Adopt any finished
+            // opens, then (rate-limited) request one if the key is still dark.
+            self.drain_finished_opens();
+            let key = (vid, pid, idx);
+            if !self.devices.contains_key(&key) {
+                let should_try = !self.opens_pending.contains(&key)
+                    && self.failed_opens.get(&key)
+                        .map_or(true, |t| t.elapsed() >= RETRY_INTERVAL);
+                if should_try {
+                    // Also ask the classify worker for a fresh device list —
+                    // never inline (the ~110-200 ms call). The open job uses
+                    // the current cached list; if the device only shows up in
+                    // the fresh one, the next retry picks it up.
+                    self.refresh_wanted = true;
+                    match &self.open_tx {
+                        Some(tx) if tx.send(key).is_ok() => {
+                            self.opens_pending.insert(key);
+                        }
+                        _ => { self.failed_opens.insert(key, Instant::now()); }
+                    }
+                }
+                return None; // nothing to read until the worker delivers
+            }
+        }
+
+        let entry = self.devices.get_mut(&(vid, pid, idx))?;
+        // (Switch Pro init used to run lazily right here, blocking the I/O
+        // thread — it now completes on the worker before the entry exists.)
+
+        // If reading fails (device disconnected), drop and retry next cycle.
+        let ok = drain_reports(entry);
+        if !ok {
+            self.devices.remove(&(vid, pid, idx));
+            return None;
+        }
+        // Stall handling: the handle is open and reads succeed (no error), but no
+        // report has parsed for a while → the "frozen until reconnect" signature.
+        // Because the read returns 0 bytes rather than erroring, the device is
+        // never dropped, so input just silently stops. Prime suspect (confirmed on
+        // this machine): HidHide cloaking the pad AFTER we opened its raw-HID
+        // handle (the init log shows 0x30 reports flowing, then HidHide applies).
+        let elapsed = entry.last_report_at.elapsed();
+        if !entry.stalled && elapsed >= Duration::from_millis(2000) {
+            entry.stalled = true;
+            eprintln!(
+                "[gyro] {vid:04X}:{pid:04X} idx={idx} STALLED: no HID reports for {:.1}s \
+                 but the handle is still open (reads return 0 bytes, no error). Suspect \
+                 HidHide cloaking the pad while we hold its raw-HID handle; will auto-reopen \
+                 if it doesn't recover.",
+                elapsed.as_secs_f32()
+            );
+        }
+        let last = entry.last; // ends the &mut borrow so we can drop the entry
+        // Past STALL_REOPEN it's not one of the Switch Pro's transient BT gaps —
+        // drop the handle so the open worker re-opens it with the cloak already
+        // in place (whitelisted), automating what a manual reconnect does.
+        if elapsed >= STALL_REOPEN {
+            eprintln!(
+                "[gyro] {vid:04X}:{pid:04X} idx={idx} auto-reopening after {:.1}s stall \
+                 (HidHide-cloak-after-open recovery)",
+                elapsed.as_secs_f32()
+            );
+            self.devices.remove(&(vid, pid, idx));
+            return None;
+        }
+        Some(last)
+    }
+
+    pub fn remove(&mut self, vid: u16, pid: u16, idx: usize) {
+        self.devices.remove(&(vid, pid, idx));
+    }
+
+    /// Configure the per-device outlier spike filter applied at the HID
+    /// polling layer. `sensitivity_pct` is 0..100 (50 = default);
+    /// `window` is the judging window width in samples (3/5/7 — wider
+    /// repairs longer bursts and costs `window / 2` samples of latency).
+    /// Has no effect if the device hasn't been opened yet — callers
+    /// should retry on subsequent frames or just call every UI frame.
+    /// `device_id` names the filter's input for `spike::capture_start`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_spike_filter(
+        &mut self,
+        vid: u16,
+        pid: u16,
+        idx: usize,
+        device_id: &str,
+        on: bool,
+        sensitivity_pct: f32,
+        window: u8,
+    ) {
+        if let Some(e) = self.devices.get_mut(&(vid, pid, idx)) {
+            e.spike.bind_capture(device_id);
+            e.spike.set_config(on, sensitivity_pct, window);
+        }
+    }
+
+    /// Drains the count of parsed HID reports for `(vid, pid, idx)` since the
+    /// previous call. Used by the I/O thread to attribute IMU activity to the
+    /// per-device polling-rate readout.
+    pub fn take_event_count(&mut self, vid: u16, pid: u16, idx: usize) -> u32 {
+        self.devices.get_mut(&(vid, pid, idx))
+            .map(|e| std::mem::take(&mut e.event_count))
+            .unwrap_or(0)
+    }
+
+
+    /// Stage one byte of an output report (rumble/lightbar) for the Nth physical
+    /// device with this VID/PID. Has no effect if the device isn't open. Call
+    /// `flush_outputs()` once per frame to actually transmit.
+    pub fn set_output_byte(&mut self, vid: u16, pid: u16, idx: usize, pin_id: &str, byte: u8) {
+        let entry = match self.devices.get_mut(&(vid, pid, idx)) {
+            Some(e) => e,
+            None => return,
+        };
+        let updated = entry.out.stage(pin_id, byte);
+        if updated { entry.output_active = true; }
+    }
+
+    /// Stage a signed float output value for AC rumble pins (hd_l_ac / hd_r_ac).
+    /// Send pending output reports for every device that has been driven at
+    /// least once. Call once per frame.
+    pub fn flush_outputs(&mut self) {
+        // Heartbeat interval: re-send the current output state at least
+        // this often even if unchanged. DS4 firmware drops to defaults if
+        // it doesn't see a host report for ~5 s; 1 s is conservative.
+        const HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(1);
+        let now = std::time::Instant::now();
+        for entry in self.devices.values_mut() {
+            if !entry.output_active { continue; }
+            // Skip the USB write when the output state hasn't changed since
+            // the last successful write AND we're within the heartbeat
+            // window. This turns polling-rate-many redundant writes per
+            // second per device (500/s at the default rate) into ~1 —
+            // gyro_flush_outputs goes from ~8 ms/iter to a few µs in the
+            // steady state.
+            let unchanged = entry.last_sent == Some(entry.out);
+            let within_heartbeat = entry.last_sent_at
+                .map(|t| now.duration_since(t) < HEARTBEAT)
+                .unwrap_or(false);
+            if unchanged && within_heartbeat { continue; }
+            let lights_too_soon = entry.last_sent.is_some_and(|sent| sent.differs_only_in_lights(&entry.out))
+                && entry.last_sent_at.is_some_and(|t| now.duration_since(t) < LED_MIN_GAP);
+            if lights_too_soon { continue; }
+            // Snapshot the output state we're about to send so we can stamp
+            // `last_sent` after the match without re-borrowing `entry`.
+            let to_send = entry.out;
+            // Set by the Switch arm when amplitude modulation is active: the emitted
+            // packet then changes every tick even with steady inputs, so we must NOT
+            // let the unchanged-skip suppress the next packet (it would freeze the
+            // flutter). Stamping `last_sent = None` forces a resend next tick.
+            let mut force_continuous = false;
+            let HidEntry { device, kind, out, .. } = entry;
+            match kind {
+                DeviceKind::Ds4 => {
+                    hid_write(device, &build_ds4_usb_out(out));
+                }
+                DeviceKind::DualSense {
+                    connection, bt_seq, lightbar_set_up,
+                    #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))] haptic,
+                    #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))] container,
+                } => {
+                    let setup = out.leds_owned & LED_LIGHTBAR != 0 && !*lightbar_set_up;
+                    *lightbar_set_up |= setup;
+                    match connection {
+                        Some(Connection::Bt) => {
+                            let pkt = build_dualsense_bt_out(out, *bt_seq, setup);
+                            *bt_seq = bt_seq.wrapping_add(1) & 0x0F;
+                            hid_write(device, &pkt);
+                        }
+                        // USB (or unknown — default to USB report which is what
+                        // the firmware accepts when the device is on interface 3).
+                        _ => {
+                            hid_write(device, &build_dualsense_usb_out(out, setup));
+                            #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+                            {
+                                // HD haptics over the USB audio endpoint: synthesize
+                                // BOTH carriers (LF = hd_*, HF = hd2_*) as PCM sines
+                                // on the LRAs. Open the stream lazily the first time
+                                // any carrier is non-zero.
+                                let want_haptic = out.hd_l_amp != 0 || out.hd_r_amp != 0
+                                    || out.hd2_l_amp != 0 || out.hd2_r_amp != 0;
+                                if want_haptic && haptic.is_none() {
+                                    *haptic = dualsense_haptic::HapticStream::open(container.as_ref());
+                                }
+                                if let Some(h) = haptic.as_mut() {
+                                    h.set_targets_dual(
+                                        out.hd_l_amp  as f32 / 255.0, out.hd_l_freq  as f32 / 255.0,
+                                        out.hd2_l_amp as f32 / 255.0, out.hd2_l_freq as f32 / 255.0,
+                                        out.hd_r_amp  as f32 / 255.0, out.hd_r_freq  as f32 / 255.0,
+                                        out.hd2_r_amp as f32 / 255.0, out.hd2_r_freq as f32 / 255.0,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                DeviceKind::SwitchPro { initialized, packet_counter, .. } => {
+                    if !*initialized { continue; }
+                    let (pkt, am) = switch_rumble_report(out, *packet_counter);
+                    *packet_counter = packet_counter.wrapping_add(1);
+                    hid_write(device, &pkt);
+                    // When AM is active the packet changes every tick even with steady
+                    // inputs, so force continuous re-send (bypass the unchanged-skip).
+                    force_continuous = am;
+                }
+            }
+            // Record what we just wrote so the next iteration can skip
+            // if nothing's changed. If the hid_write failed (debug logs
+            // it; release silently swallows) we still record — re-trying
+            // every 2 ms buys nothing, and the heartbeat will re-send
+            // within a second anyway.
+            entry.last_sent = if force_continuous { None } else { Some(to_send) };
+            entry.last_sent_at = Some(now);
+        }
+    }
+}
+
+/// Classify a hidapi device instance path as a FlexInput-emulated (virtual)
+/// HIDMaestro device vs a real controller.
+///
+/// HIDMaestro devices are root-enumerated, so their HID PDO path looks like
+/// `\\?\HID#HIDCLASS#1&...` — note the `HIDCLASS` enumerator token and the
+/// absence of a `VID_xxxx&PID_xxxx` hardware token. A real USB controller's
+/// path is `\\?\HID#VID_054C&PID_0CE6&MI_03#...` and a Bluetooth one carries a
+/// `{bth-guid}` / `BTHENUM` segment. We key on the positive virtual signal
+/// (`HIDCLASS` without a `VID_` token) so a real device is never mis-flagged.
+/// Ordered device-info list for the Nth-device addressing scheme used
+/// throughout this module: the gamepad interface for `(vid, pid)`, with the
+/// same primary/fallback selection as `open_device`. A free function over a
+/// caller-held `&HidApi` so the I/O-thread readers (short lock on the shared
+/// api) and the background refresh/classify worker (holds the lock across its
+/// `refresh_devices()`) index into an identical ordering and can never drift.
+pub(crate) fn gamepad_device_list_of(api: &HidApi, vid: u16, pid: u16) -> Vec<hidapi::DeviceInfo> {
+    let kind_tag = classify(vid, pid);
+
+    // Primary filter: usage_page + usage (correct, but returns 0 when HidHide
+    // intercepts enumeration on Windows even for whitelisted apps).
+    let mut paths: Vec<hidapi::DeviceInfo> = api
+        .device_list()
+        .filter(|d| {
+            d.vendor_id() == vid
+                && d.product_id() == pid
+                && d.usage_page() == USAGE_PAGE_GENERIC_DESKTOP
+                && d.usage() == USAGE_GAMEPAD
+        })
+        .cloned()
+        .collect();
+
+    // Fallback: if usage fields came back as 0 (HidHide / Windows quirk),
+    // use known interface numbers for each controller instead.
+    if paths.is_empty() {
+        if let Some(kind_tag) = &kind_tag {
+            let iface = preferred_interface(kind_tag);
+            paths = api
+                .device_list()
+                .filter(|d| {
+                    d.vendor_id() == vid
+                        && d.product_id() == pid
+                        && d.interface_number() == iface
+                })
+                .cloned()
+                .collect();
+        }
+    }
+
+    // Last resort: accept any interface with the right VID/PID (e.g. BT
+    // connections that only expose a single interface).
+    if paths.is_empty() {
+        paths = api
+            .device_list()
+            .filter(|d| d.vendor_id() == vid && d.product_id() == pid)
+            .cloned()
+            .collect();
+    }
+    paths
+}
+
+/// Open the Nth physical `(vid, pid)` gamepad and run any per-device init —
+/// the WORKER side of the open path ("hid-open" thread). The device list read
+/// and `open_path` hold the shared api lock only briefly; the Switch Pro init
+/// handshake (~600 ms worst case over Bluetooth: USB-probe timeout +
+/// subcommand acks + four SPI calibration reads) runs with the lock RELEASED
+/// so nothing else queues behind it. Returns `None` on open failure or a
+/// failed handshake — callers treat both as a rate-limited retry.
+fn open_and_init(api: &Arc<Mutex<HidApi>>, vid: u16, pid: u16, idx: usize) -> Option<OpenedDevice> {
+    let kind_tag = classify(vid, pid)?; // bail early for non-PS/Switch VID/PID
+    let (device, path) = {
+        let guard = api.lock().ok()?;
+        // Real devices only: a virtual pad, ours (ROOT-enumerated `HIDCLASS`/
+        // `HIDMAESTRO` path) or another HIDMaestro program's, must never be a
+        // gyro/HID target. Excluding them here — combined with the real-only
+        // index the gilrs walk produces (poll skips is_virt and dropped pads)
+        // and lookup_phys — keeps the (vid,pid,idx) handle selection stable
+        // even when a same-VID/PID virtual shares the bus, where the raw list
+        // order is not. The CLASSIFIER (`classify_origin`) still reads the
+        // full list.
+        let paths: Vec<hidapi::DeviceInfo> = gamepad_device_list_of(&guard, vid, pid)
+            .into_iter()
+            .filter(|d| path_origin(&d.path().to_string_lossy()) == PadOrigin::Physical)
+            .collect();
+
+        #[cfg(debug_assertions)]
+        eprintln!("[gyro] open_and_init vid={:04X} pid={:04X} idx={} iface={} path={:?}",
+            vid, pid, idx,
+            paths.get(idx).map_or(-1, |p| p.interface_number()),
+            paths.get(idx).map(|p| p.path()));
+
+        let info = paths.get(idx)?;
+        // A pad FlexInput hides from games opens through its private node.
+        #[cfg(target_os = "linux")]
+        let open_at = crate::linux_hide::reachable(info.path());
+        #[cfg(not(target_os = "linux"))]
+        let open_at = info.path();
+        match guard.open_path(&open_at) {
+            Ok(d) => (d, info.path().to_string_lossy().into_owned()),
+            Err(e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("[gyro] open_path failed: {e}");
+                let _ = e;
+                return None;
+            }
+        }
+    };
+    // Outside the api lock: a CfgMgr32 (or sysfs) lookup, nothing hidapi needs.
+    #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+    let container = matches!(kind_tag, KindTag::DualSense)
+        .then(|| dualsense_haptic::container_of_interface(&path))
+        .flatten();
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let _ = path;
+    device.set_blocking_mode(false).ok()?;
+
+    // On Windows, DualSense/DS4 LED output (report 0x02) is only processed by
+    // the firmware when sent to interface 0 — but that interface is owned
+    // exclusively by the Windows HID class driver and cannot be opened from
+    // userspace. All LED/lightbar control is therefore unavailable on Windows
+    // unless a WinRT (Windows.Gaming.Input) path is implemented in the future.
+    // Trigger effects and rumble go to interface 3 (the accessible IMU interface)
+    // and the firmware processes those fields on that interface.
+    let mut packet_counter = 0u8;
+    let mut calib = None;
+    if matches!(kind_tag, KindTag::SwitchPro) {
+        // Run the handshake to completion HERE (lock released). A failed init
+        // is a failed open: the entry never ships half-initialized, and the
+        // rate-limited retry gets a clean attempt — the old lazy re-init that
+        // ran on every read() from the I/O thread is gone.
+        // Linux: hid-nintendo, when it has the pad, ran this handshake itself
+        // and keeps it in full report mode with the IMU and rumble on. Running
+        // it again over the driver's head disrupts both; the calibration is
+        // all that's ours to read.
+        #[cfg(target_os = "linux")]
+        let kernel_set_up = hid_driver_of(&path).as_deref() == Some("nintendo");
+        #[cfg(not(target_os = "linux"))]
+        let kernel_set_up = false;
+        if !init_switch_pro(&device, &mut packet_counter, &mut calib, kernel_set_up) {
+            return None;
+        }
+    }
+    Some(OpenedDevice {
+        device, kind_tag, calib, packet_counter,
+        #[cfg(all(not(studio_headless), any(windows, target_os = "linux")))]
+        container,
+    })
+}
+
+/// Who made a pad hidapi lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PadOrigin {
+    /// A controller in someone's hands.
+    Physical,
+    /// One of FlexInput's own emulated controllers.
+    Own,
+    /// A virtual pad another HIDMaestro program made (see
+    /// [`crate::devnode::HidMaestroMaker::OtherProgram`]).
+    OtherProgram,
+}
+
+/// Who made the Nth device with this VID/PID, judged by its device instance
+/// path: one of FlexInput's OWN emulated HIDMaestro controllers, another
+/// HIDMaestro program's, or a real one.
+///
+/// This is the discriminator that finally works where the name/uuid markers
+/// failed: gilrs's WGI backend reports a generic name ("HID-compliant game
+/// controller") and a nil uuid for both a real and an emulated same-VID/PID
+/// pad, but the underlying HID **instance path** differs — a real controller
+/// enumerates as `HID\VID_054C&PID_0CE6&MI_..` (USB) or under `BTHENUM`,
+/// while a HIDMaestro device is ROOT-enumerated and appears as
+/// `HID\HIDCLASS\..` (its path has no `VID_`/`PID_` tokens). `idx` is the
+/// same Nth-device index the gilrs walk derives per VID/PID, so the two
+/// stay correlated. Physical for non-PS devices and out-of-range idx.
+///
+/// Reads the list as-is (no refresh) — the classify worker refreshes the
+/// shared api first, then calls this against the same locked instance.
+pub(crate) fn classify_origin(api: &HidApi, vid: u16, pid: u16, idx: usize) -> PadOrigin {
+    match gamepad_device_list_of(api, vid, pid).get(idx) {
+        Some(info) => path_origin(&info.path().to_string_lossy()),
+        None => PadOrigin::Physical,
+    }
+}
+
+/// Who made the pad behind a HID path. Another program's HIDMaestro pad is
+/// told by the device tree; the path tests below would take a ROOT\HIDCLASS
+/// one for ours.
+fn path_origin(path: &str) -> PadOrigin {
+    #[cfg(windows)]
+    if crate::devnode::hidmaestro_maker_of_interface(path) == Some(crate::devnode::HidMaestroMaker::OtherProgram) {
+        return PadOrigin::OtherProgram;
+    }
+    if path_is_own_virtual(path) {
+        PadOrigin::Own
+    } else {
+        PadOrigin::Physical
+    }
+}
+
+/// Whether a HID path is one of our own virtual pads: a HIDMaestro UMDF one
+/// (told by its instance path), or a composite USB persona, whose path is a
+/// real wired pad's and is told by its USB device's serial instead. On Linux,
+/// a UHID pad's hidraw node, told by the phys we gave it.
+fn path_is_own_virtual(path: &str) -> bool {
+    if instance_path_is_virtual(path) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        crate::devnode::is_own_composite_interface(path)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        flexinput_core::own_virtual::node_is_own(path)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    false
+}
+
+fn instance_path_is_virtual(path: &str) -> bool {
+    let up = path.to_ascii_uppercase();
+    // Explicit HIDMaestro SWD form (belt-and-suspenders; the HID child usually
+    // shows as HIDCLASS rather than SWD\HIDMAESTRO).
+    if up.contains("HIDMAESTRO") {
+        return true;
+    }
+    // Root-enumerated HID child: HIDCLASS enumerator and no real USB VID token.
+    up.contains("HIDCLASS") && !up.contains("VID_")
+}
+
+fn hid_write(device: &HidDevice, data: &[u8]) {
+    // A failed write is expected and benign when the device is unplugged mid-flush
+    // (the flush loop keeps running until the next enumerate drops the handle), so
+    // it's silently swallowed — logging here spammed once per write on disconnect.
+    let _ = device.write(data);
+}
+
+// ── Switch Pro initialisation ─────────────────────────────────────────────────
+
+/// Build stick calibration from the four raw SPI blobs.
+///
+/// ⭐ **Transport-free on purpose.** Reading these blobs is HID-specific, but
+/// DECODING them is not, and keeping the two welded together is why the
+/// Bluetooth Classic path has been running on the fallback numbers: it reaches
+/// the same controller by a different route, so it could not call any of this
+/// and silently got a guess instead. See [`switch_pro_fallback_calib`].
+///
+/// Addresses and layout, per dekuNukem's `spi_flash_notes.md`:
+/// `0x603D` factory L (max, centre, min) · `0x6046` factory R (centre, min, max)
+/// · `0x8010` / `0x801B` user calibration, valid when prefixed `B2 A1`.
+pub(crate) fn switch_pro_calib_from_spi(
+    factory_l: Option<&[u8]>,
+    factory_r: Option<&[u8]>,
+    user_l: Option<&[u8]>,
+    user_r: Option<&[u8]>,
+) -> Option<SwitchProCalib> {
+    // User calibration wins, but only when its magic marks it as written.
+    // A named fn rather than a closure: a closure infers one lifetime across
+    // both arguments and the return, which ties the factory blob's lifetime to
+    // the user blob's for no reason and will not compile.
+    fn pick<'a>(user: Option<&'a [u8]>, factory: Option<&'a [u8]>) -> Option<&'a [u8]> {
+        match user {
+            Some(d) if d.len() >= 11 && d[0] == 0xB2 && d[1] == 0xA1 => Some(&d[2..11]),
+            _ => factory,
+        }
+    }
+    let l = pick(user_l, factory_l)?;
+    let r = pick(user_r, factory_r)?;
+    if l.len() < 9 || r.len() < 9 {
+        return None;
+    }
+    let (l_x_max, l_y_max) = unpack_12bit_pair(l, 0);
+    let (l_x_ctr, l_y_ctr) = unpack_12bit_pair(l, 3);
+    let (l_x_min, l_y_min) = unpack_12bit_pair(l, 6);
+    let (r_x_ctr, r_y_ctr) = unpack_12bit_pair(r, 0);
+    let (r_x_min, r_y_min) = unpack_12bit_pair(r, 3);
+    let (r_x_max, r_y_max) = unpack_12bit_pair(r, 6);
+    // ❗ The blob stores OFFSETS from centre, not absolute positions. Treating
+    // them as absolute is the difference between a stick that reaches its
+    // corners and one that saturates early — the square response.
+    Some(SwitchProCalib {
+        l_x: AxisCalib { min: l_x_ctr.saturating_sub(l_x_min), center: l_x_ctr, max: l_x_ctr.saturating_add(l_x_max) },
+        l_y: AxisCalib { min: l_y_ctr.saturating_sub(l_y_min), center: l_y_ctr, max: l_y_ctr.saturating_add(l_y_max) },
+        r_x: AxisCalib { min: r_x_ctr.saturating_sub(r_x_min), center: r_x_ctr, max: r_x_ctr.saturating_add(r_x_max) },
+        r_y: AxisCalib { min: r_y_ctr.saturating_sub(r_y_min), center: r_y_ctr, max: r_y_ctr.saturating_add(r_y_max) },
+    })
+}
+
+/// The numbers used when the controller's own calibration could not be read.
+///
+/// ⛔ **A guess, and it shows.** Centre 2048 with a ±1500 half-range is a
+/// nominal 12-bit stick, not this one: a real unit's travel is both off-centre
+/// and asymmetric, so the normalised value reaches full scale on the axes well
+/// before the diagonals and the circularity plot comes out square. It is the
+/// right thing to fall back to and the wrong thing to ship as the only option.
+pub(crate) fn switch_pro_fallback_calib() -> SwitchProCalib {
+    SwitchProCalib {
+        l_x: AxisCalib { min: 548, center: 2048, max: 3548 },
+        l_y: AxisCalib { min: 548, center: 2048, max: 3548 },
+        r_x: AxisCalib { min: 548, center: 2048, max: 3548 },
+        r_y: AxisCalib { min: 548, center: 2048, max: 3548 },
+    }
+}
+
+/// The kernel driver bound to a hidraw node's HID device (`nintendo`,
+/// `playstation`, `hid-generic`), if any.
+#[cfg(target_os = "linux")]
+fn hid_driver_of(hidraw_path: &str) -> Option<String> {
+    let name = hidraw_path.rsplit('/').next()?;
+    let link = std::fs::read_link(format!("/sys/class/hidraw/{name}/device/driver")).ok()?;
+    Some(link.file_name()?.to_string_lossy().into_owned())
+}
+
+/// `kernel_set_up`: a kernel driver already ran the handshake (Linux's
+/// hid-nintendo); only the stick calibration is read.
+fn init_switch_pro(
+    device: &HidDevice,
+    counter: &mut u8,
+    calib: &mut Option<SwitchProCalib>,
+    kernel_set_up: bool,
+) -> bool {
+    let mut buf = [0u8; 64];
+    if kernel_set_up {
+        let reads = SWITCH_PRO_CALIB_READS.map(|(addr, len)| spi_read(device, addr, len, counter, &mut buf));
+        *calib = switch_pro_calib_from_spi(reads[0].as_deref(), reads[1].as_deref(), reads[2].as_deref(), reads[3].as_deref());
+        eprintln!(
+            "[gyro] Switch Pro set up by the kernel driver; read calibration only (cal={})",
+            calib.is_some()
+        );
+        return true;
+    }
+
+    // USB handshake (silently ignored / fails on BT — that's fine).
+    let _ = device.write(&pad64([0x80, 0x02]));
+    if let Ok(n) = device.read_timeout(&mut buf, 100) {
+        if n > 0 && buf[0] == 0x81 {
+            // USB confirmed: disable USB inactivity timeout.
+            let _ = device.write(&pad64([0x80, 0x04]));
+            let _ = device.read_timeout(&mut buf, 100);
+        }
+    }
+
+    // Subcommand 0x48 0x01 — enable vibration. Without this, output report
+    // 0x10 (rumble-only) is silently ignored even with valid encoded packets.
+    if device.write(&subcommand(*counter, 0x48, &[0x01])).is_err() {
+        return false;
+    }
+    *counter = counter.wrapping_add(1);
+    let ack_vibration = wait_for_ack(device, 0x21, &mut buf);
+
+    // Subcommand 0x40 0x01 — enable IMU.
+    if device.write(&subcommand(*counter, 0x40, &[0x01])).is_err() {
+        return false;
+    }
+    *counter = counter.wrapping_add(1);
+    let ack_imu = wait_for_ack(device, 0x21, &mut buf);
+
+    // Read stick calibration from SPI flash before switching to full report mode —
+    // SPI reads come back in a 0x21 ack with the requested data, and that's harder
+    // to filter from the firehose of 0x30 reports once full mode is enabled.
+    //
+    // Layout (dekuNukem/Nintendo_Switch_Reverse_Engineering spi_flash_notes.md):
+    //   0x603D, 9 bytes : factory L stick (max,center,min) — 12-bit packed
+    //   0x6046, 9 bytes : factory R stick (center,min,max) — 12-bit packed
+    //   0x8010, 11 bytes: user L calibration (first 2 bytes are "magic", 0xA1B2 = valid)
+    //   0x801B, 11 bytes: user R calibration (same magic format)
+    let factory_l = spi_read(device, 0x6_03D, 9, counter, &mut buf);
+    let factory_r = spi_read(device, 0x6_046, 9, counter, &mut buf);
+    let user_l    = spi_read(device, 0x8_010, 11, counter, &mut buf);
+    let user_r    = spi_read(device, 0x8_01B, 11, counter, &mut buf);
+
+    *calib = switch_pro_calib_from_spi(
+        factory_l.as_deref(),
+        factory_r.as_deref(),
+        user_l.as_deref(),
+        user_r.as_deref(),
+    );
+
+    // Subcommand 0x03 0x30 — full input report mode (sends 0x30 with IMU).
+    if device.write(&subcommand(*counter, 0x03, &[0x30])).is_err() {
+        return false;
+    }
+    *counter = counter.wrapping_add(1);
+    let ack_full_mode = wait_for_ack(device, 0x21, &mut buf);
+
+    // ── Diagnostics: confirm the pad actually came up (the BT-before-launch
+    // freeze) ────────────────────────────────────────────────────────────────
+    // Suspicion: over a Bluetooth link that hasn't settled (the pad was paired
+    // BEFORE FlexInput launched), the handshake subcommands are written but the
+    // pad never processes them, so it stays in simple/no-report mode — "frozen"
+    // until a reconnect forces a fresh link + init. Sample the report stream
+    // right after init: 0x30 = full mode w/ IMU (healthy); 0x3F = simple mode
+    // (buttons/sticks only, IMU dead); EMPTY = no reports at all (fully frozen).
+    let cal_ok = calib.is_some();
+    let mut post_ids: Vec<u8> = Vec::new();
+    for _ in 0..8 {
+        if let Ok(n) = device.read_timeout(&mut buf, 50) {
+            if n > 0 { post_ids.push(buf[0]); }
+        }
+    }
+    let full_reports = post_ids.iter().any(|&id| id == 0x30);
+    if !(ack_vibration && ack_imu && ack_full_mode && cal_ok && full_reports) {
+        eprintln!(
+            "[gyro] Switch Pro init DEGRADED: ack(vibration={ack_vibration}, \
+             imu={ack_imu}, full_mode={ack_full_mode}) cal={cal_ok} \
+             post_init_report_ids={post_ids:02X?} — expected acks + 0x30 reports. \
+             Empty ids = no data (fully frozen); all 0x3F = stuck in simple mode. \
+             Likely a cold BT link at launch racing the handshake; reconnecting \
+             the pad forces a fresh init."
+        );
+    } else {
+        eprintln!("[gyro] Switch Pro init OK (all acks, cal present, 0x30 reports flowing)");
+    }
+
+    true
+}
+
+/// Wait for a subcommand acknowledgement (`expected_id`, normally 0x21).
+/// Returns `true` if the ack arrived, `false` on timeout — the caller uses that
+/// to diagnose a handshake that a cold Bluetooth link swallowed.
+fn wait_for_ack(device: &HidDevice, expected_id: u8, buf: &mut [u8; 64]) -> bool {
+    for _ in 0..15 {
+        if let Ok(n) = device.read_timeout(buf, 50) {
+            if n > 0 && buf[0] == expected_id {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Issue an SPI flash read subcommand (0x10) at `addr` for `len` bytes.
+/// Returns the payload bytes from the matching ack, or None on timeout / failure.
+/// The reply is a 0x21 ack whose subcommand byte (offset 14) is 0x10 and whose
+/// payload bytes 15..19 echo the address+length, followed by the data at byte 20.
+/// The four SPI regions stick calibration lives in: `(address, length)`.
+///
+/// ⭐ Named once so both transports read the same four things. The HID path had
+/// these inline, which is part of why the Bluetooth Classic path never got
+/// them — there was nothing to call.
+pub(crate) const SWITCH_PRO_CALIB_READS: [(u32, u8); 4] =
+    [(0x6_03D, 9), (0x6_046, 9), (0x8_010, 11), (0x8_01B, 11)];
+
+/// Build the output report that turns the vibration motor on (subcommand
+/// `0x48 0x01`). Without it the controller ignores every rumble report.
+pub(crate) fn switch_pro_enable_vibration(counter: u8) -> [u8; 64] {
+    subcommand(counter, 0x48, &[0x01])
+}
+
+/// Build the output report that asks for `len` bytes at `addr`.
+pub(crate) fn switch_pro_spi_request(addr: u32, len: u8, counter: u8) -> [u8; 64] {
+    subcommand(counter, 0x10, &spi_args(addr, len))
+}
+
+fn spi_args(addr: u32, len: u8) -> [u8; 8] {
+    [
+        (addr & 0xFF) as u8,
+        ((addr >> 8) & 0xFF) as u8,
+        ((addr >> 16) & 0xFF) as u8,
+        ((addr >> 24) & 0xFF) as u8,
+        len,
+        0,
+        0,
+        0,
+    ]
+}
+
+/// Pull the payload out of a `0x21` reply, but only if it answers THIS read.
+///
+/// ❗ The address echo is the whole point. A `0x21` report is the acknowledgement
+/// for every subcommand, not just this one, and on a transport where replies
+/// arrive interleaved with a 200 Hz input stream, "the next 0x21" is routinely
+/// somebody else's. Matching on the echoed address is what makes the exchange
+/// safe to run without blocking the link.
+pub(crate) fn switch_pro_spi_reply<'a>(report: &'a [u8], addr: u32, len: u8) -> Option<&'a [u8]> {
+    let args = spi_args(addr, len);
+    if report.len() < 20 + len as usize || report[0] != 0x21 || report[14] != 0x10 {
+        return None;
+    }
+    if report[15..19] != args[..4] {
+        return None;
+    }
+    Some(&report[20..20 + len as usize])
+}
+
+fn spi_read(device: &HidDevice, addr: u32, len: u8, counter: &mut u8, buf: &mut [u8; 64]) -> Option<Vec<u8>> {
+    let args = spi_args(addr, len);
+    if device.write(&switch_pro_spi_request(addr, len, *counter)).is_err() {
+        return None;
+    }
+    *counter = counter.wrapping_add(1);
+    let _ = args;
+    for _ in 0..30 {
+        if let Ok(n) = device.read_timeout(buf, 50) {
+            if let Some(data) = switch_pro_spi_reply(&buf[..n], addr, len) {
+                return Some(data.to_vec());
+            }
+        }
+    }
+    None
+}
+
+/// Unpack two consecutive 12-bit little-endian values from a 3-byte SPI calibration triple.
+/// Layout: [b0, b1, b2] → x = b0 | ((b1 & 0x0F) << 8), y = (b1 >> 4) | (b2 << 4).
+fn unpack_12bit_pair(data: &[u8], off: usize) -> (u16, u16) {
+    let b0 = data[off]     as u16;
+    let b1 = data[off + 1] as u16;
+    let b2 = data[off + 2] as u16;
+    let x = b0 | ((b1 & 0x0F) << 8);
+    let y = (b1 >> 4) | (b2 << 4);
+    (x, y)
+}
+
+/// Normalize a raw 12-bit stick reading into [-1, 1] using per-axis calibration.
+/// Asymmetric range (negative side and positive side may have different spans)
+/// is handled by dividing each half independently — matches Joy-Con / Pro
+/// firmware's own normalization.
+fn normalize_axis(raw: u16, c: AxisCalib) -> f32 {
+    let raw = raw as i32;
+    let center = c.center as i32;
+    let v = if raw >= center {
+        let span = (c.max as i32 - center).max(1);
+        (raw - center) as f32 / span as f32
+    } else {
+        let span = (center - c.min as i32).max(1);
+        (raw - center) as f32 / span as f32
+    };
+    v.clamp(-1.0, 1.0)
+}
+
+/// Build a 64-byte padded Switch Pro output report (report ID 0x01).
+fn subcommand(counter: u8, id: u8, args: &[u8]) -> [u8; 64] {
+    let mut cmd = [0u8; 64];
+    cmd[0] = 0x01; // output report ID
+    cmd[1] = counter & 0x0F;
+    // Neutral rumble data at bytes 2–9.
+    cmd[2] = 0x00; cmd[3] = 0x01; cmd[4] = 0x40; cmd[5] = 0x40;
+    cmd[6] = 0x00; cmd[7] = 0x01; cmd[8] = 0x40; cmd[9] = 0x40;
+    cmd[10] = id;
+    for (i, &b) in args.iter().enumerate() {
+        if 11 + i < 64 { cmd[11 + i] = b; }
+    }
+    cmd
+}
+
+/// Pad a short slice into a 64-byte array (for 0x80 USB handshake reports).
+fn pad64(prefix: impl AsRef<[u8]>) -> [u8; 64] {
+    let mut buf = [0u8; 64];
+    for (i, &b) in prefix.as_ref().iter().enumerate() {
+        if i < 64 { buf[i] = b; }
+    }
+    buf
+}
+
+// ── Report reading ────────────────────────────────────────────────────────────
+
+/// Returns false if the device has errored out (caller should drop the entry).
+fn drain_reports(entry: &mut HidEntry) -> bool {
+    let mut buf = [0u8; 128];
+    let mut average = ImuAverage::default();
+    let mut drained = 0u32;
+    let done = loop {
+        match entry.device.read(&mut buf) {
+            Ok(0) => break true,
+            Err(_) => break false,
+            Ok(n) => {
+                if let Some(mut r) = parse_report(&buf[..n], &mut entry.kind) {
+                    entry.event_count = entry.event_count.saturating_add(1);
+                    // Touchpad hold-last: when a finger lifts, a real pad keeps
+                    // bit 7 set but the X/Y bytes go stale/garbage (often reading
+                    // ~max → normalized ≈ +1, a visible jump). Freeze the inactive
+                    // finger at its last reported position instead so the pin
+                    // doesn't snap — it stays where the finger left and reads 0
+                    // before any touch (TouchPoint default). Active fingers pass
+                    // through untouched.
+                    if r.has_touchpad {
+                        hold_inactive_touch(&mut r.touch1, &entry.last.touch1);
+                        hold_inactive_touch(&mut r.touch2, &entry.last.touch2);
+                    }
+                    // Filter at the device-poll boundary. Each parsed `r`
+                    // is one true device sample (no engine upsampling), so
+                    // the filter's window sees a clean device-rate signal.
+                    // Sticks / buttons / touchpad are NOT filtered — only
+                    // the six IMU axes are routed through it, and `r` keeps
+                    // everything else from the freshest packet.
+                    let imu = entry.spike.push([
+                        r.gyro_x, r.gyro_y, r.gyro_z,
+                        r.accel_x, r.accel_y, r.accel_z,
+                    ]);
+                    r.set_imu(imu);
+                    average.add(imu);
+                    // Everything but the held presses and, below, the IMU comes
+                    // from the freshest packet.
+                    if drained > 0 {
+                        r.hold_presses_from(&entry.last);
+                    }
+                    drained += 1;
+                    entry.last = r;
+                    entry.last_report_at = std::time::Instant::now();
+                    if entry.stalled {
+                        entry.stalled = false;
+                        eprintln!("[gyro] HID reports RESUMED (was a transient stall, not the permanent freeze)");
+                    }
+                }
+            }
+        }
+    };
+    if let Some(mean) = average.mean() {
+        entry.last.set_imu(mean);
+    }
+    done
+}
+
+fn parse_report(buf: &[u8], kind: &mut DeviceKind) -> Option<HidReading> {
+    if buf.is_empty() { return None; }
+    match kind {
+        DeviceKind::Ds4 => parse_ds4(buf),
+        DeviceKind::DualSense { connection, .. } => parse_dualsense(buf, connection),
+        DeviceKind::SwitchPro { calib, .. } => parse_switch_pro(buf, calib.as_ref()),
+    }
+}
+
+fn parse_ds4(buf: &[u8]) -> Option<HidReading> {
+    // Layout reference: Linux drivers/hid/hid-sony.c, struct dualshock4_input_report_common.
+    //   payload offsets: lx,ly(0,1) rx,ry(2,3) buttons[3](4-6) l2,r2(7,8)
+    //                    timestamp(9,10) battery(11) gyro[3](12-17) accel[3](18-23)
+    //   buttons[0] (payload 4): dpad(3:0) square(4) cross(5) circle(6) triangle(7)
+    //   buttons[1] (payload 5): l1(0) r1(1) l2(2) r2(3) share(4) options(5) l3(6) r3(7)
+    //   buttons[2] (payload 6): bit 0 = PS, bit 1 = Touchpad click, bits 2-7 = counter.
+    // USB: report 0x01, payload starts at byte 1 → gyro 13, accel 19, buttons 5/6/7.
+    // BT:  report 0x11, BT prefix is 2 bytes, payload starts at byte 3 → gyro 15, accel 21, buttons 7/8/9.
+    let (po, go, ao) = match buf[0] {
+        0x01 if buf.len() >= 25 => (1usize, 13, 19),
+        0x11 if buf.len() >= 77 => (3usize, 15, 21),
+        _ => return None,
+    };
+    let btn0 = buf[po + 4];
+    let btn1 = buf[po + 5];
+    let btn2 = buf[po + 6];
+    let dpad = btn0 & 0x0F;
+
+    // Populate the full input state from the raw report so the gilrs backend can
+    // OVERRIDE gilrs's WGI axis/button mapping (which mis-orders PS-family axes,
+    // landing L2/R2 where the right stick should be). DualSense already does this;
+    // without it, our emulated DS4 read-back falls through to the broken WGI path.
+    let ds = DualSenseState {
+        lx:  (buf[po]     as f32 - 128.0) / 128.0,
+        ly: -(buf[po + 1] as f32 - 128.0) / 128.0, // HID Y down → +Y up
+        rx:  (buf[po + 2] as f32 - 128.0) / 128.0,
+        ry: -(buf[po + 3] as f32 - 128.0) / 128.0,
+        l2: buf[po + 7] as f32 / 255.0,
+        r2: buf[po + 8] as f32 / 255.0,
+        btn_west:    btn0 & 0x10 != 0, // Square
+        btn_south:   btn0 & 0x20 != 0, // Cross
+        btn_east:    btn0 & 0x40 != 0, // Circle
+        btn_north:   btn0 & 0x80 != 0, // Triangle
+        btn_l1:      btn1 & 0x01 != 0,
+        btn_r1:      btn1 & 0x02 != 0,
+        btn_l2:      btn1 & 0x04 != 0,
+        btn_r2:      btn1 & 0x08 != 0,
+        btn_create:  btn1 & 0x10 != 0, // Share
+        btn_options: btn1 & 0x20 != 0,
+        btn_ls:      btn1 & 0x40 != 0,
+        btn_rs:      btn1 & 0x80 != 0,
+        btn_ps:      btn2 & 0x01 != 0,
+        dpad_up:    matches!(dpad, 0 | 1 | 7),
+        dpad_right: matches!(dpad, 1 | 2 | 3),
+        dpad_down:  matches!(dpad, 3 | 4 | 5),
+        dpad_left:  matches!(dpad, 5 | 6 | 7),
+        // No back/Fn buttons on a DS4 (its buttons[2] high bits are a counter).
+        ..Default::default()
+    };
+
+    let mut r = build(buf, go, ao, DS4_GYRO_DPS_PER_LSB, DS4_ACCEL_G_PER_LSB);
+    // DS4 touchpad: the two `dualshock4_touch_point` records use the SAME 4-byte
+    // packing as the DualSense (`[id/active, x_lo, (y_lo<<4)|x_hi, y_hi]`, 1920×1080
+    // sensor), so `parse_dualsense_touch` decodes them directly. Offsets are
+    // RID-inclusive: USB report 0x01 → fingers @35/@39 (matches the profile's
+    // `touch_fingers`); BT report 0x11 → +2 for the BT prefix (@37/@41). Guard the
+    // length separately from the IMU read (a short report still yields IMU).
+    let (t1, t2) = match buf[0] {
+        0x01 => (35usize, 39usize),
+        0x11 => (37usize, 41usize),
+        _    => (usize::MAX, usize::MAX),
+    };
+    if t2 != usize::MAX && buf.len() >= t2 + 4 {
+        r.has_touchpad = true;
+        r.touch1 = parse_dualsense_touch(buf, t1);
+        r.touch2 = parse_dualsense_touch(buf, t2);
+    }
+    r.touchpad_click = btn2 & 0x02 != 0;
+    // Battery: report byte 12 (USB) / 14 (BT, +2 prefix) — `po + 11`. Bounds-
+    // checked; informational only (never feeds a virtual report).
+    r.battery = buf.get(po + 11).map(|&b| decode_battery(b));
+    r.dualsense      = Some(ds);
+    Some(r)
+}
+
+fn parse_dualsense(buf: &[u8], connection: &mut Option<Connection>) -> Option<HidReading> {
+    // Layout reference: Linux drivers/hid/hid-playstation.c, struct dualsense_input_report.
+    // Payload offsets (relative to payload base po):
+    //   lx(0) ly(1) rx(2) ry(3) l2(4) r2(5) seq(6)
+    //   buttons[0](7): dpad(3:0) square(4) cross(5) circle(6) triangle(7)
+    //   buttons[1](8): l1(0) r1(1) l2_dig(2) r2_dig(3) create(4) options(5) l3(6) r3(7)
+    //   buttons[2](9): ps(0) touchpad(1) mute(2); Edge only: fn_l(4) fn_r(5)
+    //                  back_l(6) back_r(7)
+    //   reserved[4](11-14) gyro[3](15-20) accel[3](21-26)
+    //   timestamp(27-30) reserved2(31) touch[2](32-39)
+    // USB: report 0x01, payload base po=1. BT: report 0x31, payload base po=2.
+    let (conn, po, go, ao, t1, t2) = match buf[0] {
+        0x01 if buf.len() >= 41 => (Connection::Usb, 1usize, 16, 22, 33, 37),
+        // 78 bytes with its id and CRC, hid-playstation's DS_INPUT_REPORT_BT_SIZE:
+        // what hidraw and the dongle hand over. Windows pads every read to the
+        // collection's longest report, so it never came up there.
+        0x31 if buf.len() >= 78 => (Connection::Bt,  2usize, 17, 23, 34, 38),
+        _ => return None,
+    };
+    *connection = Some(conn);
+
+    let btn0 = buf[po + 7];
+    let btn1 = buf[po + 8];
+    let btn2 = buf[po + 9];
+
+    // D-Pad: low nibble of buttons[0], 0-7 clockwise from north, 8=neutral.
+    let dpad = btn0 & 0x0F;
+
+    let ds = DualSenseState {
+        lx:  (buf[po]     as f32 - 128.0) / 128.0,
+        ly: -(buf[po + 1] as f32 - 128.0) / 128.0, // HID Y increases downward; invert to +Y=up
+        rx:  (buf[po + 2] as f32 - 128.0) / 128.0,
+        ry: -(buf[po + 3] as f32 - 128.0) / 128.0, // same
+        l2: buf[po + 4] as f32 / 255.0,
+        r2: buf[po + 5] as f32 / 255.0,
+        btn_west:    btn0 & 0x10 != 0, // Square
+        btn_south:   btn0 & 0x20 != 0, // Cross
+        btn_east:    btn0 & 0x40 != 0, // Circle
+        btn_north:   btn0 & 0x80 != 0, // Triangle
+        btn_l1:      btn1 & 0x01 != 0,
+        btn_r1:      btn1 & 0x02 != 0,
+        btn_l2:      btn1 & 0x04 != 0,
+        btn_r2:      btn1 & 0x08 != 0,
+        btn_create:  btn1 & 0x10 != 0,
+        btn_options: btn1 & 0x20 != 0,
+        btn_ls:      btn1 & 0x40 != 0,
+        btn_rs:      btn1 & 0x80 != 0,
+        btn_ps:      btn2 & 0x01 != 0,
+        dpad_up:    matches!(dpad, 0 | 1 | 7),
+        dpad_right: matches!(dpad, 1 | 2 | 3),
+        dpad_down:  matches!(dpad, 3 | 4 | 5),
+        dpad_left:  matches!(dpad, 5 | 6 | 7),
+        btn_fn_l:    btn2 & 0x10 != 0,
+        btn_fn_r:    btn2 & 0x20 != 0,
+        btn_back_l:  btn2 & 0x40 != 0,
+        btn_back_r:  btn2 & 0x80 != 0,
+    };
+
+    let mut r = build(buf, go, ao, DS4_GYRO_DPS_PER_LSB, DS4_ACCEL_G_PER_LSB);
+    r.has_touchpad    = true;
+    r.touch1          = parse_dualsense_touch(buf, t1);
+    r.touch2          = parse_dualsense_touch(buf, t2);
+    r.touchpad_click  = btn2 & 0x02 != 0;
+    r.mic_button      = btn2 & 0x04 != 0;
+    // Battery: report byte 53 (USB) / 54 (BT, +1 for the BT prefix). Bounds-
+    // checked separately from the parse guard above (a short report still yields
+    // sticks/buttons without a battery reading).
+    let bat_off = if conn == Connection::Usb { 53 } else { 54 };
+    r.battery = buf.get(bat_off).map(|&b| decode_battery(b));
+    r.dualsense       = Some(ds);
+    Some(r)
+}
+
+/// Decode a Sony battery status byte into a 0.0..1.0 charge fraction. Both DS4
+/// and DualSense pack the capacity in the low nibble (0..10 per hid-playstation)
+/// and a charging status in the high nibble. We map capacity → percent with the
+/// standard `min(level*10 + 5, 100)` and report charging-complete as full. This
+/// is informational only (FlexInput's representation); it never feeds a virtual
+/// pad's report — virtual pads always emit 100%.
+fn decode_battery(b: u8) -> f32 {
+    let level = (b & 0x0F) as f32;
+    let status = (b >> 4) & 0x0F;
+    // status 0x2 = charging complete on DualSense → full. Otherwise treat the
+    // low nibble as a 0..10 capacity.
+    if status == 0x2 {
+        return 1.0;
+    }
+    ((level * 10.0 + 5.0) / 100.0).clamp(0.0, 1.0)
+}
+
+/// Freeze an inactive touch finger at the previous frame's position. A real pad
+/// stops updating the X/Y bytes once a finger lifts (they go stale or read near
+/// max → a visible jump to ≈+1); holding the last position keeps the downstream
+/// pin steady where the finger left it. Before any touch, `prev` is the default
+/// (0,0) so the pin rests at 0. Active fingers are left exactly as parsed.
+pub(crate) fn hold_inactive_touch(cur: &mut TouchPoint, prev: &TouchPoint) {
+    if !cur.active {
+        cur.x = prev.x;
+        cur.y = prev.y;
+    }
+}
+
+/// Parse one DualSense `dualsense_touch_point` (4 bytes). Coordinates are
+/// 12-bit (X 0..1919, Y 0..1079) and we normalise to roughly [-1, 1] with
+/// the centre of the touchpad mapping to 0.
+fn parse_dualsense_touch(buf: &[u8], off: usize) -> TouchPoint {
+    if off + 4 > buf.len() { return TouchPoint::default(); }
+    let contact = buf[off];
+    let active = (contact & 0x80) == 0;
+    let x_lo = buf[off + 1] as u16;
+    let mid  = buf[off + 2] as u16;
+    let y_hi = buf[off + 3] as u16;
+    let raw_x = ((mid & 0x0F) << 8) | x_lo;
+    let raw_y = (y_hi << 4) | ((mid & 0xF0) >> 4);
+    // DualSense touchpad: 1920 × 1080 sensor area.
+    const HALF_W: f32 = 1920.0 / 2.0;
+    const HALF_H: f32 = 1080.0 / 2.0;
+    TouchPoint {
+        active,
+        x:  (raw_x as f32 - HALF_W) / HALF_W,
+        y: -(raw_y as f32 - HALF_H) / HALF_H, // touchpad Y increases downward; invert to +Y=up
+    }
+}
+
+/// Parse a Switch Pro `0x30` input report with no SPI calibration.
+///
+/// ⭐ For transports that never get to read the controller's flash — a
+/// Bluetooth link opened by our own dongle has no HID feature-report path set
+/// up — so the stick calibration falls back to the firmware defaults. That is
+/// good enough to be usable and FlexInput's own stick calibration corrects the
+/// rest; the alternative is no sticks at all.
+/// Decode a `0x30` report with NO stick calibration.
+///
+/// # Tests only
+///
+/// A transport that calls this gets the square response documented on
+/// [`switch_pro_fallback_calib`], which is the bug the Bluetooth Classic path
+/// shipped with for as long as this was the convenient entry point. Production
+/// callers use [`parse_switch_pro_report_calibrated`] and pass what they have,
+/// including `None` — the difference being that they then have somewhere to put
+/// the calibration once they read it.
+#[cfg(all(test, not(studio_headless)))]
+pub(crate) fn parse_switch_pro_report(buf: &[u8]) -> Option<HidReading> {
+    parse_switch_pro(buf, None)
+}
+
+/// [`parse_switch_pro_report`] for a transport that has read the controller's
+/// own stick calibration.
+///
+/// ⛔ The no-calibration entry point above is not a default to reach for. It
+/// exists for callers that genuinely have nothing, and every one of them gets
+/// the square response described on [`switch_pro_fallback_calib`].
+pub(crate) fn parse_switch_pro_report_calibrated(
+    buf: &[u8],
+    calib: Option<&SwitchProCalib>,
+) -> Option<HidReading> {
+    parse_switch_pro(buf, calib)
+}
+
+/// Publish a Switch Pro's buttons and sticks as pins.
+///
+/// ⭐ Shared by every transport that produces a `0x30` report, so the mapping
+/// from Nintendo's button bits to FlexInput's positional pin names exists once.
+/// It is genuinely fiddly — A is EAST and B is SOUTH, the D-pad has no axis
+/// events at all over Bluetooth and has to be rebuilt from its button bits —
+/// and two copies of it would drift.
+pub(crate) fn push_switch_pro_buttons(
+    out: &mut Vec<(String, String, flexinput_core::Signal)>,
+    dev: &str,
+    sb: &SwitchProButtons,
+) {
+    use flexinput_core::Signal;
+    use glam::Vec2;
+    let mut f = |pin: &str, v: f32| out.push((dev.into(), pin.into(), Signal::Float(v)));
+    f("left_stick_x", sb.lstick_x);
+    f("left_stick_y", sb.lstick_y);
+    f("right_stick_x", sb.rstick_x);
+    f("right_stick_y", sb.rstick_y);
+    out.push((dev.into(), "left_stick".into(), Signal::Vec2(Vec2::new(sb.lstick_x, sb.lstick_y))));
+    out.push((dev.into(), "right_stick".into(), Signal::Vec2(Vec2::new(sb.rstick_x, sb.rstick_y))));
+
+    let mut b = |pin: &str, v: bool| out.push((dev.into(), pin.into(), Signal::Bool(v)));
+    // Face buttons by physical POSITION — Nintendo's labels are transposed
+    // against every other pad, and the positional names are the contract.
+    b("btn_south", sb.btn_b);
+    b("btn_east", sb.btn_a);
+    b("btn_west", sb.btn_y);
+    b("btn_north", sb.btn_x);
+    b("btn_lb", sb.btn_l);
+    b("btn_rb", sb.btn_r);
+    b("btn_lt_dig", sb.btn_zl);
+    b("btn_rt_dig", sb.btn_zr);
+    b("btn_ls", sb.btn_lstick);
+    b("btn_rs", sb.btn_rstick);
+    b("btn_start", sb.btn_plus);
+    b("btn_back", sb.btn_minus);
+    b("btn_guide", sb.btn_home);
+    b("btn_capture", sb.btn_capture);
+    b("dpad_up", sb.dpad_up);
+    b("dpad_down", sb.dpad_down);
+    b("dpad_left", sb.dpad_left);
+    b("dpad_right", sb.dpad_right);
+
+    // ❗ Rebuilt from the button bits: the Bluetooth report carries no D-pad
+    // AXIS at all. Diagonals get the unit-circle magnitude so a diagonal is not
+    // 1.41x a cardinal.
+    let bx = if sb.dpad_right { 1.0f32 } else if sb.dpad_left { -1.0 } else { 0.0 };
+    let by = if sb.dpad_up { 1.0f32 } else if sb.dpad_down { -1.0 } else { 0.0 };
+    let (nx, ny) = if bx != 0.0 && by != 0.0 {
+        (bx * std::f32::consts::FRAC_1_SQRT_2, by * std::f32::consts::FRAC_1_SQRT_2)
+    } else {
+        (bx, by)
+    };
+    out.push((dev.into(), "dpad_x".into(), Signal::Float(nx)));
+    out.push((dev.into(), "dpad_y".into(), Signal::Float(ny)));
+    out.push((dev.into(), "dpad".into(), Signal::Vec2(Vec2::new(nx, ny))));
+}
+
+/// The Sony half of a pad's raw-HID pins: touchpad, mute, battery, and — the
+/// DualSense and DualShock 4 state in `g.dualsense` — every stick, trigger
+/// and button, with the Edge's back and Fn buttons when `edge`.
+///
+/// ⭐ Shared by the HID path, where these override gilrs's mis-mapped Windows
+/// axes, and the dongle transport, where they are the only source. Same
+/// reason as [`push_switch_pro_buttons`]: one mapping, not two that drift.
+pub(crate) fn push_sony_reading(
+    out: &mut Vec<(String, String, flexinput_core::Signal)>,
+    dev: &str,
+    g: &HidReading,
+    dualsense: bool,
+    edge: bool,
+) {
+    use flexinput_core::Signal;
+    use glam::Vec2;
+    if g.has_touchpad {
+        out.push((dev.into(), "touch1_x".into(),      Signal::Float(g.touch1.x)));
+        out.push((dev.into(), "touch1_y".into(),      Signal::Float(g.touch1.y)));
+        out.push((dev.into(), "touch1_active".into(), Signal::Bool(g.touch1.active)));
+        out.push((dev.into(), "touch2_x".into(),      Signal::Float(g.touch2.x)));
+        out.push((dev.into(), "touch2_y".into(),      Signal::Float(g.touch2.y)));
+        out.push((dev.into(), "touch2_active".into(), Signal::Bool(g.touch2.active)));
+        // gilrs's Windows backend doesn't fire Button::C for the touchpad
+        // click on DS4/DualSense, and DualSense's mute button isn't mapped
+        // at all — so we override with the values parsed from the raw HID
+        // report. Pushed last so the per-frame HashMap lookup wins.
+        out.push((dev.into(), "btn_touchpad".into(),  Signal::Bool(g.touchpad_click)));
+    }
+    if dualsense {
+        out.push((dev.into(), "btn_mute".into(), Signal::Bool(g.mic_button)));
+    }
+    // Physical battery charge (DS4/DualSense), surfaced on the
+    // `battery` source pin so FlexInput's representation can show
+    // the real pad's level. Virtual pads always report 100% (the
+    // encode side), so this is informational and never loops into
+    // a virtual report.
+    if let Some(bat) = g.battery {
+        out.push((dev.into(), "battery".into(), Signal::Float(bat)));
+    }
+    // DualSense: override all axes and buttons with raw HID values.
+    // gilrs on Windows HID maps the 6 axes by USB Usage ID order rather than
+    // logical gamepad position, placing L2/R2 where RightStickX/Y should be
+    // and RX/RY under LeftZ/RightZ. Parsing the report directly avoids this.
+    if let Some(ds) = g.dualsense {
+        out.push((dev.into(), "left_stick_x".into(),  Signal::Float(ds.lx)));
+        out.push((dev.into(), "left_stick_y".into(),  Signal::Float(ds.ly)));
+        out.push((dev.into(), "right_stick_x".into(), Signal::Float(ds.rx)));
+        out.push((dev.into(), "right_stick_y".into(), Signal::Float(ds.ry)));
+        out.push((dev.into(), "left_stick".into(),    Signal::Vec2(Vec2::new(ds.lx, ds.ly))));
+        out.push((dev.into(), "right_stick".into(),   Signal::Vec2(Vec2::new(ds.rx, ds.ry))));
+        out.push((dev.into(), "left_trigger".into(),  Signal::Float(ds.l2)));
+        out.push((dev.into(), "right_trigger".into(), Signal::Float(ds.r2)));
+        out.push((dev.into(), "btn_south".into(),   Signal::Bool(ds.btn_south)));
+        out.push((dev.into(), "btn_east".into(),    Signal::Bool(ds.btn_east)));
+        out.push((dev.into(), "btn_west".into(),    Signal::Bool(ds.btn_west)));
+        out.push((dev.into(), "btn_north".into(),   Signal::Bool(ds.btn_north)));
+        out.push((dev.into(), "btn_lb".into(),      Signal::Bool(ds.btn_l1)));
+        out.push((dev.into(), "btn_rb".into(),      Signal::Bool(ds.btn_r1)));
+        out.push((dev.into(), "btn_lt_dig".into(),  Signal::Bool(ds.btn_l2)));
+        out.push((dev.into(), "btn_rt_dig".into(),  Signal::Bool(ds.btn_r2)));
+        out.push((dev.into(), "btn_ls".into(),      Signal::Bool(ds.btn_ls)));
+        out.push((dev.into(), "btn_rs".into(),      Signal::Bool(ds.btn_rs)));
+        out.push((dev.into(), "btn_start".into(),   Signal::Bool(ds.btn_options)));
+        out.push((dev.into(), "btn_back".into(),    Signal::Bool(ds.btn_create)));
+        out.push((dev.into(), "btn_guide".into(),   Signal::Bool(ds.btn_ps)));
+        out.push((dev.into(), "dpad_up".into(),     Signal::Bool(ds.dpad_up)));
+        out.push((dev.into(), "dpad_down".into(),   Signal::Bool(ds.dpad_down)));
+        out.push((dev.into(), "dpad_left".into(),   Signal::Bool(ds.dpad_left)));
+        out.push((dev.into(), "dpad_right".into(),  Signal::Bool(ds.dpad_right)));
+        let dx = if ds.dpad_right { 1.0f32 } else if ds.dpad_left { -1.0 } else { 0.0 };
+        let dy = if ds.dpad_up    { 1.0f32 } else if ds.dpad_down { -1.0 } else { 0.0 };
+        let (ndx, ndy) = if dx != 0.0 && dy != 0.0 {
+            (dx * std::f32::consts::FRAC_1_SQRT_2, dy * std::f32::consts::FRAC_1_SQRT_2)
+        } else { (dx, dy) };
+        out.push((dev.into(), "dpad_x".into(),  Signal::Float(ndx)));
+        out.push((dev.into(), "dpad_y".into(),  Signal::Float(ndy)));
+        out.push((dev.into(), "dpad".into(),    Signal::Vec2(Vec2::new(ndx, ndy))));
+        // DualSense Edge: back buttons and Fn buttons, which gilrs
+        // doesn't report at all (see layouts::outputs_for_pad).
+        if edge {
+            out.push((dev.into(), "btn_paddle_l1".into(), Signal::Bool(ds.btn_back_l)));
+            out.push((dev.into(), "btn_paddle_r1".into(), Signal::Bool(ds.btn_back_r)));
+            out.push((dev.into(), "btn_paddle_l2".into(), Signal::Bool(ds.btn_fn_l)));
+            out.push((dev.into(), "btn_paddle_r2".into(), Signal::Bool(ds.btn_fn_r)));
+        }
+    }
+}
+
+/// An output pin's 0–1 value as the byte [`OutputState::stage`] takes:
+/// each pin's own range (trigger zones 0–9, forces 0–7, LEDs by index),
+/// 0–255 for everything else.
+pub(crate) fn output_pin_byte(pin_id: &str, f: f32) -> u8 {
+    match pin_id {
+        // Trigger mode: which of the seven effects, as its index in
+        // `TriggerMode::ALL` (the pin holds it in sixths).
+        "trigger_r_mode" | "trigger_l_mode" => {
+            use flexinput_core::automap::TriggerMode;
+            let m = TriggerMode::from_pin(f);
+            TriggerMode::ALL.iter().position(|x| *x == m).unwrap_or(0) as u8
+        }
+        // Trigger zones: 0–9 along trigger travel → scale to 0–9
+        "trigger_r_start" | "trigger_r_end" |
+        "trigger_l_start" | "trigger_l_end" => (f * 9.0).round() as u8,
+        // Trigger forces: 0–7 → scale to 0–7
+        "trigger_r_strength" | "trigger_l_strength" |
+        "trigger_r_strength2" | "trigger_l_strength2" => (f * 7.0).round() as u8,
+        // Machine's period: a raw byte, like the frequency.
+        "trigger_r_period" | "trigger_l_period" => (f * 255.0).round() as u8,
+        // Player LED: 0=off, 1=P1, 2=P2, 3=P3, 4=P4 → scale to 0–4
+        "player_led" => (f * 4.0).round() as u8,
+        // Mic LED: 0=off, 1=on, 2=pulsing → scale to 0–2
+        "mic_led" => (f * 2.0).round() as u8,
+        // Everything else (rumble 0–255, lightbar 0–255, trigger freq 0–255): linear
+        _ => (f * 255.0) as u8,
+    }
+}
+
+/// A Sony pad's full Bluetooth input report off the dongle's HID interrupt
+/// channel — `0x31` from a DualSense, `0x11` from a DualShock 4 — decoded as
+/// the HID path decodes it. `None` for anything else, the short `0x01`
+/// report the pad sends until it is asked for the full one included.
+pub(crate) fn parse_sony_bt(report: &[u8], dualsense: bool) -> Option<HidReading> {
+    match report.first() {
+        Some(0x31) if dualsense => parse_dualsense(report, &mut None),
+        Some(0x11) if !dualsense => parse_ds4(report),
+        _ => None,
+    }
+}
+
+/// The Bluetooth output report for a Sony pad on the dongle, from the HID
+/// path's encoders. `seq` and `lightbar_set_up` are the link's, kept as
+/// `DeviceKind::DualSense` keeps them.
+pub(crate) fn sony_bt_output(
+    out: &OutputState,
+    dualsense: bool,
+    seq: &mut u8,
+    lightbar_set_up: &mut bool,
+) -> [u8; 78] {
+    if !dualsense {
+        return build_ds4_bt_out(out);
+    }
+    let setup = out.leds_owned & LED_LIGHTBAR != 0 && !*lightbar_set_up;
+    *lightbar_set_up |= setup;
+    let pkt = build_dualsense_bt_out(out, *seq, setup);
+    *seq = seq.wrapping_add(1) & 0x0F;
+    pkt
+}
+
+fn parse_switch_pro(buf: &[u8], calib: Option<&SwitchProCalib>) -> Option<HidReading> {
+    // Report 0x30: standard input report with full button state and 3 IMU samples.
+    // Layout (per dekuNukem/Nintendo_Switch_Reverse_Engineering bluetooth_hid_notes.md):
+    //   byte 3 = right buttons:  bit0=Y, bit1=X, bit2=B, bit3=A, bit6=R, bit7=ZR
+    //   byte 4 = shared:         bit0=Minus, bit1=Plus, bit2=RStick, bit3=LStick,
+    //                            bit4=Home, bit5=Capture
+    //   byte 5 = left buttons:   bit0=Down, bit1=Up, bit2=Right, bit3=Left, bit6=L, bit7=ZL
+    //   bytes 6..9   = left analog stick  (3 bytes packed 12-bit X / 12-bit Y)
+    //   bytes 9..12  = right analog stick (same packing)
+    //   bytes 13/25/37 = three IMU samples [ax, ay, az, gx, gy, gz] i16 LE each.
+    if buf[0] != 0x30 || buf.len() < 49 { return None; }
+
+    let right  = buf[3];
+    let shared = buf[4];
+    let left   = buf[5];
+
+    // Raw 12-bit stick values, unpacked from the same packed-pair layout as SPI.
+    let (lx_raw, ly_raw) = unpack_12bit_pair(buf, 6);
+    let (rx_raw, ry_raw) = unpack_12bit_pair(buf, 9);
+
+    let fallback = switch_pro_fallback_calib();
+    let c = calib.unwrap_or(&fallback);
+    let lx = normalize_axis(lx_raw, c.l_x);
+    let ly = normalize_axis(ly_raw, c.l_y);
+    let rx = normalize_axis(rx_raw, c.r_x);
+    let ry = normalize_axis(ry_raw, c.r_y);
+
+    let switch_buttons = SwitchProButtons {
+        btn_y:       right  & 0x01 != 0,
+        btn_x:       right  & 0x02 != 0,
+        btn_b:       right  & 0x04 != 0,
+        btn_a:       right  & 0x08 != 0,
+        btn_r:       right  & 0x40 != 0,
+        btn_zr:      right  & 0x80 != 0,
+        btn_minus:   shared & 0x01 != 0,
+        btn_plus:    shared & 0x02 != 0,
+        btn_rstick:  shared & 0x04 != 0,
+        btn_lstick:  shared & 0x08 != 0,
+        btn_home:    shared & 0x10 != 0,
+        btn_capture: shared & 0x20 != 0,
+        dpad_down:   left   & 0x01 != 0,
+        dpad_up:     left   & 0x02 != 0,
+        dpad_right:  left   & 0x04 != 0,
+        dpad_left:   left   & 0x08 != 0,
+        btn_l:       left   & 0x40 != 0,
+        btn_zl:      left   & 0x80 != 0,
+        lstick_x: lx, lstick_y: ly, rstick_x: rx, rstick_y: ry,
+    };
+
+    let (mut ax, mut ay, mut az) = (0i32, 0i32, 0i32);
+    let (mut gx, mut gy, mut gz) = (0i32, 0i32, 0i32);
+    for s in 0..3usize {
+        let o = 13 + s * 12;
+        ax += ri16(buf, o)      as i32;
+        ay += ri16(buf, o + 2)  as i32;
+        az += ri16(buf, o + 4)  as i32;
+        gx += ri16(buf, o + 6)  as i32;
+        gy += ri16(buf, o + 8)  as i32;
+        gz += ri16(buf, o + 10) as i32;
+    }
+    let gs = SWITCH_GYRO_DPS_PER_LSB / GYRO_REF_DPS;
+    let as_ = SWITCH_ACCEL_G_PER_LSB / ACCEL_REF_G;
+    // Switch Pro IS the canonical reference (see `HidReading`): its raw report
+    // already lands in (forward, side, vertical), so accel passes straight
+    // through and the Sony parser is the one that permutes to match this.
+    Some(HidReading {
+        gyro_x:  (gx / 3) as f32 * gs,
+        gyro_y: -(gy / 3) as f32 * gs,
+        gyro_z: -(gz / 3) as f32 * gs,
+        accel_x: (ax / 3) as f32 * as_,
+        accel_y: (ay / 3) as f32 * as_,
+        accel_z: (az / 3) as f32 * as_,
+        switch_buttons: Some(switch_buttons),
+        ..HidReading::default()
+    })
+}
+
+fn build(buf: &[u8], gyro_off: usize, accel_off: usize, gyro_dps_per_lsb: f32, accel_g_per_lsb: f32) -> HidReading {
+    let gs  = gyro_dps_per_lsb  / GYRO_REF_DPS;
+    let as_ = accel_g_per_lsb   / ACCEL_REF_G;
+    // Sony (DS4 + DualSense — same IMU mounting, one parser) → the canonical
+    // frame documented on `HidReading`. Raw gyro order is (pitch, yaw, roll) at
+    // offsets [0,+2,+4]; raw accel order is (side, vertical, fwd-tilt).
+    //
+    // Gyro maps to (roll, pitch, yaw) with roll/yaw negated so its polarity
+    // matches the Switch Pro (verified against a DualSense; DS4 shares this
+    // exact path and Sony mounting, so it follows but was not measured here).
+    //
+    // Accel is permuted AND signed to the canonical (forward, side, vertical)
+    // frame — this is the axis swap that was wrong before: the raw side axis
+    // fed accel_x while the gyro frame has roll (forward) on x, so accel and
+    // gyro disagreed on every Sony pad. Now:
+    //   accel_x (forward, + nose-up)      = -raw fwd-tilt
+    //   accel_y (side,    + right-grip)   = -raw side
+    //   accel_z (vertical,+ flat)         =  raw vertical
+    HidReading {
+        gyro_x: -ri16(buf, gyro_off + 4)  as f32 * gs,   // raw[2] roll, negated to match Switch Pro
+        gyro_y:  ri16(buf, gyro_off)      as f32 * gs,   // raw[0] pitch
+        gyro_z: -ri16(buf, gyro_off + 2)  as f32 * gs,   // raw[1] yaw, negated: right=positive
+        accel_x: -ri16(buf, accel_off + 4) as f32 * as_, // -raw[2] fwd-tilt → forward, + nose-up
+        accel_y: -ri16(buf, accel_off)     as f32 * as_, // -raw[0] side     → side, + right-grip-down
+        accel_z:  ri16(buf, accel_off + 2) as f32 * as_, //  raw[1] vertical → vertical, + flat
+        ..HidReading::default()
+    }
+}
+
+fn ri16(buf: &[u8], off: usize) -> i16 {
+    i16::from_le_bytes([buf[off], buf[off + 1]])
+}
+
+// ── Output report builders (USB only — BT requires CRC + extra wrapping) ──────
+
+/// DS4 USB output report 0x05 (32 bytes incl. report ID).
+/// Sets rumble (heavy/light motors) and lightbar RGB.
+fn build_ds4_usb_out(out: &OutputState) -> [u8; 32] {
+    let mut r = [0u8; 32];
+    r[0] = 0x05;                // Report ID
+    // valid: bit0 = rumble, bit1 = lightbar, bit2 = flash. The lightbar only
+    // once FlexInput sets it (see `OutputState::leds_owned`).
+    r[1] = if out.leds_owned & LED_LIGHTBAR != 0 { 0x07 } else { 0x01 };
+    r[2] = 0x04;                // packet type — must be 0x04
+    r[4] = out.rumble_weak;     // small motor (high-freq / right)
+    r[5] = out.rumble_strong;   // large motor (low-freq  / left)
+    r[6] = out.lightbar_r;
+    r[7] = out.lightbar_g;
+    r[8] = out.lightbar_b;
+    // bytes 9, 10: flash on/off durations — leave at 0 (steady)
+    r
+}
+
+/// An Xbox controller's Bluetooth rumble report (`0x03`), as SDL's HIDAPI
+/// driver sends it: all four motors enabled, triggers still, the two grip
+/// motors as magnitudes 0–100, for the longest duration (2.55 s), which the
+/// caller's heartbeat renews.
+pub(crate) fn xbox_bt_rumble(out: &OutputState) -> [u8; 9] {
+    let magnitude = |b: u8| (b as u32 * 100 / 255) as u8;
+    [0x03, 0x0F, 0x00, 0x00, magnitude(out.rumble_strong), magnitude(out.rumble_weak), 0xFF, 0x00, 0xEB]
+}
+
+/// DualShock 4 Bluetooth output report 0x11 (78 bytes incl. report ID), per
+/// hid-playstation's `dualshock4_output_report_bt`: HID data + CRC32 flags,
+/// the USB report's common block from byte 3, and the DualSense's CRC32.
+fn build_ds4_bt_out(out: &OutputState) -> [u8; 78] {
+    let mut r = [0u8; 78];
+    r[0] = 0x11;
+    r[1] = 0xC0; // hw_control: HID data (0x80) + CRC32 (0x40)
+    // r[2] audio_control: 0
+    r[3..13].copy_from_slice(&build_ds4_usb_out(out)[1..11]);
+    let crc = dualsense_bt_crc32(&r[..74]);
+    r[74..78].copy_from_slice(&crc.to_le_bytes());
+    r
+}
+
+/// An unchanged rumble state is re-sent this often.
+const SWITCH_RUMBLE_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// When a Switch Pro gets its rumble, and which, on a transport that writes no
+/// closer than `gap`: the strongest state asked for in between is kept, so a
+/// click shorter than the gap still plays (for the gap) instead of falling
+/// between two writes.
+pub(crate) struct SwitchRumblePacer {
+    gap: std::time::Duration,
+    sent: Option<OutputState>,
+    sent_at: Option<std::time::Instant>,
+    /// The strongest state asked for since the last write.
+    peak: Option<OutputState>,
+    /// The last write was amplitude-modulated, which changes every packet.
+    pub(crate) modulated: bool,
+}
+
+fn switch_rumble_level(o: &OutputState) -> u8 {
+    [o.rumble_strong, o.rumble_weak, o.hd_l_amp, o.hd_r_amp, o.hd2_l_amp, o.hd2_r_amp]
+        .into_iter().max().unwrap_or(0)
+}
+
+impl SwitchRumblePacer {
+    pub(crate) fn new(gap: std::time::Duration) -> Self {
+        Self { gap, sent: None, sent_at: None, peak: None, modulated: false }
+    }
+
+    /// The state to write now, if any, given the state asked for now: the
+    /// strongest since the last write where that was stronger than this and not
+    /// yet sent, else this one — when it changed, while it is modulated, or on
+    /// the heartbeat.
+    pub(crate) fn next(&mut self, now: std::time::Instant, out: &OutputState) -> Option<OutputState> {
+        if self.peak.is_none_or(|p| switch_rumble_level(out) > switch_rumble_level(&p)) {
+            self.peak = Some(*out);
+        }
+        let since = self.sent_at.map(|t| now.duration_since(t));
+        if since.is_some_and(|d| d < self.gap) {
+            return None;
+        }
+        let peak = self.peak.take().unwrap_or(*out);
+        let pick = if Some(peak) != self.sent && switch_rumble_level(&peak) > switch_rumble_level(out) {
+            peak
+        } else {
+            *out
+        };
+        let due = Some(pick) != self.sent || self.modulated
+            || since.is_none_or(|d| d >= SWITCH_RUMBLE_HEARTBEAT);
+        if !due {
+            return None;
+        }
+        self.sent = Some(pick);
+        self.sent_at = Some(now);
+        Some(pick)
+    }
+}
+
+/// The Switch Pro rumble-only report (`0x10`) for this output state, and
+/// whether amplitude modulation is active — in which case the packet changes
+/// every tick and must be re-sent continuously, not only on change.
+///
+/// ⭐ One encoder for every transport. The HID path and the dongle path both
+/// call this, so a rumble that works on one cannot be silent on the other.
+pub(crate) fn switch_rumble_report(out: &OutputState, counter: u8) -> ([u8; 64], bool) {
+    // The Switch Pro voice coil is driven by amplitude+frequency
+    // (HD rumble). It has no classic ERM motors, so a value wired
+    // to the legacy `rumble_strong/weak` pins would otherwise be
+    // silent. When no explicit HD amplitude is set, synthesize it
+    // from the legacy pins (strong→left, weak→right) so legacy
+    // rumble — and the game's classic rumble routed via AutoMap —
+    // is audible. Explicit HD wiring always wins: if either
+    // hd_*_amp is non-zero we use the HD pins verbatim and ignore
+    // legacy, so the two paths never fight.
+    // Both carriers count as "HD set" — carrier 2 (hd2_*) alone is
+    // enough to take the HD path.
+    let hd_set = out.hd_l_amp != 0 || out.hd_r_amp != 0
+        || out.hd2_l_amp != 0 || out.hd2_r_amp != 0;
+    // Per side: carrier 1 (LF) + carrier 2 (HF). In legacy fallback
+    // (no HD wiring) the classic rumble pins drive carrier 1 only at
+    // FlexInput's default pitch for the pad, with carrier 2 silent.
+    let (l_lf_a, l_lf_f, l_hf_a, l_hf_f,
+         r_lf_a, r_lf_f, r_hf_a, r_hf_f) = if hd_set {
+        (
+            out.hd_l_amp  as f32 / 255.0, out.hd_l_freq  as f32 / 255.0,
+            out.hd2_l_amp as f32 / 255.0, out.hd2_l_freq as f32 / 255.0,
+            out.hd_r_amp  as f32 / 255.0, out.hd_r_freq  as f32 / 255.0,
+            out.hd2_r_amp as f32 / 255.0, out.hd2_r_freq as f32 / 255.0,
+        )
+    } else {
+        let default_freq = flexinput_core::automap::switch_hd_freq(flexinput_core::automap::SWITCH_RUMBLE_HZ);
+        let l = out.rumble_strong as f32 / 255.0;
+        let r = out.rumble_weak as f32 / 255.0;
+        (
+            l, if l > 0.0 { default_freq } else { 0.0 }, 0.0, 0.0,
+            r, if r > 0.0 { default_freq } else { 0.0 }, 0.0, 0.0,
+        )
+    };
+    // HF "texture" = amplitude modulation of the LF carrier. Advance
+    // each side's modulator phase from a monotonic process clock (so
+    // the flutter is smooth regardless of when packets actually go
+    // out): phase = elapsed_secs * (2π · mod_rate_hz). hd2_*_amp is the
+    // mod DEPTH, hd2_*_freq the mod RATE.
+    let t = SWITCH_AM_EPOCH.get_or_init(std::time::Instant::now)
+        .elapsed().as_secs_f32();
+    let l_phase = t * am_rate_rad_per_sec(l_hf_f);
+    let r_phase = t * am_rate_rad_per_sec(r_hf_f);
+    let left  = switch_rumble_encode_am(l_lf_a, l_lf_f, l_hf_a, l_hf_f, l_phase);
+    let right = switch_rumble_encode_am(r_lf_a, r_lf_f, r_hf_a, r_hf_f, r_phase);
+    let pkt = build_switch_rumble_only(counter, left, right);
+    (pkt, l_hf_a > 0.0 || r_hf_a > 0.0)
+}
+
+/// Switch Pro rumble-only output report 0x10 (49 bytes — we send 64 to be safe).
+/// `left` / `right` are the encoded 4-byte rumble packets per side.
+fn build_switch_rumble_only(counter: u8, left: [u8; 4], right: [u8; 4]) -> [u8; 64] {
+    let mut r = [0u8; 64];
+    r[0] = 0x10;                  // Report ID
+    r[1] = counter & 0x0F;        // Sequence (low nibble)
+    r[2..6].copy_from_slice(&left);
+    r[6..10].copy_from_slice(&right);
+    r
+}
+
+/// Encode amplitude + frequency into a 4-byte Switch Pro HD rumble packet.
+///
+///   amp  — vibration intensity 0.0–1.0 (0 = silent, 1 = max safe ~1003 units)
+///   freq — normalized 0.0–1.0 mapping to 82–1253 Hz
+///          (0.0=82 Hz, 0.5=320 Hz, 1.0=1253 Hz)
+///
+/// The kernel uses one shared frequency table (joycon_rumble_frequencies[]) for
+/// both the HF field (bytes 0–1, u16 `high`) and the LF field (byte 2, u8 `low`).
+/// A single freq input drives both bands simultaneously where both reach it,
+/// which is how the Switch OS and kernel driver work by default; above the LF
+/// band's top, the HF band alone.
+///
+// joycon_rumble_frequencies[] from drivers/hid/hid-nintendo.c.
+// Each entry: (high: u16, low: u8) for the given Hz. 159 entries, 41 Hz (index 0)
+// → 1253 Hz (index 158). Index 95 = 320 Hz (firmware default). Module-level so both
+// the single-carrier and dual-carrier encoders share the SAME validated table.
+#[rustfmt::skip]
+const SWITCH_FREQ_TABLE: &[(u16, u8)] = &[
+        (0x0000,0x01),(0x0000,0x02),(0x0000,0x03),(0x0000,0x04),(0x0000,0x05),
+        (0x0000,0x06),(0x0000,0x07),(0x0000,0x08),(0x0000,0x09),(0x0000,0x0a),
+        (0x0000,0x0b),(0x0000,0x0c),(0x0000,0x0d),(0x0000,0x0e),(0x0000,0x0f),
+        (0x0000,0x10),(0x0000,0x11),(0x0000,0x12),(0x0000,0x13),(0x0000,0x14),
+        (0x0000,0x15),(0x0000,0x16),(0x0000,0x17),(0x0000,0x18),(0x0000,0x19),
+        (0x0000,0x1a),(0x0000,0x1b),(0x0000,0x1c),(0x0000,0x1d),(0x0000,0x1e),
+        (0x0000,0x1f),(0x0000,0x20),(0x0400,0x21),(0x0800,0x22),(0x0c00,0x23),
+        (0x1000,0x24),(0x1400,0x25),(0x1800,0x26),(0x1c00,0x27),(0x2000,0x28),
+        (0x2400,0x29),(0x2800,0x2a),(0x2c00,0x2b),(0x3000,0x2c),(0x3400,0x2d),
+        (0x3800,0x2e),(0x3c00,0x2f),(0x4000,0x30),(0x4400,0x31),(0x4800,0x32),
+        (0x4c00,0x33),(0x5000,0x34),(0x5400,0x35),(0x5800,0x36),(0x5c00,0x37),
+        (0x6000,0x38),(0x6400,0x39),(0x6800,0x3a),(0x6c00,0x3b),(0x7000,0x3c),
+        (0x7400,0x3d),(0x7800,0x3e),(0x7c00,0x3f),(0x8000,0x40),(0x8400,0x41),
+        (0x8800,0x42),(0x8c00,0x43),(0x9000,0x44),(0x9400,0x45),(0x9800,0x46),
+        (0x9c00,0x47),(0xa000,0x48),(0xa400,0x49),(0xa800,0x4a),(0xac00,0x4b),
+        (0xb000,0x4c),(0xb400,0x4d),(0xb800,0x4e),(0xbc00,0x4f),(0xc000,0x50),
+        (0xc400,0x51),(0xc800,0x52),(0xcc00,0x53),(0xd000,0x54),(0xd400,0x55),
+        (0xd800,0x56),(0xdc00,0x57),(0xe000,0x58),(0xe400,0x59),(0xe800,0x5a),
+        (0xec00,0x5b),(0xf000,0x5c),(0xf400,0x5d),(0xf800,0x5e),(0xfc00,0x5f),
+        // index 95 = 320 Hz
+        (0x0001,0x60),(0x0401,0x61),(0x0801,0x62),(0x0c01,0x63),(0x1001,0x64),
+        (0x1401,0x65),(0x1801,0x66),(0x1c01,0x67),(0x2001,0x68),(0x2401,0x69),
+        (0x2801,0x6a),(0x2c01,0x6b),(0x3001,0x6c),(0x3401,0x6d),(0x3801,0x6e),
+        (0x3c01,0x6f),(0x4001,0x70),(0x4401,0x71),(0x4801,0x72),(0x4c01,0x73),
+        (0x5001,0x74),(0x5401,0x75),(0x5801,0x76),(0x5c01,0x77),(0x6001,0x78),
+        (0x6401,0x79),(0x6801,0x7a),(0x6c01,0x7b),(0x7001,0x7c),(0x7401,0x7d),
+        (0x7801,0x7e),(0x7c01,0x7f),
+        // index 127 = 640 Hz, low = 0x00 for these (above LF range)
+        (0x8001,0x00),(0x8401,0x00),(0x8801,0x00),(0x8c01,0x00),(0x9001,0x00),
+        (0x9401,0x00),(0x9801,0x00),(0x9c01,0x00),(0xa001,0x00),(0xa401,0x00),
+        (0xa801,0x00),(0xac01,0x00),(0xb001,0x00),(0xb401,0x00),(0xb801,0x00),
+        (0xbc01,0x00),(0xc001,0x00),(0xc401,0x00),(0xc801,0x00),(0xcc01,0x00),
+        (0xd001,0x00),(0xd401,0x00),(0xd801,0x00),(0xdc01,0x00),(0xe001,0x00),
+        (0xe401,0x00),(0xe801,0x00),(0xec01,0x00),(0xf001,0x00),(0xf401,0x00),
+        (0xf801,0x00),(0xfc01,0x00), // index 158 = 1253 Hz
+];
+// joycon_rumble_amplitudes[] safe range (0–1003 units) from drivers/hid/hid-nintendo.c.
+// (high: u8, low: u16) — added into frequency bytes per joycon_encode_rumble().
+// 101 entries: index 0 = silent (0 units), index 100 = max safe (1003 units).
+#[rustfmt::skip]
+const SWITCH_AMP_TABLE: &[(u8, u16)] = &[
+        (0x00,0x0040),
+        (0x02,0x8040),(0x04,0x0041),(0x06,0x8041),(0x08,0x0042),(0x0a,0x8042),
+        (0x0c,0x0043),(0x0e,0x8043),(0x10,0x0044),(0x12,0x8044),(0x14,0x0045),
+        (0x16,0x8045),(0x18,0x0046),(0x1a,0x8046),(0x1c,0x0047),(0x1e,0x8047),
+        (0x20,0x0048),(0x22,0x8048),(0x24,0x0049),(0x26,0x8049),(0x28,0x004a),
+        (0x2a,0x804a),(0x2c,0x004b),(0x2e,0x804b),(0x30,0x004c),(0x32,0x804c),
+        (0x34,0x004d),(0x36,0x804d),(0x38,0x004e),(0x3a,0x804e),(0x3c,0x004f),
+        (0x3e,0x804f),(0x40,0x0050),(0x42,0x8050),(0x44,0x0051),(0x46,0x8051),
+        (0x48,0x0052),(0x4a,0x8052),(0x4c,0x0053),(0x4e,0x8053),(0x50,0x0054),
+        (0x52,0x8054),(0x54,0x0055),(0x56,0x8055),(0x58,0x0056),(0x5a,0x8056),
+        (0x5c,0x0057),(0x5e,0x8057),(0x60,0x0058),(0x62,0x8058),(0x64,0x0059),
+        (0x66,0x8059),(0x68,0x005a),(0x6a,0x805a),(0x6c,0x005b),(0x6e,0x805b),
+        (0x70,0x005c),(0x72,0x805c),(0x74,0x005d),(0x76,0x805d),(0x78,0x005e),
+        (0x7a,0x805e),(0x7c,0x005f),(0x7e,0x805f),(0x80,0x0060),(0x82,0x8060),
+        (0x84,0x0061),(0x86,0x8061),(0x88,0x0062),(0x8a,0x8062),(0x8c,0x0063),
+        (0x8e,0x8063),(0x90,0x0064),(0x92,0x8064),(0x94,0x0065),(0x96,0x8065),
+        (0x98,0x0066),(0x9a,0x8066),(0x9c,0x0067),(0x9e,0x8067),(0xa0,0x0068),
+        (0xa2,0x8068),(0xa4,0x0069),(0xa6,0x8069),(0xa8,0x006a),(0xaa,0x806a),
+        (0xac,0x006b),(0xae,0x806b),(0xb0,0x006c),(0xb2,0x806c),(0xb4,0x006d),
+        (0xb6,0x806d),(0xb8,0x006e),(0xba,0x806e),(0xbc,0x006f),(0xbe,0x806f),
+        (0xc0,0x0070),(0xc2,0x8070),(0xc4,0x0071),(0xc6,0x8071),(0xc8,0x0072),
+];
+
+/// Look up the proven Switch FREQ/AMP table fields for one (amp, freq) carrier.
+/// Returns `(fh, fl, ah, al)`: `fh`(u16)/`fl`(u8) the frequency fields, `ah`(u8)/
+/// `al`(u16) the amplitude fields, exactly as the Linux joycon_encode_rumble does
+/// (this is the encoding that's actually FELT on real pads). The dual encoder uses
+/// the HF carrier's (fh, ah) for bytes 0/1 and the LF carrier's (fl, al) for bytes
+/// 2/3 — both via this same validated table.
+fn switch_carrier_fields(amp: f32, freq: f32) -> (u16, u8, u8, u16) {
+    // FREQ_TABLE valid indices 0–158: step i plays 10·2^((i+65)/32) Hz. The pins
+    // span 32–158 (82–1253 Hz). Up to 126 (626 Hz, the LF field's last) the pitch
+    // plays on both bands; above, the LF field is 0, which a pad refuses — it
+    // ignores the packet and holds its last rumble — so there the pitch plays on
+    // the HF band alone, the LF band silent as in the neutral packet. The fh field
+    // is NOT linear (wraps at 94→95), so it's an opaque lookup key — never
+    // interpolate between entries.
+    const FREQ_LO: usize = 32;  // 82 Hz
+    const LF_TOP: usize = 126;  // 626 Hz
+    const FREQ_HI: usize = 158; // 1253 Hz
+    const LF_SILENT_FREQ: u8 = 0x40;
+    let f_idx = ((FREQ_LO as f32 + freq.clamp(0.0, 1.0) * (FREQ_HI - FREQ_LO) as f32)
+        .round() as usize)
+        .clamp(FREQ_LO, FREQ_HI);
+    let (fh, fl) = SWITCH_FREQ_TABLE[f_idx];
+    // Perceptual amplitude: 0–1 → power-law (exp 1.8); skip index 0 for any non-zero
+    // input so amp responds from the very start.
+    let amp_c = amp.clamp(0.0, 1.0);
+    let a_idx = if amp_c == 0.0 {
+        0
+    } else {
+        let linear = amp_c.powf(1.8);
+        (1 + (linear * (SWITCH_AMP_TABLE.len() - 2) as f32).round() as usize)
+            .min(SWITCH_AMP_TABLE.len() - 1)
+    };
+    let (ah, al) = SWITCH_AMP_TABLE[a_idx];
+    if f_idx > LF_TOP {
+        return (fh, LF_SILENT_FREQ, ah, SWITCH_AMP_TABLE[0].1);
+    }
+    (fh, fl, ah, al)
+}
+
+/// Reference single-carrier encoder (Linux joycon_encode_rumble): drives both the
+/// HF and LF amplitude fields from one (amp, freq). Kept for tests / legacy callers.
+#[allow(dead_code)]
+fn switch_rumble_encode(amp: f32, freq: f32) -> [u8; 4] {
+    let (fh, fl, ah, al) = switch_carrier_fields(amp, freq);
+    [
+        ((fh >> 8) & 0xFF) as u8,
+        ((fh & 0xFF) as u8).wrapping_add(ah),
+        fl.wrapping_add(((al >> 8) & 0xFF) as u8),
+        (al & 0xFF) as u8,
+    ]
+}
+
+/// AM mod-rate window (Hz) the HF "carrier" maps onto when used as an amplitude
+/// modulator for the LF rumble. A 40–150 Hz flutter on the LF amplitude reads as
+/// "texture/sizzle" even though the felt carrier stays low.
+const AM_RATE_MIN_HZ: f32 = 40.0;
+const AM_RATE_MAX_HZ: f32 = 150.0;
+
+/// Encode a Switch Pro HD rumble packet for one actuator.
+///
+/// The Switch packet's "HF carrier" doesn't produce a felt high-frequency tone on
+/// these (clone-LRA) pads — verified live across several attempts. So instead of a
+/// second carrier, we synthesize HF *texture* by AMPLITUDE-MODULATING the single
+/// felt LF carrier: the LF rumble's amplitude pulses at a rate set by the HF
+/// content, which the body perceives as roughness/sizzle.
+///   * `lf_amp` / `lf_freq` — the base carrier (its frequency is what's felt).
+///   * `mod_depth` — AM modulation DEPTH (0 = steady rumble, 1 = full pulse to ~0).
+///   * `mod_rate` — AM modulation RATE, mapped onto [AM_RATE_MIN_HZ, AM_RATE_MAX_HZ].
+///   * `mod_phase` — current modulator phase in RADIANS (advanced by the caller
+///     from a monotonic clock so the flutter is smooth regardless of packet timing).
+///
+/// The emitted packet is a SINGLE carrier (LF) whose amplitude = lf_amp * AM
+/// envelope. Bytes 0/1 hold the LF freq high/low + amp high; bytes 2/3 the LF
+/// freq low field + amp low — exactly the proven [`switch_carrier_fields`] layout
+/// (the encoding that's actually felt).
+fn switch_rumble_encode_am(
+    lf_amp: f32, lf_freq: f32, mod_depth: f32, mod_rate: f32, mod_phase: f32,
+) -> [u8; 4] {
+    let lf_a = lf_amp.clamp(0.0, 1.0);
+    let depth = mod_depth.clamp(0.0, 1.0);
+
+    // AM envelope: 1.0 at the wave peak, (1 - depth) at the trough. |sin| gives a
+    // unipolar pulse so the rumble never inverts, only dips. mod_rate selects the
+    // flutter frequency; the actual sin() uses the phase the caller advances.
+    let env = if depth > 0.0 {
+        let s = mod_phase.sin().abs();      // 0..1
+        (1.0 - depth) + depth * s           // (1-depth)..1
+    } else {
+        1.0
+    };
+    let _ = mod_rate; // rate is applied by the caller when advancing mod_phase
+    let amp = (lf_a * env).clamp(0.0, 1.0);
+
+    // Single felt carrier at the pin's frequency over the table's whole range,
+    // as the pin promises (`automap::SWITCH_HD_HZ`), amplitude-modulated. It used
+    // to be squeezed into the bottom octave, 82–164 Hz, so nothing could play a
+    // pitch above that.
+    let (fh, fl, ah, al) = switch_carrier_fields(amp, lf_freq);
+    [
+        ((fh >> 8) & 0xFF) as u8,
+        ((fh & 0xFF) as u8).wrapping_add(ah),
+        fl.wrapping_add(((al >> 8) & 0xFF) as u8),
+        (al & 0xFF) as u8,
+    ]
+}
+
+/// Map the HF "mod rate" 0..1 control to an angular increment (radians per second)
+/// for the AM phase. Used by the Switch sink to advance `mod_phase` from wall time.
+fn am_rate_rad_per_sec(mod_rate01: f32) -> f32 {
+    let hz = AM_RATE_MIN_HZ + mod_rate01.clamp(0.0, 1.0) * (AM_RATE_MAX_HZ - AM_RATE_MIN_HZ);
+    hz * std::f32::consts::TAU
+}
+
+/// One trigger's effect parameters, as the output pins deliver them (already
+/// scaled to device units by the backend).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct TriggerParams {
+    /// Index into `TriggerMode::ALL`.
+    mode: u8,
+    /// Zones 0–9 along the trigger's travel (0 = rest, 9 = fully pressed).
+    start: u8,
+    end: u8,
+    /// 3-bit forces, 0–7.
+    strength: u8,
+    strength2: u8,
+    /// Raw bytes.
+    freq: u8,
+    period: u8,
+}
+
+/// Encode one DualSense adaptive trigger effect into 11 bytes:
+/// byte[0] = effect type, bytes[1..10] = effect params.
+///
+/// Byte layouts follow John "Nielk1" Klein's `TriggerEffectGenerator` (MIT) —
+/// the reference JoyShockMapper, DSX and others encode with — for the seven
+/// "extended" effect types 0x05/0x21/0x22/0x23/0x25/0x26/0x27. The forces here
+/// are already the 3-bit values the pad takes (the generator's `strength - 1`
+/// happens upstream, where "0 = no effect" is meaningful), so nothing is
+/// offset again. Parameters out of the pad's range are clamped rather than the
+/// effect refused: a pin is a continuous value, and a slightly-off one should
+/// still feel like the effect asked for.
+fn encode_trigger_effect(t: TriggerParams) -> [u8; 11] {
+    use flexinput_core::automap::TriggerMode;
+    let mut p = [0u8; 11];
+    // Every active zone from `start` on, with the same 3-bit force in each.
+    let zones_from = |start: u8, force: u8| -> (u16, u32) {
+        let s = start.min(9) as u16;
+        let f = force.min(7) as u32;
+        let active: u16 = ((1u16 << (10 - s)) - 1) << s;
+        let mut forces = 0u32;
+        for z in s..10 {
+            forces |= f << (z * 3);
+        }
+        (active, forces)
+    };
+    // A start and an end zone as a two-bit mask; the end is kept past the start.
+    let span = |start: u8, lo: u8, hi: u8, end: u8, end_max: u8| -> u16 {
+        let s = start.clamp(lo, hi);
+        let e = end.max(s + 1).min(end_max);
+        (1u16 << s) | (1u16 << e)
+    };
+    let mode = TriggerMode::ALL.get(t.mode as usize).copied().unwrap_or(TriggerMode::Off);
+    match mode {
+        TriggerMode::Feedback => {
+            // Constant resistance from `start` on.
+            p[0] = 0x21;
+            let (active, forces) = zones_from(t.start, t.strength);
+            p[1..3].copy_from_slice(&active.to_le_bytes());
+            p[3..7].copy_from_slice(&forces.to_le_bytes());
+        }
+        TriggerMode::Bow => {
+            // Resistance from `start`, a snap at `end`: start 0–8, end past it,
+            // up to 8; strength and snap force packed as two 3-bit fields.
+            p[0] = 0x22;
+            let zones = span(t.start, 0, 7, t.end, 8);
+            let pair = (t.strength.min(7) as u16) | ((t.strength2.min(7) as u16) << 3);
+            p[1..3].copy_from_slice(&zones.to_le_bytes());
+            p[3..5].copy_from_slice(&pair.to_le_bytes());
+        }
+        TriggerMode::Galloping => {
+            // Two feet between `start` and `end` at `freq`. The generator packs
+            // the SECOND foot low and the first above it; the first must come
+            // before the second (first 0–6, second 1–7).
+            p[0] = 0x23;
+            let zones = span(t.start, 0, 8, t.end, 9);
+            let second = t.strength2.clamp(1, 7);
+            let first = t.strength.min(second - 1);
+            p[1..3].copy_from_slice(&zones.to_le_bytes());
+            p[3] = second | (first << 3);
+            p[4] = t.freq;
+        }
+        TriggerMode::Weapon => {
+            // A click between `start` (2–7) and `end` (past it, up to 8).
+            p[0] = 0x25;
+            let zones = span(t.start, 2, 7, t.end, 8);
+            p[1..3].copy_from_slice(&zones.to_le_bytes());
+            p[3] = t.strength.min(7);
+        }
+        TriggerMode::Machine => {
+            // Vibration between `start` and `end`, alternating amplitudes A and
+            // B at `freq`, every `period`.
+            p[0] = 0x27;
+            let zones = span(t.start, 0, 8, t.end, 9);
+            p[1..3].copy_from_slice(&zones.to_le_bytes());
+            p[3] = t.strength.min(7) | (t.strength2.min(7) << 3);
+            p[4] = t.freq;
+            p[5] = t.period;
+        }
+        TriggerMode::Vibration => {
+            // Vibration from `start` on, at `freq`.
+            p[0] = 0x26;
+            let (active, forces) = zones_from(t.start, t.strength);
+            p[1..3].copy_from_slice(&active.to_le_bytes());
+            p[3..7].copy_from_slice(&forces.to_le_bytes());
+            p[9] = t.freq;
+        }
+        TriggerMode::Off => {
+            // Deactivate any effect.
+            p[0] = 0x05;
+        }
+    }
+    p
+}
+
+/// Map player_led index (0–4) to the DualSense 5-bit LED bitmask.
+fn player_led_mask(idx: u8) -> u8 {
+    match idx {
+        1 => 0x04,
+        2 => 0x0A,
+        3 => 0x15,
+        4 => 0x1B,
+        _ => 0x00, // off
+    }
+}
+
+/// DualSense USB output report 0x02 (63 bytes incl. report ID).
+/// Layout reference: Linux drivers/hid/hid-playstation.c, struct
+/// `dualsense_output_report_common` (47 bytes) sits at buffer offset 1.
+///
+/// Valid-flag values mirror pydualsense / DS4Windows: enable everything except
+/// One-shot lightbar init report: sends LIGHTBAR_SETUP=LIGHT_ON so the firmware
+/// DualSense USB output report 0x02.
+fn build_dualsense_usb_out(out: &OutputState, lightbar_setup: bool) -> [u8; 63] {
+    // Layout: Linux hid-playstation.c dualsense_output_report_common (47 bytes, __packed).
+    // Report ID 0x02 at buf[0]; common struct starts at buf[1] (struct offset + 1).
+    //
+    // buf[ 0] = 0x02  report_id
+    // buf[ 1] = valid_flag0  bit0=compatible_vibration, bit1=haptics_select
+    // buf[ 2] = valid_flag1  bit0=mic_mute_led, bit1=power_save, bit2=lightbar,
+    //                        bit3=RELEASE_LEDS (must be 0!), bit4=player_indicator
+    // buf[ 3] = motor_right  (rumble weak)
+    // buf[ 4] = motor_left   (rumble strong)
+    // buf[ 5-8]  audio (leave 0)
+    // buf[ 9] = mute_button_led
+    // buf[10] = power_save_control
+    // buf[11-37] = reserved2[27] — trigger effects placed here (non-kernel extension)
+    // buf[38] = audio_control2
+    // buf[39] = valid_flag2   bit1=lightbar_setup_control_enable, bit2=compat_vibration2
+    // buf[40-41] = reserved3[2]
+    // buf[42] = lightbar_setup  (0x02 = lightbar_on)
+    // buf[43] = led_brightness  (0x02 = bright)
+    // buf[44] = player_leds bitmask
+    // buf[45] = lightbar_red
+    // buf[46] = lightbar_green
+    // buf[47] = lightbar_blue
+    // buf[48-62] = padding
+    // Offsets match DualSense-Windows DS5_Output.cpp (their buffer has no report ID,
+    // so their 0x00 = our r[1], their 0x2C = our r[45], etc.)
+    let mut r = [0u8; 63];
+    r[0] = 0x02;
+    fill_dualsense_common(&mut r[1..48], out, lightbar_setup);
+    r
+}
+
+/// DualSense Bluetooth output report 0x31 (78 bytes incl. report ID).
+/// Wraps the same 47-byte common struct as USB, prefixed with seq_tag + tag
+/// and signed with a CRC32 over the report contents (excluding the 4 CRC bytes).
+/// Without the CRC the firmware silently drops the packet.
+/// A DualSense on Bluetooth has no audio endpoint for its HD carriers, so they
+/// play on the rumble its firmware emulates on the same actuators instead of not
+/// at all: each side's loudest, left on the strong motor and right on the weak,
+/// the way the pins pair. A trigger click then still clicks, without a pitch.
+fn hd_on_motors(out: &OutputState) -> OutputState {
+    let mut o = *out;
+    o.rumble_strong = o.rumble_strong.max(o.hd_l_amp).max(o.hd2_l_amp);
+    o.rumble_weak = o.rumble_weak.max(o.hd_r_amp).max(o.hd2_r_amp);
+    o
+}
+
+fn build_dualsense_bt_out(out: &OutputState, seq: u8, lightbar_setup: bool) -> [u8; 78] {
+    let mut r = [0u8; 78];
+    r[0] = 0x31;                       // report id
+    r[1] = (seq & 0x0F) << 4;          // seq_tag: high nibble = sequence, low nibble = 0
+    r[2] = 0x10;                       // DS_OUTPUT_TAG
+    fill_dualsense_common(&mut r[3..50], &hd_on_motors(out), lightbar_setup);
+    // bytes 50..73 = reserved (zero)
+    let crc = dualsense_bt_crc32(&r[..74]);
+    r[74..78].copy_from_slice(&crc.to_le_bytes());
+    r
+}
+
+/// Populate the 47-byte `dualsense_output_report_common` struct shared by USB
+/// (offset +1) and BT (offset +3). Pure function so both transports stay in sync.
+/// `lightbar_setup` adds the one-shot fade-out of the connect animation.
+fn fill_dualsense_common(dst: &mut [u8], out: &OutputState, lightbar_setup: bool) {
+    debug_assert_eq!(dst.len(), 47);
+    // +0 valid_flag0:
+    //   bit0 COMPATIBLE_VIBRATION  — enables motor_left/motor_right (classic rumble)
+    //   bit1 HAPTICS_SELECT        — routes audio ch3/ch4 to LRA actuators
+    //   bit5 SPEAKER_VOLUME_ENABLE
+    //   bit6 MIC_VOLUME_ENABLE
+    //   bit7 AUDIO_CONTROL_ENABLE
+    dst[0] = 0xFF;
+    // +1 valid_flag1:
+    //   bit0 MIC_MUTE_LED_CONTROL_ENABLE
+    //   bit1 POWER_SAVE_CONTROL_ENABLE
+    //   bit2 LIGHTBAR_CONTROL_ENABLE
+    //   bit3 RELEASE_LEDS  — must be 0
+    //   bit4 PLAYER_INDICATOR_CONTROL_ENABLE
+    //   bit7 AUDIO_CONTROL2_ENABLE
+    // The three LED bits only for the LEDs FlexInput sets (`leds_owned`).
+    dst[1] = 0xE2
+        | if out.leds_owned & LED_MIC != 0 { 0x01 } else { 0 }
+        | if out.leds_owned & LED_LIGHTBAR != 0 { 0x04 } else { 0 }
+        | if out.leds_owned & LED_PLAYER != 0 { 0x10 } else { 0 };
+    // +2 motor_right (weak / high-freq), +3 motor_left (strong / low-freq)
+    dst[2] = out.rumble_weak;
+    dst[3] = out.rumble_strong;
+    // +8 mute_button_led
+    dst[8] = out.mic_led.min(2);
+    // +10..+36 reserved2[27] — trigger effect blobs are placed here.
+    // Adaptive trigger effect encodings live at dst[10..21] (right) and dst[21..32] (left).
+    let rt = encode_trigger_effect(TriggerParams {
+        mode: out.trigger_r_mode,
+        start: out.trigger_r_start,
+        end: out.trigger_r_end,
+        strength: out.trigger_r_strength,
+        strength2: out.trigger_r_strength2,
+        freq: out.trigger_r_freq,
+        period: out.trigger_r_period,
+    });
+    let lt = encode_trigger_effect(TriggerParams {
+        mode: out.trigger_l_mode,
+        start: out.trigger_l_start,
+        end: out.trigger_l_end,
+        strength: out.trigger_l_strength,
+        strength2: out.trigger_l_strength2,
+        freq: out.trigger_l_freq,
+        period: out.trigger_l_period,
+    });
+    dst[10..21].copy_from_slice(&rt);
+    dst[21..32].copy_from_slice(&lt);
+    // +38 valid_flag2:
+    //   bit0 LED_BRIGHTNESS_CONTROL_ENABLE — with the LEDs we set
+    //   bit1 LIGHTBAR_SETUP_CONTROL_ENABLE — the one-shot setup below
+    let leds = out.leds_owned & (LED_LIGHTBAR | LED_PLAYER) != 0;
+    dst[38] = if leds { 0x01 } else { 0 } | if lightbar_setup { 0x02 } else { 0 };
+    // +41 lightbar_setup (LIGHT_OUT), +42 led_brightness (0=firmware default),
+    // +43 player_leds bitmask, +44..+46 RGB
+    dst[41] = if lightbar_setup { 0x02 } else { 0 };
+    dst[42] = 0x00;
+    dst[43] = player_led_mask(out.player_led);
+    dst[44] = out.lightbar_r;
+    dst[45] = out.lightbar_g;
+    dst[46] = out.lightbar_b;
+}
+
+/// CRC32 used by DualSense Bluetooth output reports.
+/// Equivalent to `~crc32_le(crc32_le(0xFFFFFFFF, &0xA2, 1), data, len)`
+/// from `drivers/hid/hid-playstation.c`. Polynomial 0xEDB88320 (reflected IEEE).
+fn dualsense_bt_crc32(data: &[u8]) -> u32 {
+    const SEED: u8 = 0xA2;
+    let mut crc = crc32_le_update(0xFFFFFFFF, &[SEED]);
+    crc = crc32_le_update(crc, data);
+    !crc
+}
+
+fn crc32_le_update(mut crc: u32, data: &[u8]) -> u32 {
+    const POLY: u32 = 0xEDB88320;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (POLY & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    crc
+}
+
+// ── VID/PID classification ─────────────────────────────────────────────────────
+
+enum KindTag { Ds4, DualSense, SwitchPro }
+
+fn classify(vid: u16, pid: u16) -> Option<KindTag> {
+    match vid {
+        SONY_VID   if DS4_PIDS.contains(&pid)      => Some(KindTag::Ds4),
+        SONY_VID   if DUALSENSE_PIDS.contains(&pid) => Some(KindTag::DualSense),
+        SWITCH_VID if pid == SWITCH_PRO_PID      => Some(KindTag::SwitchPro),
+        _ => None,
+    }
+}
+
+// Windows HID interface numbers for the main gamepad interface when usage_page
+// fields aren't available (e.g. HidHide intercepts enumeration).
+// DualSense/DS4 USB: interface 3 carries input reports with IMU data.
+// Switch Pro USB:    interface 0.
+// BT connections expose a single interface (0) for all three controllers.
+fn preferred_interface(kind: &KindTag) -> i32 {
+    match kind {
+        KindTag::Ds4 | KindTag::DualSense => 3,
+        KindTag::SwitchPro => 0,
+    }
+}
+
+#[cfg(all(test, not(studio_headless)))]
+mod tests {
+    use super::*;
+
+    /// The IMU card inputs read the bus in these units; a scale change here
+    /// has to be made there too.
+    #[test]
+    fn the_imu_card_inputs_read_the_bus_scale() {
+        assert_eq!(GYRO_REF_DPS, flexinput_core::imu::BUS_GYRO_DPS);
+        assert_eq!(ACCEL_REF_G, flexinput_core::imu::BUS_ACCEL_G);
+    }
+
+    /// Build a Sony HID buffer carrying raw accel `(r0 side, r1 vertical,
+    /// r2 fwd-tilt)` and return the canonical accel `build` produces.
+    fn sony_canonical_accel(r_side: i16, r_vert: i16, r_fwd: i16) -> (f32, f32, f32) {
+        let mut buf = [0u8; 16];
+        // accel_off = 6, three LE i16 at [0]=side, [+2]=vertical, [+4]=fwd-tilt.
+        buf[6..8].copy_from_slice(&r_side.to_le_bytes());
+        buf[8..10].copy_from_slice(&r_vert.to_le_bytes());
+        buf[10..12].copy_from_slice(&r_fwd.to_le_bytes());
+        let r = build(&buf, 0, 6, DS4_GYRO_DPS_PER_LSB, DS4_ACCEL_G_PER_LSB);
+        (r.accel_x, r.accel_y, r.accel_z)
+    }
+
+    /// The Sony accel permutation must land in the canonical frame documented on
+    /// `HidReading`, matching what the Switch Pro emits raw. Raw physical signs
+    /// come from a DualSense measurement: raw side + = left grip down,
+    /// raw vertical + = flat, raw fwd-tilt + = USB down.
+    #[test]
+    fn sony_accel_maps_to_canonical_frame() {
+        // Flat, face up: only vertical → canonical +Z.
+        let (x, y, z) = sony_canonical_accel(0, 8000, 0);
+        assert!(x.abs() < 1e-3 && y.abs() < 1e-3 && z > 0.0, "flat → +Z, got ({x},{y},{z})");
+
+        // Nose (USB) up: raw fwd-tilt negative → canonical +X (forward, nose-up).
+        let (x, y, z) = sony_canonical_accel(0, 0, -8000);
+        assert!(x > 0.0 && y.abs() < 1e-3 && z.abs() < 1e-3, "nose-up → +X, got ({x},{y},{z})");
+
+        // Right grip down: raw side negative (side + is LEFT grip) → canonical
+        // +Y (side, + right-grip-down).
+        let (x, y, z) = sony_canonical_accel(-8000, 0, 0);
+        assert!(y > 0.0 && x.abs() < 1e-3 && z.abs() < 1e-3, "right-grip-down → +Y, got ({x},{y},{z})");
+    }
+
+    #[test]
+    fn am_full_amp_at_phase_peak() {
+        // At the modulation peak (|sin| = 1, phase = π/2), ANY mod depth leaves the LF
+        // amplitude at full — the envelope tops out at 1.0. So a full-depth packet at
+        // the peak must equal the unmodulated (depth 0) packet.
+        let peak = std::f32::consts::FRAC_PI_2;
+        let unmod = switch_rumble_encode_am(1.0, 0.4, 0.0, 0.5, peak);
+        let modd  = switch_rumble_encode_am(1.0, 0.4, 1.0, 0.5, peak);
+        assert_eq!(unmod, modd, "AM peak must equal unmodulated: unmod={unmod:?} mod={modd:?}");
+    }
+
+    #[test]
+    fn am_dips_amplitude_at_phase_trough() {
+        // At the modulation trough (sin = 0, phase = 0) with full depth, the envelope
+        // is (1 - depth) = 0 → the LF amplitude collapses to silence. So byte3 (LF amp
+        // low) must drop well below the unmodulated peak.
+        let trough = 0.0;
+        let peak = std::f32::consts::FRAC_PI_2;
+        let at_peak   = switch_rumble_encode_am(1.0, 0.4, 1.0, 0.5, peak);
+        let at_trough = switch_rumble_encode_am(1.0, 0.4, 1.0, 0.5, trough);
+        assert!(at_trough[3] < at_peak[3],
+            "full-depth trough must dip amplitude vs peak: peak={at_peak:?} trough={at_trough:?}");
+    }
+
+    #[test]
+    fn am_depth_zero_is_steady() {
+        // With mod depth 0 the envelope is always 1.0, so the packet is independent of
+        // phase — a steady rumble, regardless of where in the cycle we sample.
+        let a = switch_rumble_encode_am(0.7, 0.5, 0.0, 0.5, 0.0);
+        let b = switch_rumble_encode_am(0.7, 0.5, 0.0, 0.5, 1.234);
+        let c = switch_rumble_encode_am(0.7, 0.5, 0.0, 0.5, 3.1);
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+    }
+
+    #[test]
+    fn am_rate_maps_into_flutter_window() {
+        // The HF "mod rate" control maps 0..1 onto the AM_RATE_MIN/MAX Hz window.
+        let tau = std::f32::consts::TAU;
+        assert!((am_rate_rad_per_sec(0.0) - AM_RATE_MIN_HZ * tau).abs() < 1.0);
+        assert!((am_rate_rad_per_sec(1.0) - AM_RATE_MAX_HZ * tau).abs() < 1.0);
+        assert!(am_rate_rad_per_sec(1.0) > am_rate_rad_per_sec(0.0));
+    }
+
+    #[test]
+    fn silent_lf_is_silent_regardless_of_modulation() {
+        // No base rumble → modulating nothing is still nothing: the packet must match
+        // the unmodulated silent packet at every phase (the AM envelope multiplies a
+        // zero amplitude, which stays zero).
+        let unmod_silent = switch_rumble_encode_am(0.0, 0.5, 0.0, 0.5, 0.0);
+        for phase in [0.0, std::f32::consts::FRAC_PI_2, 1.234, 3.1] {
+            let p = switch_rumble_encode_am(0.0, 0.5, 1.0, 0.5, phase);
+            assert_eq!(p, unmod_silent, "silent LF must stay silent under AM @{phase}: {p:?}");
+        }
+    }
+
+    // parse_ds4 must populate `dualsense` so the gilrs backend's raw-HID override
+    // fires for DS4 the same way it does for DualSense. Without it, our emulated
+    // DS4 read-back falls through to gilrs's WGI axis mapping, which mis-orders the
+    // PS-family axes (L2/R2 land where the right stick should be) and scrambles the
+    // shoulder/menu/stick-click buttons. Regression guard for that asymmetry.
+    #[test]
+    fn parse_ds4_populates_override_state() {
+        // USB report 0x01, payload base 1. Build a 25-byte report:
+        //   [1]=LX [2]=LY [3]=RX [4]=RY [5]=btn0 [6]=btn1 [7]=btn2 [8]=L2 [9]=R2
+        let mut buf = [0u8; 25];
+        buf[0] = 0x01;
+        buf[1] = 255;   // LX full right → +1
+        buf[2] = 128;   // LY center
+        buf[3] = 128;   // RX center
+        buf[4] = 0;     // RY raw 0 → +1 after inversion (HID up)
+        buf[5] = 0x20 | 0x08; // btn0: Cross (bit5) + dpad nibble 8 (neutral)
+        buf[6] = 0x04 | 0x20; // btn1: L2 digital (bit2) + Options (bit5)
+        buf[7] = 0x01;  // btn2: PS
+        buf[8] = 255;   // L2 analog full
+        buf[9] = 0;     // R2 analog
+
+        let r = parse_ds4(&buf).expect("valid DS4 report");
+        let ds = r.dualsense.expect("DS4 must populate dualsense override state");
+        assert!((ds.lx - 1.0).abs() < 0.02, "LX full right, got {}", ds.lx);
+        assert!((ds.ly - 0.0).abs() < 0.02, "LY center, got {}", ds.ly);
+        assert!((ds.ry - 1.0).abs() < 0.02, "RY raw 0 → +1 (inverted), got {}", ds.ry);
+        assert!(ds.btn_south, "Cross/south set");
+        assert!(ds.btn_l2, "L2 digital set");
+        assert!(ds.btn_options, "Options set");
+        assert!(ds.btn_ps, "PS set");
+        assert!((ds.l2 - 1.0).abs() < 0.01, "L2 analog full");
+        assert!(!ds.btn_north && !ds.btn_east && !ds.btn_west, "no other faces");
+    }
+
+    // DS4 physical touchpad must decode (it was previously deferred, so the
+    // physical DS4's touch1/touch2 source pins emitted nothing). USB report 0x01
+    // carries the two touch fingers at RID-inclusive bytes 35 and 39, packed
+    // identically to the DualSense. A finger with bit 7 clear is active.
+    #[test]
+    fn parse_ds4_decodes_touchpad() {
+        let mut buf = [0u8; 64]; // full-length DS4 USB report
+        buf[0] = 0x01;
+        buf[2] = 128; buf[3] = 128; buf[4] = 128; // sticks centred-ish (avoid panics)
+        buf[5] = 0x08; // dpad neutral
+
+        // Finger 0 @35: active (bit7 clear), centre of pad → raw (960, 540).
+        // pack: [id, x_lo, (y_lo<<4)|x_hi, y_hi] with raw_x=960 (0x3C0), raw_y=540 (0x21C)
+        let (rx, ry) = (960u16, 540u16);
+        buf[35] = 0x00; // active, id 0
+        buf[36] = (rx & 0xFF) as u8;
+        buf[37] = (((ry & 0x0F) << 4) | ((rx >> 8) & 0x0F)) as u8;
+        buf[38] = ((ry >> 4) & 0xFF) as u8;
+        // Finger 1 @39: inactive (bit7 set).
+        buf[39] = 0x80;
+
+        let r = parse_ds4(&buf).expect("valid DS4 report");
+        assert!(r.has_touchpad, "DS4 now reports a touchpad");
+        assert!(r.touch1.active, "finger 0 active");
+        // Centre maps to ≈0 on both axes (within one LSB of the normalisation).
+        assert!(r.touch1.x.abs() < 0.01, "finger 0 x≈0 at centre, got {}", r.touch1.x);
+        assert!(r.touch1.y.abs() < 0.01, "finger 0 y≈0 at centre, got {}", r.touch1.y);
+        assert!(!r.touch2.active, "finger 1 inactive");
+    }
+
+    #[test]
+    fn decode_battery_maps_capacity_and_full() {
+        // Discharging: low nibble = capacity 0..10 → min(level*10+5,100).
+        assert!((decode_battery(0x00) - 0.05).abs() < 0.001, "empty-ish");
+        assert!((decode_battery(0x05) - 0.55).abs() < 0.001, "mid");
+        assert!((decode_battery(0x0A) - 1.0).abs() < 0.001, "level 10 → 100%");
+        // Charging-complete status (high nibble 0x2) → full regardless of level.
+        assert_eq!(decode_battery(0x20), 1.0);
+    }
+
+    // DS4 report carries battery at byte 12 (USB). A full-length report with a
+    // known battery byte decodes to the expected fraction.
+    #[test]
+    fn parse_ds4_decodes_battery() {
+        let mut buf = [0u8; 64];
+        buf[0] = 0x01;
+        buf[5] = 0x08; // dpad neutral
+        buf[12] = 0x05; // battery capacity 5 → 55%
+        let r = parse_ds4(&buf).expect("valid DS4 report");
+        assert!(r.battery.is_some(), "DS4 battery decoded");
+        assert!((r.battery.unwrap() - 0.55).abs() < 0.01, "got {:?}", r.battery);
+    }
+
+    // A short DS4 report (no touch bytes) must NOT claim a touchpad — IMU/buttons
+    // still parse, but touch stays absent rather than reading garbage.
+    #[test]
+    fn parse_ds4_short_report_has_no_touch() {
+        let mut buf = [0u8; 25];
+        buf[0] = 0x01;
+        buf[5] = 0x08; // dpad neutral
+        let r = parse_ds4(&buf).expect("valid short DS4 report");
+        assert!(!r.has_touchpad, "short report → no touchpad claimed");
+    }
+
+    /// The Edge's back/Fn buttons are buttons[2] bits 4-7, over USB (byte 10)
+    /// and Bluetooth (byte 11), and leave PS/touchpad/mute as they were.
+    #[test]
+    fn parse_dualsense_reads_edge_back_and_fn_buttons() {
+        for (rid, len, at) in [(0x01u8, 64usize, 10usize), (0x31, 79, 11)] {
+            for (bits, want) in [
+                (0x10u8, [false, false, true, false]),
+                (0x20, [false, false, false, true]),
+                (0x40, [true, false, false, false]),
+                (0x80, [false, true, false, false]),
+            ] {
+                let mut buf = vec![0u8; len];
+                buf[0] = rid;
+                buf[at] = bits | 0x04; // + mute
+                let mut conn = None;
+                let r = parse_dualsense(&buf, &mut conn).expect("valid DualSense report");
+                let ds = r.dualsense.expect("full state");
+                assert_eq!([ds.btn_back_l, ds.btn_back_r, ds.btn_fn_l, ds.btn_fn_r], want,
+                    "report {rid:#04x}, bits {bits:#04x}");
+                assert!(r.mic_button && !ds.btn_ps && !r.touchpad_click);
+            }
+        }
+    }
+
+    /// Reflected IEEE CRC32 of the empty input is 0 (the canonical identity).
+    /// `dualsense_bt_crc32` mixes the 0xA2 seed byte first, so the result for
+    /// empty data is ~crc32_le(0xFFFFFFFF, [0xA2]) — a fixed value we can pin.
+    #[test]
+    fn dualsense_bt_crc_is_deterministic() {
+        // Two identical reports must produce identical CRCs.
+        let out = OutputState::default();
+        let a = build_dualsense_bt_out(&out, 0, false);
+        let b = build_dualsense_bt_out(&out, 0, false);
+        assert_eq!(a, b);
+        // Different sequence numbers produce different CRCs (seq is covered).
+        let c = build_dualsense_bt_out(&out, 1, false);
+        assert_ne!(a[74..78], c[74..78], "seq counter must affect CRC");
+    }
+
+    /// USB and BT carry the same 47-byte common struct. After stripping
+    /// transport wrappers (USB: 1-byte ID prefix; BT: 3-byte prefix + 4-byte
+    /// CRC + 24-byte reserved suffix), the common payloads must match.
+    #[test]
+    fn dualsense_usb_and_bt_share_common_payload() {
+        let mut out = OutputState::default();
+        out.rumble_strong = 0xAB;
+        out.rumble_weak   = 0xCD;
+        out.lightbar_r    = 0x10;
+        out.lightbar_g    = 0x20;
+        out.lightbar_b    = 0x30;
+        let usb = build_dualsense_usb_out(&out, false);
+        let bt  = build_dualsense_bt_out(&out, 0, false);
+        assert_eq!(&usb[1..48], &bt[3..50], "common struct must be identical");
+    }
+
+    #[test]
+    fn dualsense_bt_report_has_correct_framing() {
+        let out = OutputState::default();
+        let bt  = build_dualsense_bt_out(&out, 0x5, false);
+        assert_eq!(bt[0], 0x31);              // report id
+        assert_eq!(bt[1], 0x50);              // seq high-nibble = 5, low = 0
+        assert_eq!(bt[2], 0x10);              // DS_OUTPUT_TAG
+        assert_eq!(bt.len(), 78);             // DS_OUTPUT_REPORT_BT_SIZE
+    }
+
+    // A click shorter than the gap still plays, then ends, and no two writes
+    // come closer than the gap.
+    #[test]
+    fn a_switch_pro_gets_a_short_click_whole_and_never_too_often() {
+        let t0 = std::time::Instant::now();
+        let at = |ms: u64| t0 + std::time::Duration::from_millis(ms);
+        let (mut idle, mut on) = (OutputState::default(), OutputState::default());
+        idle.stage("hd_l_freq", 128);
+        on.stage("hd_l_amp", 200);
+        let mut p = SwitchRumblePacer::new(std::time::Duration::from_millis(12));
+        assert!(p.next(at(0), &idle) == Some(idle), "first write");
+        assert!(p.next(at(3), &on).is_none(), "too soon");
+        assert!(p.next(at(6), &idle).is_none(), "the click is over, and still too soon");
+        assert!(p.next(at(12), &idle) == Some(on), "but it plays");
+        assert!(p.next(at(18), &idle).is_none());
+        assert!(p.next(at(24), &idle) == Some(idle), "and ends");
+        assert!(p.next(at(500), &idle).is_none(), "unchanged waits for the heartbeat");
+        assert!(p.next(at(1100), &idle) == Some(idle), "and gets it");
+    }
+
+    // The pins' frequency spans the whole table, as they say: the top of the old
+    // 82–164 Hz squeeze is a quarter of the way up now.
+    #[test]
+    fn a_switch_pro_plays_the_pitch_its_pin_asks_for() {
+        use flexinput_core::automap::switch_hd_freq;
+        let fields = |hz: f32| switch_carrier_fields(1.0, switch_hd_freq(hz));
+        assert_eq!(fields(163.5).0, SWITCH_FREQ_TABLE[64].0);
+        assert_eq!(fields(320.0).0, SWITCH_FREQ_TABLE[95].0);
+        assert_eq!(switch_carrier_fields(1.0, 1.0).0, SWITCH_FREQ_TABLE[158].0, "the table's top");
+    }
+
+    // Both bands play a pitch both reach. Above the LF band's top its field would
+    // be 0, which a pad refuses and holds its last rumble, so the HF band plays
+    // alone there, the LF band silent as in the neutral packet.
+    #[test]
+    fn a_switch_pro_pitch_above_the_low_band_plays_on_the_high_band_alone() {
+        use flexinput_core::automap::switch_hd_freq;
+        let pack = |hz: f32| switch_rumble_encode(1.0, switch_hd_freq(hz));
+        assert_eq!(pack(626.0)[2] & 0x7F, 0x7F, "the LF band's last pitch");
+        assert_eq!(pack(626.0)[3], SWITCH_AMP_TABLE[100].1 as u8, "at full strength");
+        for hz in [640.0, 900.0, 1253.0] {
+            let p = pack(hz);
+            assert_eq!((p[2], p[3]), (0x40, 0x40), "{hz}: LF silent");
+            assert_ne!(p[1] & 0xFE, 0, "{hz}: HF playing");
+        }
+    }
+
+    // Over Bluetooth the HD carriers land on the motors, the louder winning.
+    #[test]
+    fn a_bluetooth_dualsense_plays_hd_carriers_on_its_motors() {
+        let mut out = OutputState::default();
+        out.stage("hd_l_amp", 200);
+        out.stage("hd2_r_amp", 90);
+        out.stage("rumble_weak", 120);
+        let bt = build_dualsense_bt_out(&out, 0, false);
+        assert_eq!((bt[3 + 3], bt[3 + 2]), (200, 120), "strong, weak");
+        let usb = build_dualsense_usb_out(&out, false);
+        assert_eq!((usb[1 + 3], usb[1 + 2]), (0, 120), "USB plays them as audio");
+    }
+
+    #[test]
+    fn dualsense_usb_report_has_correct_framing() {
+        let out = OutputState::default();
+        let usb = build_dualsense_usb_out(&out, false);
+        assert_eq!(usb[0], 0x02);             // report id
+        assert_eq!(usb.len(), 63);            // DS_OUTPUT_REPORT_USB_SIZE
+    }
+
+    /// The DS4's Bluetooth report carries the USB report's common block
+    /// behind its two control bytes, signed like the DualSense's.
+    #[test]
+    fn ds4_bt_report_wraps_the_usb_block() {
+        let mut out = OutputState::default();
+        out.rumble_strong = 0xAB;
+        out.rumble_weak   = 0xCD;
+        let usb = build_ds4_usb_out(&out);
+        let bt  = build_ds4_bt_out(&out);
+        assert_eq!(bt[0], 0x11);
+        assert_eq!(bt[1], 0xC0, "HID data + CRC32 flags");
+        assert_eq!(&bt[3..13], &usb[1..11]);
+        assert_eq!((bt[6], bt[7]), (0xCD, 0xAB), "right (weak), then left (strong)");
+        assert_eq!(bt[74..78], dualsense_bt_crc32(&bt[..74]).to_le_bytes());
+    }
+
+    /// ⛔ A DualSense's Bluetooth report is 78 bytes with its id and CRC, as
+    /// hidraw and the dongle hand it over — not padded the way Windows pads a
+    /// read. Refusing it left Bluetooth DualSenses on Linux without motion.
+    #[test]
+    fn a_78_byte_dualsense_bt_report_parses() {
+        let mut r = vec![0u8; 78];
+        r[0] = 0x31;
+        r[2] = 0xFF; // left stick X full right (payload base 2)
+        let g = parse_sony_bt(&r, true).expect("a 78-byte 0x31 report must parse");
+        assert!(g.dualsense.unwrap().lx > 0.99);
+        assert!(parse_sony_bt(&r[..77], true).is_none(), "a truncated report must not");
+        // The short report a pad sends before it is asked for the full one.
+        assert!(parse_sony_bt(&[0x01, 0x80, 0x80, 0x80, 0x80, 0x08, 0, 0, 0, 0], true).is_none());
+        // And a DS4's full report is not a DualSense's.
+        let mut ds4 = vec![0u8; 78];
+        ds4[0] = 0x11;
+        assert!(parse_sony_bt(&ds4, true).is_none());
+        assert!(parse_sony_bt(&ds4, false).is_some());
+    }
+
+    /// Rumble alone claims no LED: a pad's lightbar, player and mic LEDs stay
+    /// whatever its driver or another program set until FlexInput sets one.
+    /// The lightbar setup (fade out) goes only when asked, once per open.
+    #[test]
+    fn only_the_leds_flexinput_sets_are_written() {
+        let mut out = OutputState::default();
+        out.stage("rumble_strong", 0x80);
+        let usb = build_dualsense_usb_out(&out, false);
+        assert_eq!(usb[2] & 0x15, 0, "no mic / lightbar / player-LED control");
+        assert_eq!((usb[39], usb[42]), (0, 0), "no brightness, no lightbar setup");
+        assert_eq!(build_ds4_usb_out(&out)[1], 0x01, "DS4: rumble only");
+
+        out.stage("lightbar_b", 0xFF);
+        let usb = build_dualsense_usb_out(&out, true);
+        assert_eq!(usb[2] & 0x15, 0x04, "the lightbar, and only it");
+        assert_eq!((usb[39], usb[42]), (0x03, 0x02), "brightness + the one-shot fade out");
+        assert_eq!(build_dualsense_usb_out(&out, false)[42], 0, "fade out only when asked");
+        assert_eq!(build_ds4_usb_out(&out)[1], 0x07, "DS4: rumble + lightbar");
+
+        out.stage("player_led", 1);
+        out.stage("mic_led", 1);
+        assert_eq!(build_dualsense_usb_out(&out, false)[2] & 0x15, 0x15);
+    }
+
+    #[test]
+    fn dualsense_common_motor_bytes_match_layout() {
+        // motor_right at struct offset +2, motor_left at +3 (XInput-style).
+        let mut out = OutputState::default();
+        out.rumble_weak   = 0xAA; // → motor_right
+        out.rumble_strong = 0xBB; // → motor_left
+        let usb = build_dualsense_usb_out(&out, false);
+        assert_eq!(usb[3], 0xAA, "motor_right (rumble_weak) at USB byte 3");
+        assert_eq!(usb[4], 0xBB, "motor_left  (rumble_strong) at USB byte 4");
+    }
+
+    /// The own-virtual discriminator: a root-enumerated HIDMaestro device's HID
+    /// instance path (`HIDCLASS`, no `VID_` token) is virtual; a real USB or BT
+    /// controller path (which carries `VID_`) is not. This is what replaced the
+    /// failed name/uuid markers — gilrs reports a generic name and nil uuid for
+    /// both a real and an emulated same-VID/PID pad, but their HID paths differ.
+    #[test]
+    fn instance_path_classifies_virtual_vs_real() {
+        // Real DualSense (USB) — from FLEXINPUT_PAD_DIAG on the target machine.
+        assert!(!instance_path_is_virtual(
+            r"\\?\HID#VID_054C&PID_0CE6&MI_03#7&2fc679c4&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+        // Emulated DualSense / DS4 (root-enumerated HIDMaestro child).
+        assert!(instance_path_is_virtual(
+            r"\\?\HID#HIDCLASS#1&2d595ca7&45&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}"
+        ));
+        // Explicit HIDMaestro SWD form is also virtual.
+        assert!(instance_path_is_virtual(r"\\?\HID#SWD\HIDMAESTRO\0001#..."));
+        // A real Bluetooth controller path (carries VID_) must NOT be virtual.
+        assert!(!instance_path_is_virtual(
+            r"\\?\HID#{00001124-0000-1000-8000-00805f9b34fb}_VID&02054C_PID&0CE6#..."
+        ));
+    }
+
+    /// Sanity-check the CRC32 routine against a known-good vector. The reflected
+    /// IEEE CRC32 of "123456789" is the IEEE/PNG checksum 0xCBF43926.
+    /// (We compute it directly via `crc32_le_update` to validate the bit-level
+    /// arithmetic — the DualSense-specific seeding is then trivial to layer on.)
+    #[test]
+    fn crc32_le_matches_ieee_check_vector() {
+        let crc = !crc32_le_update(0xFFFFFFFF, b"123456789");
+        assert_eq!(crc, 0xCBF43926);
+    }
+}
+
+#[cfg(all(test, not(studio_headless)))]
+mod switch_pro_stick_calibration_tests {
+    use super::{switch_pro_calib_from_spi, switch_pro_fallback_calib, AxisCalib};
+
+    /// Pack two 12-bit values the way the SPI blob does.
+    fn pack(a: u16, b: u16) -> [u8; 3] {
+        [(a & 0xFF) as u8, (((a >> 8) & 0x0F) as u8) | (((b & 0x0F) as u8) << 4), (b >> 4) as u8]
+    }
+
+    /// A factory L blob: (max, centre, min) as OFFSETS from centre.
+    fn factory_l() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&pack(1400, 1300)); // max offsets
+        v.extend_from_slice(&pack(2100, 1950)); // centre, absolute
+        v.extend_from_slice(&pack(1500, 1350)); // min offsets
+        v
+    }
+
+    /// A factory R blob: (centre, min, max).
+    fn factory_r() -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&pack(2000, 2050));
+        v.extend_from_slice(&pack(1450, 1250));
+        v.extend_from_slice(&pack(1380, 1420));
+        v
+    }
+
+    #[test]
+    fn offsets_become_absolute_endpoints() {
+        // ⭐ The bug behind the square response: the blob holds distances from
+        // centre, and reading them as absolute positions saturates the axes
+        // long before the corners.
+        let c = switch_pro_calib_from_spi(Some(&factory_l()), Some(&factory_r()), None, None)
+            .expect("factory blobs are enough");
+        assert_eq!(c.l_x, AxisCalib { min: 2100 - 1500, center: 2100, max: 2100 + 1400 });
+        assert_eq!(c.l_y, AxisCalib { min: 1950 - 1350, center: 1950, max: 1950 + 1300 });
+        assert_eq!(c.r_x, AxisCalib { min: 2000 - 1450, center: 2000, max: 2000 + 1380 });
+    }
+
+    #[test]
+    fn user_calibration_wins_when_its_magic_is_present() {
+        // ⭐ The user blob must DIFFER from the factory one, or the assertion
+        // passes whichever was used and proves nothing. The first version of
+        // this test copied the factory bytes and did exactly that, while the
+        // Bluetooth Classic path was building its calibration before the user
+        // blob had even arrived — one stick correct, the other reaching
+        // further one way than the other.
+        let mut user = Vec::from([0xB2u8, 0xA1]);
+        user.extend_from_slice(&pack(1200, 1100)); // max offsets
+        user.extend_from_slice(&pack(1900, 2000)); // centre, moved
+        user.extend_from_slice(&pack(1250, 1150)); // min offsets
+        let c = switch_pro_calib_from_spi(
+            Some(&factory_l()),
+            Some(&factory_r()),
+            Some(&user),
+            None,
+        )
+        .expect("user blob is valid");
+        assert_eq!(c.l_x, AxisCalib { min: 1900 - 1250, center: 1900, max: 1900 + 1200 });
+        assert_ne!(c.l_x.center, 2100, "the factory centre must not survive");
+        // The right stick had no user blob, so it keeps the factory numbers.
+        assert_eq!(c.r_x.center, 2000);
+    }
+
+    #[test]
+    fn user_calibration_without_the_magic_is_ignored() {
+        // ❗ Unwritten user calibration is 0xFF filler. Trusting it would centre
+        // the stick on garbage, which is worse than the factory numbers.
+        let mut blank = vec![0xFF; 11];
+        blank[0] = 0xFF;
+        blank[1] = 0xFF;
+        let from_factory =
+            switch_pro_calib_from_spi(Some(&factory_l()), Some(&factory_r()), None, None).unwrap();
+        let with_blank = switch_pro_calib_from_spi(
+            Some(&factory_l()),
+            Some(&factory_r()),
+            Some(&blank),
+            Some(&blank),
+        )
+        .unwrap();
+        assert_eq!(from_factory.l_x, with_blank.l_x);
+        assert_eq!(from_factory.r_y, with_blank.r_y);
+    }
+
+    #[test]
+    fn a_missing_blob_yields_no_calibration_rather_than_half_of_one() {
+        assert!(switch_pro_calib_from_spi(None, Some(&factory_r()), None, None).is_none());
+        assert!(switch_pro_calib_from_spi(Some(&factory_l()), None, None, None).is_none());
+        assert!(switch_pro_calib_from_spi(None, None, None, None).is_none());
+    }
+
+    #[test]
+    fn a_truncated_blob_is_refused_not_read_past() {
+        let short = vec![0u8; 5];
+        assert!(switch_pro_calib_from_spi(Some(&short), Some(&factory_r()), None, None).is_none());
+    }
+
+    #[test]
+    fn the_fallback_is_symmetric_and_centred() {
+        // Documents what the Bluetooth Classic path has been running on, so a
+        // change to it is a deliberate act rather than a silent drift.
+        let f = switch_pro_fallback_calib();
+        assert_eq!(f.l_x, AxisCalib { min: 548, center: 2048, max: 3548 });
+        assert_eq!(f.l_x, f.r_y);
+    }
+}
+
+#[cfg(all(test, not(studio_headless)))]
+mod switch_pro_spi_tests {
+    use super::{switch_pro_spi_reply, switch_pro_spi_request, SWITCH_PRO_CALIB_READS};
+
+    #[test]
+    fn a_request_carries_the_address_little_endian_and_the_length() {
+        let r = switch_pro_spi_request(0x6_03D, 9, 3);
+        assert_eq!(r[0], 0x01, "output report id");
+        assert_eq!(r[1], 3, "counter");
+        assert_eq!(r[10], 0x10, "SPI read subcommand");
+        assert_eq!(&r[11..15], &[0x3D, 0x60, 0x00, 0x00]);
+        assert_eq!(r[15], 9, "length");
+    }
+
+    #[test]
+    fn the_counter_is_masked_to_a_nibble() {
+        // The protocol has four bits for it; overflowing into the neighbouring
+        // field would corrupt the rumble bytes.
+        assert_eq!(switch_pro_spi_request(0x6_03D, 9, 0xFF)[1], 0x0F);
+    }
+
+    /// A `0x21` acknowledgement echoing `addr`, with `len` bytes of payload.
+    fn reply(addr: u32, len: u8, fill: u8) -> Vec<u8> {
+        let mut v = vec![0u8; 20 + len as usize];
+        v[0] = 0x21;
+        v[14] = 0x10;
+        v[15] = (addr & 0xFF) as u8;
+        v[16] = ((addr >> 8) & 0xFF) as u8;
+        v[17] = ((addr >> 16) & 0xFF) as u8;
+        v[18] = ((addr >> 24) & 0xFF) as u8;
+        for b in v[20..].iter_mut() {
+            *b = fill;
+        }
+        v
+    }
+
+    #[test]
+    fn a_matching_reply_yields_exactly_its_payload() {
+        let r = reply(0x6_046, 9, 0xAB);
+        assert_eq!(switch_pro_spi_reply(&r, 0x6_046, 9).expect("matches"), &[0xAB; 9]);
+    }
+
+    #[test]
+    fn a_reply_for_a_different_address_is_refused() {
+        // ⭐ The property the Classic path depends on. Replies arrive
+        // interleaved with a 200 Hz input stream, so "the next 0x21" is
+        // routinely the answer to a different request — and accepting it would
+        // write one region's bytes into another region's slot.
+        let r = reply(0x6_03D, 9, 0x11);
+        assert!(switch_pro_spi_reply(&r, 0x6_046, 9).is_none());
+        for (addr, len) in SWITCH_PRO_CALIB_READS {
+            if addr != 0x6_03D {
+                assert!(switch_pro_spi_reply(&r, addr, len).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn an_input_report_is_never_mistaken_for_a_reply() {
+        let mut input = vec![0u8; 49];
+        input[0] = 0x30;
+        assert!(switch_pro_spi_reply(&input, 0x6_03D, 9).is_none());
+    }
+
+    #[test]
+    fn a_truncated_reply_is_refused_rather_than_read_past_its_end() {
+        let mut r = reply(0x6_03D, 9, 0x22);
+        r.truncate(24);
+        assert!(switch_pro_spi_reply(&r, 0x6_03D, 9).is_none());
+    }
+}
+
+#[cfg(all(test, not(studio_headless)))]
+mod trigger_encode_tests {
+    use super::{encode_trigger_effect, TriggerParams};
+
+    /// Mode indices into `TriggerMode::ALL`.
+    const OFF: u8 = 0;
+    const BOW: u8 = 1;
+    const FEEDBACK: u8 = 2;
+    const GALLOPING: u8 = 3;
+    const WEAPON: u8 = 4;
+    const MACHINE: u8 = 5;
+    const VIBRATION: u8 = 6;
+
+    fn enc(mode: u8, f: impl FnOnce(&mut TriggerParams)) -> [u8; 11] {
+        let mut t = TriggerParams { mode, ..TriggerParams::default() };
+        f(&mut t);
+        encode_trigger_effect(t)
+    }
+
+    /// Each effect's bytes, against blocks laid out by hand from Nielk1's
+    /// `TriggerEffectGenerator` — the reference JoyShockMapper encodes with.
+    /// The forces passed here are already the pad's 3-bit values (the
+    /// generator's `strength - 1`).
+    #[test]
+    fn every_effect_matches_the_reference_layout() {
+        // Bow(start 1, end 6, strength 5, snapForce 8).
+        let b = enc(BOW, |t| { t.start = 1; t.end = 6; t.strength = 4; t.strength2 = 7; });
+        assert_eq!(b, [0x22, 0x42, 0x00, 0x3C, 0, 0, 0, 0, 0, 0, 0]);
+        // Galloping(start 2, end 8, firstFoot 3, secondFoot 6, freq 20): the
+        // second foot sits in the low bits.
+        let g = enc(GALLOPING, |t| {
+            t.start = 2; t.end = 8; t.strength = 3; t.strength2 = 6; t.freq = 20;
+        });
+        assert_eq!(g, [0x23, 0x04, 0x01, 0x1E, 20, 0, 0, 0, 0, 0, 0]);
+        // Machine(start 1, end 9, A 2, B 5, freq 30, period 12).
+        let m = enc(MACHINE, |t| {
+            t.start = 1; t.end = 9; t.strength = 2; t.strength2 = 5; t.freq = 30; t.period = 12;
+        });
+        assert_eq!(m, [0x27, 0x02, 0x02, 0x2A, 30, 12, 0, 0, 0, 0, 0]);
+        // Weapon(start 4, end 7, strength 6).
+        let w = enc(WEAPON, |t| { t.start = 4; t.end = 7; t.strength = 5; });
+        assert_eq!(w, [0x25, 0x90, 0x00, 5, 0, 0, 0, 0, 0, 0, 0]);
+        // Feedback(position 8, strength 8): zones 8 and 9, force 7 in each.
+        let f = enc(FEEDBACK, |t| { t.start = 8; t.strength = 7; });
+        assert_eq!(f, [0x21, 0x00, 0x03, 0x00, 0x00, 0x00, 0x3F, 0, 0, 0, 0]);
+        // Vibration(position 9, amplitude 3, frequency 40).
+        let v = enc(VIBRATION, |t| { t.start = 9; t.strength = 2; t.freq = 40; });
+        assert_eq!(v, [0x26, 0x00, 0x02, 0x00, 0x00, 0x00, 0x10, 0, 0, 40, 0]);
+        assert_eq!(enc(OFF, |_| {}), [0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// A pin is a continuous value, so one slightly out of the pad's range is
+    /// clamped into it rather than the effect refused: an end zone that isn't
+    /// past the start is moved past it, and galloping's first foot is kept
+    /// before its second.
+    #[test]
+    fn out_of_range_parameters_are_brought_into_range() {
+        let b = enc(BOW, |t| { t.start = 5; t.end = 2; t.strength = 3; t.strength2 = 3; });
+        assert_eq!(u16::from_le_bytes([b[1], b[2]]), (1 << 5) | (1 << 6), "end moved past start");
+        let g = enc(GALLOPING, |t| { t.start = 0; t.end = 9; t.strength = 7; t.strength2 = 4; t.freq = 1; });
+        assert_eq!(g[3] & 0x7, 4, "second foot");
+        assert_eq!(g[3] >> 3, 3, "first foot kept below the second");
+        let w = enc(WEAPON, |t| { t.start = 0; t.end = 0; t.strength = 1; });
+        assert_eq!(u16::from_le_bytes([w[1], w[2]]), (1 << 2) | (1 << 3), "weapon starts at 2 at the earliest");
+    }
+}
+
+#[cfg(all(test, not(studio_headless)))]
+mod light_report_tests {
+    use super::*;
+
+    #[test]
+    fn only_lights_counts_every_light_and_nothing_else() {
+        let base = OutputState::default();
+        for pin in ["lightbar_r", "lightbar_g", "lightbar_b"] {
+            let mut lit = base;
+            assert!(lit.stage(pin, 200));
+            assert!(base.differs_only_in_lights(&lit), "{pin}");
+        }
+        for pin in ["rumble_strong", "rumble_weak", "hd_l_amp", "trigger_r_mode"] {
+            let mut other = base;
+            assert!(other.stage(pin, 3));
+            assert!(!base.differs_only_in_lights(&other), "{pin}");
+        }
+        // Rumble with a colour change is rumble: it goes out at once.
+        let mut both = base;
+        both.stage("lightbar_r", 200);
+        both.stage("rumble_weak", 3);
+        assert!(!base.differs_only_in_lights(&both));
+        assert!(base.differs_only_in_lights(&base));
+    }
+}
+
+#[cfg(all(test, not(studio_headless)))]
+mod between_polls_tests {
+    use super::*;
+
+    #[test]
+    fn one_sample_is_left_alone_and_several_are_averaged() {
+        let mut a = ImuAverage::default();
+        assert_eq!(a.mean(), None);
+        a.add([1.0, 0.0, 0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(a.mean(), None, "one sample has nothing to average");
+        a.add([3.0, 2.0, 0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(a.mean(), Some([2.0, 1.0, 0.0, 0.0, 0.0, 1.0]));
+    }
+
+    /// The point of it: rotation over a poll is the rate times the poll's length.
+    #[test]
+    fn the_mean_keeps_the_rotation_that_the_newest_sample_loses() {
+        let samples = [10.0f32, 30.0, 50.0, 10.0];
+        let turned: f32 = samples.iter().sum::<f32>() * 0.002; // 2 ms a report
+        let mut a = ImuAverage::default();
+        for s in samples {
+            a.add([s, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+        let poll = samples.len() as f32 * 0.002;
+        assert!((a.mean().unwrap()[0] * poll - turned).abs() < 1e-5);
+        assert!((samples[3] * poll - turned).abs() > 0.1, "the newest alone is well off");
+    }
+
+    #[test]
+    fn a_tap_between_polls_is_held_for_the_poll_and_no_longer() {
+        let pressed = HidReading {
+            touchpad_click: true,
+            mic_button: true,
+            dualsense: Some(DualSenseState { btn_south: true, btn_fn_r: true, dpad_up: true, lx: 0.9, ..Default::default() }),
+            switch_buttons: Some(SwitchProButtons { btn_a: true, dpad_left: true, lstick_x: 0.9, ..Default::default() }),
+            ..Default::default()
+        };
+        let released = HidReading {
+            dualsense: Some(DualSenseState { lx: 0.1, ..Default::default() }),
+            switch_buttons: Some(SwitchProButtons { lstick_x: 0.1, ..Default::default() }),
+            ..Default::default()
+        };
+        let mut now = released;
+        now.hold_presses_from(&pressed);
+        assert!(now.touchpad_click && now.mic_button);
+        let ds = now.dualsense.unwrap();
+        assert!(ds.btn_south && ds.btn_fn_r && ds.dpad_up);
+        assert_eq!(ds.lx, 0.1, "a stick stays the newest");
+        let sw = now.switch_buttons.unwrap();
+        assert!(sw.btn_a && sw.dpad_left);
+        assert_eq!(sw.lstick_x, 0.1);
+        // Nothing carries between polls: holding starts anew from what's there.
+        let mut next = released;
+        next.hold_presses_from(&released);
+        assert!(!next.touchpad_click && !next.dualsense.unwrap().btn_south);
+    }
+}

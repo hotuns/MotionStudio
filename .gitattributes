@@ -1,0 +1,8 @@
+* text=auto eol=lf
+*.exe binary
+*.dll binary
+*.ico binary
+*.png binary
+*.glb binary
+*.icns binary
+vendor/flexinput/** -text

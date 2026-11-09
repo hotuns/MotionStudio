@@ -1,0 +1,26 @@
+pub mod area;
+pub mod frames;
+pub mod haptic_pcm;
+pub mod imu;
+pub mod automap;
+pub mod busmap;
+pub mod flick;
+pub mod macros;
+pub mod media;
+pub mod menu;
+pub mod midi;
+pub mod module;
+pub mod own_virtual;
+pub mod patch;
+pub mod paths;
+pub mod raw_pad;
+// Studio: SDL mapping DB is owned by the runtime DLL.
+pub mod pinkey;
+pub mod signal;
+pub mod touchzones;
+
+pub use busmap::{BusMap, BusView, PinSigs};
+pub use module::{Module, ModuleDescriptor, ModuleFactory, ModuleRegistration, PinDescriptor};
+pub use patch::{NodeInstance, Patch, SubPatch, SubPatchPin, Wire, PATCH_VERSION};
+pub use pinkey::{recycle_keys, FastHasher, PinMapExt, SigMap};
+pub use signal::{Signal, SignalType};

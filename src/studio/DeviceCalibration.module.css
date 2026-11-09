@@ -1,0 +1,61 @@
+.columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 25rem), 1fr));
+  align-items: start;
+  gap: 16px;
+}
+
+.column {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.faceGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  max-width: 34rem;
+  margin-top: 12px;
+}
+
+.columns .faceGrid button {
+  margin-top: 0;
+}
+
+.noiseGrid,
+.sensorGrid {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.noiseGrid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 13rem), 1fr));
+}
+
+.sensorGrid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 11rem), 1fr));
+}
+
+.sensorGrid .axis {
+  padding: 0 12px 12px;
+  border: 1px solid var(--border-1);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+
+.columns :global(.studio-range-heading) {
+  flex-wrap: wrap;
+}
+
+.columns :global(.studio-range),
+.columns :global(.studio-toggle) {
+  margin: 0;
+}
+
+.axis :global(.studio-range) {
+  margin-top: 10px;
+}
+.body { margin-top: 14px; }
+

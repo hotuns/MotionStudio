@@ -1,0 +1,8068 @@
+//! Parser tests — the grammar and the per-line statuses the editor shows.
+
+use super::bind::*;
+use super::names::*;
+use super::parse::*;
+use flexinput_core::{PinSigs, BusMap};
+
+fn one(line: &str) -> LineInfo {
+    let c = compile(line);
+    c.lines.into_iter().next().expect("a line")
+}
+
+fn steps(line: &str) -> Vec<Step> {
+    let c = compile(line);
+    assert_eq!(
+        c.lines[0].status,
+        LineStatus::Ok,
+        "{line} should be live: {:?}",
+        c.lines[0]
+    );
+    c.bindings.into_iter().next().expect("a binding").steps
+}
+
+fn pin(name: &str) -> Out {
+    Out::Pin(name.to_string())
+}
+
+// ── the value side ───────────────────────────────────────────────────────────
+
+// The only key of a binding follows the press; a second key is the hold and the
+// first becomes the tap (JSM's defaults).
+#[test]
+fn single_key_follows_the_press_and_a_pair_is_tap_then_hold() {
+    let s = steps("S = SPACE");
+    assert_eq!(
+        s,
+        vec![Step {
+            out: pin("key_space"),
+            action: ActionMod::None,
+            event: EventMod::Start
+        }]
+    );
+
+    let s = steps("W = R E");
+    assert_eq!(
+        s,
+        vec![
+            Step {
+                out: pin("key_r"),
+                action: ActionMod::None,
+                event: EventMod::Tap
+            },
+            Step {
+                out: pin("key_e"),
+                action: ActionMod::None,
+                event: EventMod::Hold
+            },
+        ]
+    );
+
+    // NONE takes the slot without doing anything: tap reloads, hold does nothing.
+    let s = steps("W = R NONE");
+    assert_eq!(
+        s[1],
+        Step {
+            out: Out::None,
+            action: ActionMod::None,
+            event: EventMod::Hold
+        }
+    );
+}
+
+// Action modifiers before the key, event modifiers after it.
+#[test]
+fn modifiers_parse_on_both_sides_of_the_key() {
+    // JSM's own example: toggle ADS on tap, release the toggle on hold.
+    let s = steps("ZL = ^RMOUSE\\ RMOUSE_");
+    assert_eq!(
+        s,
+        vec![
+            Step {
+                out: pin("mouse_right"),
+                action: ActionMod::Toggle,
+                event: EventMod::Start
+            },
+            Step {
+                out: pin("mouse_right"),
+                action: ActionMod::None,
+                event: EventMod::Hold
+            },
+        ]
+    );
+
+    // Instant press and release, turning an in-game toggle into a plain press.
+    let s = steps("E = !C\\ !C/");
+    assert_eq!(
+        s,
+        vec![
+            Step {
+                out: pin("key_c"),
+                action: ActionMod::Instant,
+                event: EventMod::Start
+            },
+            Step {
+                out: pin("key_c"),
+                action: ActionMod::Instant,
+                event: EventMod::Release
+            },
+        ]
+    );
+
+    // Turbo, and a release modifier that only sends the key up.
+    assert_eq!(steps("S = SPACE+")[0].event, EventMod::Turbo);
+    assert_eq!(steps("S = -LSHIFT/")[0].action, ActionMod::Release);
+}
+
+#[test]
+fn a_third_key_must_say_which_event_it_wants() {
+    let s = steps("R3 = !1\\ LMOUSE+ !Q/");
+    assert_eq!(s.len(), 3);
+    assert_eq!(s[1].event, EventMod::Turbo);
+
+    let info = one("R3 = A B C");
+    assert!(
+        matches!(info.status, LineStatus::Error(ref e) if e.contains("third key")),
+        "{info:?}"
+    );
+}
+
+#[test]
+fn a_key_on_release_needs_an_action_modifier() {
+    let info = one("S = SPACE/");
+    assert!(
+        matches!(info.status, LineStatus::Error(ref e) if e.contains("action modifier")),
+        "{info:?}"
+    );
+}
+
+// The editor compiles the text on every keystroke, so a value that ends in a
+// bare `^` or `!` (the instant you type one, before its key) must read as an
+// error on the line — not crash the whole app.
+#[test]
+fn a_bare_action_modifier_is_an_error_not_a_crash() {
+    for line in ["S = ^", "L = !", "E = ^ ", "R = !"] {
+        let c = compile(line);
+        assert!(
+            matches!(c.lines[0].status, LineStatus::Error(_)),
+            "{line} should be an error: {:?}",
+            c.lines[0],
+        );
+    }
+
+    // With a key after the modifier everything is fine again.
+    let info = one("S = ^SPACE");
+    assert_eq!(info.status, LineStatus::Ok, "{info:?}");
+    let info = one("L = !C");
+    assert_eq!(info.status, LineStatus::Ok, "{info:?}");
+}
+
+// A console command in quotes fires once, and can only be instant.
+#[test]
+fn a_quoted_command_is_instant() {
+    // A name that isn't a config file stays a console command.
+    let (s, _) = parse_mapping("\"RECONNECT_CONTROLLERS\"", &[], &[]).expect("parses");
+    assert_eq!(s[0].action, ActionMod::Instant);
+    assert_eq!(s[0].out, Out::Command("RECONNECT_CONTROLLERS".into()));
+
+    // A config file name is a layer switch, and resolves to the tab of that name.
+    let tabs = vec![("driving".to_string(), String::new())];
+    let (s, _) = parse_mapping("\"GyroConfigs/driving.txt\"", &tabs, &[]).expect("parses");
+    assert_eq!(s[0].out, Out::Layer("driving".into()));
+
+    let info = one("HOME = ^\"RESET_MAPPINGS\"");
+    assert!(
+        matches!(info.status, LineStatus::Error(ref e) if e.contains("instant")),
+        "{info:?}"
+    );
+}
+
+// Calibration on a tap or release only makes sense as a toggle, so JSM makes it
+// one. The line runs, but says that recalibrating is not ours to do.
+#[test]
+fn calibrate_on_a_tap_becomes_a_toggle() {
+    let c = compile("HOME = CALIBRATE'");
+    assert_eq!(c.lines[0].status, LineStatus::Ok, "{:?}", c.lines[0]);
+    assert_eq!(c.bindings[0].steps[0].action, ActionMod::Toggle);
+    assert!(
+        c.lines[0].notes.iter().any(|n| n.contains("device card")),
+        "the line should say who owns calibration: {:?}",
+        c.lines[0].notes
+    );
+}
+
+// The editor compiles the text on every keystroke, so a half-typed line has to
+// come back as an error, never as a panic: `S = !` took the whole app down.
+#[test]
+fn every_half_typed_line_compiles_instead_of_crashing() {
+    const LINES: &[&str] = &[
+        "S = !C\\", "ZL = ^RMOUSE\\ RMOUSE_", "L,W = 3", "UP*RIGHT = 2", "N,N = X",
+        "HOME = \"GyroConfigs/driving.txt\"", "GYRO_SENS = 1 2", "S = -LSHIFT/",
+        "LEFT_STICK_MODE = SCROLL_WHEEL", "ZR = LMOUSE LMOUSE", "S = SPACE+",
+        "GYRO_OFF = R3", "TRIGGER_THRESHOLD = -1", "T5 = A", "MIN_GYRO_SENS = 2 3",
+        "RIGHT_STICK_MODE = FLICK", "L+R = Q", "-,S = SPACE+", "# a comment",
+    ];
+    for line in LINES {
+        for n in 0..=line.chars().count() {
+            let prefix: String = line.chars().take(n).collect();
+            // A panic here fails the test; the status itself can be anything.
+            let _ = compile(&prefix);
+            let _ = compile(&format!("{prefix}\nS = SPACE"));
+        }
+    }
+    // The fragments that did the damage, and their neighbours.
+    for odd in ["!", "^", "-", "+", "\"", "'", ",", "*", "=", "S =", "S = ", "S = !",
+                "S = ^", "S = -", "S = \"", "S = '", "S = _", "S = \\", "S = /",
+                "L,", "L+", "L*", "S = A ", "S = A B ", "1 = 2"] {
+        let _ = compile(odd);
+    }
+
+    // And the one that crashed says what it wants.
+    let info = one("S = !");
+    assert!(matches!(info.status, LineStatus::Error(ref e) if e.contains("needs a key")),
+        "{info:?}");
+}
+
+// The editor takes any text: a comment in Japanese, a tab or `@` name with an
+// accent, an emoji, a full-width `＝` or space an IME left behind. Each of those
+// is several bytes per character, and everything that cuts the text at an offset
+// has to land between characters or one keystroke takes the app down. So every
+// odd character goes in at every position of real lines, and every edit the
+// editor and the pad can make is made on the result, at every token.
+#[test]
+fn non_ascii_anywhere_survives_every_edit() {
+    use super::catalogue::{self, Kind};
+    use super::cursor::{self, Cursor};
+    use super::knobs;
+    const LINES: &[&str] = &[
+        "S = SPACE # コメント", "ZL,GYRO_SENS = 3", "GYRO_SENS = 1 2", "W = @Reload R",
+        "N = @\"Weapon wheel — Show\"", "HOME = \"運転.txt\"", "ZL = ^RMOUSE\\ RMOUSE_",
+        "RIGHT_STICK_MODE = FLICK", "TRIGGER_THRESHOLD = 0.5", "LIGHT_BAR = 255 0 0",
+        "L+R = Q", "# naïve — em dash",
+    ];
+    // Two, three and four bytes; a pair; full-width look-alikes of the grammar's
+    // own `=` and `#`; spaces that aren't ASCII; a combining mark; and two whose
+    // case mapping changes their length.
+    const ODD: &[&str] = &[
+        "é", "日", "😀", "❤\u{FE0F}", "＝", "＃", "\u{3000}", "\u{00A0}", "e\u{0301}", "ß", "İ",
+    ];
+    let tabs = vec![
+        ("運転".to_string(), "S = SPACE # ジャンプ".to_string()),
+        ("Ünïcode".to_string(), String::new()),
+    ];
+    let mut ports = ports();
+    ports.push(("リロード".to_string(), "macro:ff00ff00".to_string()));
+    let mut texts: Vec<String> = Vec::new();
+    for line in LINES {
+        let cuts = line.char_indices().map(|(b, _)| b).chain([line.len()]);
+        for at in cuts {
+            for odd in ODD {
+                texts.push(format!("{}{odd}{}\nGYRO_SENS = 2", &line[..at], &line[at..]));
+            }
+        }
+    }
+    texts.extend(["W = @リロード", "W = @\"リロード\"", "HOME = 運転", "HOME = \"Ünïcode\""].map(String::from));
+
+    for text in &texts {
+        let text = text.as_str();
+        let cfg = compile_full(text, &tabs, &ports);
+        let _ = knobs::sens_curve(&cfg, 8);
+        let _ = at_names(text);
+        for line in text.lines() {
+            for (s, e, _) in at_name_spans(line) {
+                let _ = &line[s..e];
+            }
+        }
+        for line in 0..cursor::line_count(text) {
+            let _ = knobs::set_knob(text, line, 1.5, false);
+            let _ = knobs::set_knob_part(text, line, Some(1), 2.0, true);
+            let _ = knobs::split_pair(text, line);
+            let _ = knobs::join_pair(text, line);
+            let _ = knobs::settle_trigger_effect(text, line, Some("RESISTANCE"));
+            for token in 0..cursor::tokens_at(text, line).len().max(1) {
+                let cur = Cursor { line, token };
+                if let Some((t, s, e)) = cursor::selection(text, cur) {
+                    let (ls, _) = cursor::line_span(text, line);
+                    let _ = (&text[s..e], t.text(&text[ls..]));
+                }
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let _ = cursor::moved(text, cur, dx, dy);
+                }
+                let _ = cursor::clamped(text, cur);
+                let _ = cursor::replace(text, cur, "日本");
+                let _ = cursor::insert_slot(text, cur, true);
+                let _ = cursor::insert_slot(text, cur, false);
+                let _ = cursor::insert_line(text, cur, true);
+                let _ = cursor::delete(text, cur);
+                let _ = catalogue::kinds_at(text, cur);
+                let _ = catalogue::value_options(text, cur);
+                for kind in [Kind::Setting, Kind::Command, Kind::Trigger, Kind::Binding] {
+                    let _ = catalogue::insert_pick(text, cur, "SPACE", kind);
+                }
+                for dir in [1, -1] {
+                    let _ = catalogue::cycle_value(text, cur, dir);
+                    let _ = knobs::scrub(text, cur, dir);
+                }
+                let _ = knobs::replace_word(text, cur, "é");
+            }
+        }
+        for k in knobs::knobs(text) {
+            let _ = knobs::toggle_pair(text, &k);
+            let _ = knobs::set_setting(text, &k.name, 1.0, false);
+            let _ = knobs::line_of(text, &k.name);
+        }
+    }
+
+    // And the names resolve: a tab and a port are found by what they are called,
+    // in any script.
+    for line in ["W = @リロード", "W = @\"リロード\"", "HOME = \"運転.txt\""] {
+        let c = compile_full(line, &tabs, &ports);
+        assert_eq!(c.lines[0].status, LineStatus::Ok, "{line}: {:?}", c.lines[0]);
+    }
+    // An IME's full-width `＝` is not JSM's `=`: the line is an error, rather
+    // than binding something by accident.
+    let info = one("S ＝ SPACE");
+    assert!(matches!(info.status, LineStatus::Error(_)), "{info:?}");
+}
+
+// Every output name JoyShockMapper accepts, taken from its own `nameToKey`
+// (`src/win32/PlatformDefinitions.cpp`) plus its pattern-matched and pad names.
+// A config carrying any of them must get a truthful answer on the line: either it
+// runs, or it says why not. Never an error — an error means "we don't know this
+// name", which for a name JSM knows is a gap we've failed to describe — and never
+// a silent Ok that does nothing.
+const JSM_OUTPUT_NAMES: &[&str] = &[
+    // Named keys.
+    "ADD", "ALT", "BACKSPACE", "BMOUSE", "CAPS_LOCK", "CONTEXT", "CONTROL", "DECIMAL",
+    "DELETE", "DIVIDE", "DOWN", "END", "ENTER", "ESC", "FMOUSE", "HOME", "INSERT",
+    "LALT", "LCONTROL", "LEFT", "LMOUSE", "LSHIFT", "LWINDOWS", "MMOUSE", "MULTIPLY",
+    "MUTE", "NEXT_TRACK", "NUM_LOCK", "PAGEDOWN", "PAGEUP", "PLAY_PAUSE", "PREV_TRACK",
+    "RALT", "RCONTROL", "RIGHT", "RMOUSE", "RSHIFT", "RWINDOWS", "SCREENSHOT",
+    "SCROLLDOWN", "SCROLLUP", "SCROLL_LOCK", "SHIFT", "SPACE", "STOP_TRACK",
+    "SUBSTRACT", "SUBTRACT", "TAB", "UP", "VOLUME_DOWN", "VOLUME_UP",
+    // The pattern-matched ones: characters, function keys, numpad digits, rumble.
+    "A", "Z", "0", "9", "+", "-", ",", ".", ";", "/", "`", "[", "]", "'", "\\",
+    "F1", "F9", "F10", "F20", "N0", "N9", "R8080", "RFFFF",
+    // Actions.
+    "NONE", "DEFAULT", "CALIBRATE", "GYRO_ON", "GYRO_OFF", "GYRO_INVERT", "GYRO_INV_X",
+    "GYRO_INV_Y", "GYRO_TRACKBALL", "GYRO_TRACK_X", "GYRO_TRACK_Y",
+    "SMALL_RUMBLE", "BIG_RUMBLE",
+    // Virtual pad.
+    "X_A", "X_B", "X_X", "X_Y", "X_LB", "X_RB", "X_LS", "X_RS", "X_BACK", "X_START",
+    "X_GUIDE", "X_UP", "X_DOWN", "X_LEFT", "X_RIGHT", "X_LT", "X_RT",
+    "PS_CROSS", "PS_CIRCLE", "PS_SQUARE", "PS_TRIANGLE", "PS_L1", "PS_R1", "PS_L3",
+    "PS_R3", "PS_SHARE", "PS_OPTIONS", "PS_HOME", "PS_PAD_CLICK", "PS_UP", "PS_DOWN",
+    "PS_LEFT", "PS_RIGHT", "PS_L2", "PS_R2",
+];
+
+#[test]
+fn every_name_jsm_accepts_gets_a_truthful_status() {
+    for name in JSM_OUTPUT_NAMES {
+        let info = one(&format!("S = {name}"));
+        match &info.status {
+            LineStatus::Ok => {}
+            LineStatus::Pending(why) | LineStatus::Ignored(why) => assert!(
+                why.len() > 10,
+                "`{name}` isn't live, so the line has to say why: {why:?}"
+            ),
+            other => panic!("`{name}` is a name JSM accepts, so it can't read as {other:?}"),
+        }
+        // Anything not live has to name itself in the notes or the status, so the
+        // editor can point at what won't work.
+        if !matches!(info.status, LineStatus::Ok) {
+            let said = format!("{:?} {:?}", info.status, info.notes);
+            assert!(
+                said.contains(name) || said.len() > 20,
+                "`{name}` needs a reason a user can act on: {said}"
+            );
+        }
+    }
+}
+
+// A config written for another pad asks for buttons this one hasn't got. That is
+// the device's business, not the config's, so the line keeps its status and gains
+// a note naming the pin the pad is missing.
+#[test]
+fn a_button_this_pad_lacks_says_so_on_the_line() {
+    let pins: std::collections::HashSet<String> = ["btn_south", "btn_lb", "left_stick"]
+        .iter().map(|s| s.to_string()).collect();
+    let mut c = compile("S = SPACE\nMIC = M\nL = E\nLUP = W");
+    note_inputs_this_pad_lacks(&mut c, &pins);
+
+    assert!(c.lines[0].notes.is_empty(), "a button the pad has needs no note");
+    assert!(c.lines[1].notes.iter().any(|n| n.contains("btn_mute") && n.contains("MIC")),
+        "the missing one names both the pin and the button: {:?}", c.lines[1].notes);
+    assert!(c.lines[2].notes.is_empty(), "L is on this pad");
+    assert!(c.lines[3].notes.is_empty(), "and so is the left stick");
+    // The status is untouched: the config isn't wrong, this pad just can't do it.
+    assert_eq!(c.lines[1].status, LineStatus::Ok);
+
+    // Nothing known about the pad yet: claim nothing.
+    let mut c = compile("MIC = M");
+    note_inputs_this_pad_lacks(&mut c, &Default::default());
+    assert!(c.lines[0].notes.is_empty(), "with no device, nothing is claimed");
+
+    // Either trigger form will do — a pad with only the digital one still works.
+    let digital_only: std::collections::HashSet<String> =
+        ["btn_rt_dig"].iter().map(|s| s.to_string()).collect();
+    let mut c = compile("ZR = LMOUSE");
+    note_inputs_this_pad_lacks(&mut c, &digital_only);
+    assert!(c.lines[0].notes.is_empty(), "a digital-only trigger is still a trigger");
+}
+
+// And a pad binding says out loud that it needs a pad wired up, because nothing
+// in this module can tell whether one is.
+#[test]
+fn a_pad_binding_says_it_needs_a_pad() {
+    for line in ["S = X_A", "UP = X_UP", "ZL = X_LT"] {
+        let info = one(line);
+        assert_eq!(info.status, LineStatus::Ok, "{line}: {info:?}");
+        assert!(
+            info.notes.iter().any(|n| n.contains("virtual pad")),
+            "{line} should say it needs a pad: {:?}", info.notes
+        );
+    }
+    // A keyboard binding has nothing to warn about.
+    assert!(one("S = SPACE").notes.is_empty());
+}
+
+#[test]
+fn unknown_names_are_errors() {
+    let info = one("S = FLOOMP");
+    assert!(
+        matches!(info.status, LineStatus::Error(ref e) if e.contains("FLOOMP")),
+        "{info:?}"
+    );
+    let info = one("FLOOMP = SPACE");
+    assert!(
+        matches!(info.status, LineStatus::Error(ref e) if e.contains("FLOOMP")),
+        "{info:?}"
+    );
+}
+
+// ── the trigger side ─────────────────────────────────────────────────────────
+
+#[test]
+fn combos_parse_into_their_own_triggers() {
+    let t = |line: &str| {
+        compile(line)
+            .bindings
+            .into_iter()
+            .next()
+            .expect("a binding")
+            .trigger
+    };
+    assert_eq!(
+        t("L,W = 3"),
+        Trigger::Chord {
+            chord: Btn::L,
+            btn: Btn::W
+        }
+    );
+    assert_eq!(t("N,N = X"), Trigger::Double(Btn::N));
+    assert_eq!(t("L+R = Q"), Trigger::Sim(Btn::L, Btn::R));
+    assert_eq!(t("UP*RIGHT = 2"), Trigger::Diag(Btn::Up, Btn::Right));
+    // `-` and `+` are button names, so a chord can be built from them.
+    assert_eq!(
+        t("-,S = SPACE+"),
+        Trigger::Chord {
+            chord: Btn::Minus,
+            btn: Btn::S
+        }
+    );
+    assert_eq!(
+        t("+,S = SPACE"),
+        Trigger::Chord {
+            chord: Btn::Plus,
+            btn: Btn::S
+        }
+    );
+}
+
+#[test]
+fn every_button_a_line_names_counts_as_mentioned() {
+    let c = compile("L+R = Q\nUP*RIGHT = 2\nZLF,GYRO_SENS = 0.5");
+    for b in [Btn::L, Btn::R, Btn::Up, Btn::Right, Btn::Zlf] {
+        assert!(c.mentioned.contains(&b), "{} should be mentioned", b.name());
+    }
+    assert!(!c.mentioned.contains(&Btn::S));
+}
+
+// ── settings, commands, comments ─────────────────────────────────────────────
+
+#[test]
+fn timings_are_live_and_in_seconds() {
+    let c = compile(
+        "HOLD_PRESS_TIME = 200\nTURBO_PERIOD = 40\nSIM_PRESS_WINDOW = 60\nDBL_PRESS_WINDOW = 300",
+    );
+    assert!(
+        c.lines.iter().all(|l| l.status == LineStatus::Ok),
+        "{:?}",
+        c.lines
+    );
+    assert_eq!(c.timings.hold, 0.2);
+    assert_eq!(c.timings.turbo, 0.04);
+    assert_eq!(c.timings.sim, 0.06);
+    assert_eq!(c.timings.double, 0.3);
+
+    let info = one("HOLD_PRESS_TIME = soon");
+    assert!(
+        matches!(info.status, LineStatus::Error(ref e) if e.contains("milliseconds")),
+        "{info:?}"
+    );
+}
+
+// A setting we recognise but don't run yet says which phase will run it, rather
+// than being dropped or called an error.
+#[test]
+fn recognised_but_not_live_settings_name_their_phase() {
+    for line in [
+        "RIGHT_STICK_MODE = HYBRID_AIM",
+        "RIGHT_STICK_MODE = MOUSE_RING",
+        "SCREEN_RESOLUTION_X = 1920",
+        "STICKLIKE_FACTOR = 1",
+    ] {
+        assert!(
+            matches!(one(line).status, LineStatus::Pending(_)),
+            "{line} should be pending"
+        );
+    }
+    // A modeshift waits with whatever setting it changes.
+    assert!(
+        matches!(one("ZL,STICKLIKE_FACTOR = 1").status, LineStatus::Pending(p) if p.contains("HYBRID_AIM"))
+    );
+}
+
+// Settings FlexInput owns are ignored on purpose, with the reason.
+#[test]
+fn settings_flexinput_owns_are_ignored_with_a_reason() {
+    for line in [
+        "AUTOLOAD = OFF",
+        "JSM_DIRECTORY = D:\\JSM",
+        "TICK_TIME = 3",
+        "VIRTUAL_CONTROLLER = DS4",
+        "AUTO_CALIBRATE_GYRO = ON",
+        "WHITELIST_ADD",
+    ] {
+        assert!(
+            matches!(one(line).status, LineStatus::Ignored(_)),
+            "{line} should be ignored"
+        );
+    }
+    assert!(matches!(one("RESTART_GYRO_CALIBRATION").status,
+        LineStatus::Ignored(w) if w.contains("device card")));
+}
+
+#[test]
+fn comments_and_blank_lines_are_blank_and_dont_hide_a_binding() {
+    let c = compile("# a comment\n\n   \nS = SPACE # jump\n");
+    assert_eq!(c.lines[0].status, LineStatus::Blank);
+    assert_eq!(c.lines[1].status, LineStatus::Blank);
+    assert_eq!(c.lines[2].status, LineStatus::Blank);
+    assert_eq!(c.lines[3].status, LineStatus::Ok);
+    assert_eq!(c.bindings.len(), 1);
+}
+
+/// Naming a config with no tab of that name is an error that says which tabs there
+/// are — the most useful thing it can say, since the fix is always "load it into a
+/// tab" or "you meant one of these".
+#[test]
+fn naming_a_config_with_no_tab_says_which_tabs_there_are() {
+    match one("GyroConfigs/xbox.txt").status {
+        LineStatus::Error(why) => {
+            assert!(why.contains("xbox"), "it names what was asked for: {why}");
+            assert!(why.contains("load"), "and what to do about it: {why}");
+        }
+        other => panic!("a missing tab should be an error, got {other:?}"),
+    }
+
+    let tabs = vec![
+        ("driving".to_string(), String::new()),
+        ("onfoot".to_string(), String::new()),
+    ];
+    match compile_with("GyroConfigs/xbox.txt", &tabs).lines[0].status.clone() {
+        LineStatus::Error(why) => {
+            assert!(
+                why.contains("driving") && why.contains("onfoot"),
+                "with tabs present it lists them: {why}"
+            );
+        }
+        other => panic!("a missing tab should be an error, got {other:?}"),
+    }
+}
+
+// ── FlexInput's own targets, under the `@` tag ───────────────────────────────
+
+/// The patch's Macro Output ports and Virtual Menu entries, as the graph builder
+/// hands them over.
+fn ports() -> Vec<(String, String)> {
+    vec![
+        ("Reload".to_string(), "macro:aa11bb22".to_string()),
+        ("Reload sequence".to_string(), "macro:ccdd0011".to_string()),
+        ("Weapon wheel — Show".to_string(), "menu:m1_show".to_string()),
+    ]
+}
+
+/// A config can reach one of OUR targets, which JSM has no vocabulary for,
+/// because they are ours. By name, since a config is text a person reads.
+#[test]
+fn an_at_name_binds_one_of_flexinputs_own_targets() {
+    let c = super::parse::compile_full("S = @Reload", &[], &ports());
+    assert_eq!(c.lines[0].status, LineStatus::Ok);
+    assert_eq!(c.bindings[0].steps[0].out, pin("macro:aa11bb22"));
+
+    // Quoted when the name has spaces in it.
+    let c = super::parse::compile_full(r#"S = @"Reload sequence""#, &[], &ports());
+    assert_eq!(c.lines[0].status, LineStatus::Ok);
+    assert_eq!(c.bindings[0].steps[0].out, pin("macro:ccdd0011"));
+
+    // A menu entry is the same kind of target.
+    let c = super::parse::compile_full(r#"N = @"Weapon wheel — Show""#, &[], &ports());
+    assert_eq!(c.lines[0].status, LineStatus::Ok);
+    assert_eq!(c.bindings[0].steps[0].out, pin("menu:m1_show"));
+
+    // Matched the way a person would: case and surrounding space don't count.
+    let c = super::parse::compile_full("S = @reload", &[], &ports());
+    assert_eq!(c.bindings[0].steps[0].out, pin("macro:aa11bb22"));
+}
+
+/// An `@` name that doesn't resolve leaves the line WAITING, not silently
+/// fine: it binds nothing until its macro exists, and says so on the line —
+/// but it isn't an error either, since the editor makes the macro once the
+/// name is finished.
+#[test]
+fn an_at_name_that_is_not_in_the_patch_says_so() {
+    let c = super::parse::compile_full("S = @Nope", &[], &ports());
+    match &c.lines[0].status {
+        LineStatus::Waiting(e) => {
+            assert!(e.contains("Nope"), "{e}");
+            assert!(e.contains("Macro Output") || e.contains("Menu"), "{e}");
+        }
+        other => panic!("expected it to wait for its macro, got {other:?}"),
+    }
+    assert!(c.bindings.is_empty());
+    // A real mistake on the same kind of line is still an error.
+    let c = super::parse::compile_full("S = @", &[], &ports());
+    assert!(matches!(c.lines[0].status, LineStatus::Error(_)));
+    // With no ports at all the fix is the same — the editor makes the port —
+    // so the line says that rather than send you off to add a node.
+    let c = super::parse::compile_full("S = @Reload", &[], &[]);
+    match &c.lines[0].status {
+        LineStatus::Waiting(e) => assert!(e.contains("once its name is finished"), "{e}"),
+        other => panic!("expected an error, got {other:?}"),
+    }
+    // And `@` on its own is not a name.
+    let c = super::parse::compile_full("S = @", &[], &ports());
+    assert!(matches!(c.lines[0].status, LineStatus::Error(_)));
+}
+
+/// The unquoted form must not swallow an event modifier: `@Reload/` is a target
+/// pressed on release, not a target called "Reload/".
+#[test]
+fn an_at_name_stops_before_an_event_modifier() {
+    for (line, want) in [
+        (r#"S = @Reload\"#, "on press"),
+        (r#"S = @Reload'"#, "on tap"),
+        (r#"S = @Reload_"#, "on hold"),
+        // Release needs an action modifier, which is JSM's own rule for any key.
+        (r#"S = !@Reload/"#, "instant, on release"),
+        (r#"S = ^@Reload"#, "as a toggle"),
+    ] {
+        let c = super::parse::compile_full(line, &[], &ports());
+        assert_eq!(c.lines[0].status, LineStatus::Ok, "{line} ({want})");
+        assert_eq!(c.bindings[0].steps[0].out, pin("macro:aa11bb22"), "{line}");
+    }
+}
+
+/// What a picker writes is what the parser reads. Every port name the patch can
+/// hand over goes in through `fi_tag` and comes back out as that port's pin.
+#[test]
+fn every_port_name_round_trips_through_the_tag_it_is_written_as() {
+    let awkward = vec![
+        ("Reload".to_string(), "macro:1".to_string()),
+        ("Reload sequence".to_string(), "macro:2".to_string()),
+        ("Weapon wheel — Show".to_string(), "macro:3".to_string()),
+        ("50% throttle".to_string(), "macro:4".to_string()),
+        ("trailing_".to_string(), "macro:5".to_string()),
+        ("dash-and.dot".to_string(), "macro:6".to_string()),
+        ("Quote\"inside".to_string(), "macro:7".to_string()),
+    ];
+    for (name, want_pin) in &awkward {
+        let tag = super::catalogue::fi_tag(name);
+        let text = format!("S = {tag}");
+        let c = super::parse::compile_full(&text, &[], &awkward);
+        // A name with a quote in it can't be written at all — say that out loud
+        // rather than pretending, since it is the one case the tag can't express.
+        if name.contains('"') {
+            assert!(
+                matches!(c.lines[0].status, LineStatus::Error(_) | LineStatus::Waiting(_)),
+                "{name}: a quote inside a name has no spelling, so it must not silently bind"
+            );
+            continue;
+        }
+        assert_eq!(c.lines[0].status, LineStatus::Ok, "{name} written as {tag}");
+        assert_eq!(c.bindings[0].steps[0].out, pin(want_pin), "{name}");
+    }
+}
+
+// ── name mapping caveats ─────────────────────────────────────────────────────
+
+// JSM names the modifiers apart, and so does our keyboard now: the HID report's
+// modifier byte always had both halves and only the left one was ever set.
+#[test]
+fn left_and_right_modifiers_reach_the_os_as_themselves() {
+    for (name, want) in [
+        ("LSHIFT", "key_lshift"), ("RSHIFT", "key_rshift"),
+        ("LCONTROL", "key_lctrl"), ("RCONTROL", "key_rctrl"),
+        ("LALT", "key_lalt"), ("RALT", "key_ralt"),
+        ("LWINDOWS", "key_lwin"), ("RWINDOWS", "key_rwin"),
+    ] {
+        let c = compile(&format!("E = {name}"));
+        assert_eq!(c.lines[0].status, LineStatus::Ok, "{name}");
+        assert_eq!(c.bindings[0].steps[0].out, pin(want), "{name}");
+        // And no note: the line used to carry one saying the side was lost.
+        assert!(c.lines[0].notes.is_empty(), "{name}: {:?}", c.lines[0].notes);
+    }
+    // The unsided spelling stays unsided — it is what a keyboard sends when you
+    // press the shift most people mean.
+    let c = compile("E = SHIFT");
+    assert_eq!(c.bindings[0].steps[0].out, pin("key_shift"));
+}
+
+// Keys our sink can't send yet are reported, not silently dropped.
+#[test]
+fn keys_we_cannot_send_are_reported() {
+    let c = compile("E = N5");
+    assert!(
+        matches!(c.lines[0].status, LineStatus::Ignored(_)),
+        "{:?}",
+        c.lines[0]
+    );
+    assert!(
+        c.lines[0].notes[0].contains("numpad"),
+        "{:?}",
+        c.lines[0].notes
+    );
+    assert!(c.bindings.is_empty());
+
+}
+
+// Media and volume keys reach the keyboard sink's media node, as their own
+// `media_` pins.
+#[test]
+fn media_keys_are_sent() {
+    assert_eq!(steps("E = PLAY_PAUSE")[0].out, pin("media_play_pause"));
+    assert_eq!(steps("E = VOLUME_UP")[0].out, pin("media_volume_up"));
+    assert_eq!(steps("E = MUTE")[0].out, pin("media_mute"));
+    assert_eq!(steps("E = STOP_TRACK")[0].out, pin("media_stop"));
+    for k in flexinput_core::media::MEDIA_KEYS {
+        let c = compile(&format!("E = {}", k.jsm));
+        assert!(!matches!(c.lines[0].status, LineStatus::Ignored(_)), "{}: {:?}", k.jsm, c.lines[0]);
+    }
+}
+
+// Pad output names are aliases of each other in JSM and land on our pad pins.
+#[test]
+fn pad_output_names_map_to_our_pins() {
+    assert_eq!(steps("S = X_A")[0].out, pin("btn_south"));
+    assert_eq!(steps("S = PS_CROSS")[0].out, pin("btn_south"));
+    assert_eq!(steps("ZL = X_LT")[0].out, pin("left_trigger"));
+}
+
+/// As of phase 6 there is no JSM button left that this module cannot read: the
+/// motion stick, the lean buttons and the touchpad were the last three. This is
+/// the test that used to assert they waited for a phase — kept, turned around, so
+/// the day a new input source appears it is a deliberate change rather than a
+/// silent regression.
+#[test]
+fn every_button_jsm_has_can_be_read() {
+    let c = compile("MUP = W\nTOUCH = LMOUSE\nLEAN_LEFT = Q\nT7 = E\nTRING = R\nMRING = F");
+    assert!(
+        c.lines.iter().all(|l| l.status == LineStatus::Ok),
+        "every source is live: {:?}",
+        c.lines
+    );
+    assert_eq!(c.bindings.len(), 6, "and every line binds");
+
+    // Belt and braces: walk every name JSM accepts and check none of them comes
+    // back as a source we cannot read.
+    for name in [
+        "UP", "DOWN", "LEFT", "RIGHT", "L", "ZL", "ZLF", "R", "ZR", "ZRF", "N", "E", "S", "W",
+        "L3", "R3", "-", "+", "HOME", "CAPTURE", "MIC", "LSL", "LSR", "RSL", "RSR",
+        "LUP", "LDOWN", "LLEFT", "LRIGHT", "LRING", "RUP", "RDOWN", "RLEFT", "RRIGHT", "RRING",
+        "MUP", "MDOWN", "MLEFT", "MRIGHT", "MRING", "TUP", "TDOWN", "TLEFT", "TRIGHT", "TRING",
+        "LEAN_LEFT", "LEAN_RIGHT", "TOUCH", "T1", "T25",
+    ] {
+        let line = format!("{name} = E");
+        let info = one(&line);
+        assert_eq!(
+            info.status,
+            LineStatus::Ok,
+            "{name} should be readable, got {:?}",
+            info.status
+        );
+    }
+}
+
+#[test]
+fn the_summary_counts_what_the_editor_shows() {
+    let c = compile("S = SPACE\nSTICKLIKE_FACTOR = 1\nAUTOLOAD = OFF\nFLOOMP = A");
+    assert_eq!(c.summary(), (1, 1, 1));
+}
+
+// ── the press machinery ──────────────────────────────────────────────────────
+
+const DT: f32 = 0.010;
+
+struct Rig {
+    cfg: Compiled,
+    rt: Runtime,
+    down: std::collections::HashSet<Btn>,
+}
+
+impl Rig {
+    fn new(text: &str) -> Rig {
+        let cfg = compile(text);
+        let bad: Vec<&LineInfo> = cfg
+            .lines
+            .iter()
+            .filter(|l| matches!(l.status, LineStatus::Error(_)))
+            .collect();
+        assert!(bad.is_empty(), "config should compile: {bad:?}");
+        Rig {
+            cfg,
+            rt: Runtime::default(),
+            down: std::collections::HashSet::new(),
+        }
+    }
+    fn set(&mut self, b: Btn, on: bool) {
+        if on {
+            self.down.insert(b);
+        } else {
+            self.down.remove(&b);
+        }
+    }
+    /// One tick; returns the pins driven this tick.
+    fn tick(&mut self) -> std::collections::HashSet<String> {
+        let down = self.down.clone();
+        // Resolved the same way the evaluator does — from the chord stack as the
+        // last tick left it — so a modeshift on a timing is felt here too.
+        let timings = resolve(&self.cfg, self.rt.chords()).timings;
+        self.rt
+            .tick(&self.cfg, &timings, DT, &|b| down.contains(&b), &|_| false)
+            .pins
+            .clone()
+    }
+    /// `n` ticks; returns the pins driven on the last one.
+    fn ticks(&mut self, n: usize) -> std::collections::HashSet<String> {
+        let mut last = std::collections::HashSet::new();
+        for _ in 0..n {
+            last = self.tick();
+        }
+        last
+    }
+    /// Whether a pin is driven at any point over `n` ticks.
+    fn seen_within(&mut self, n: usize, pin: &str) -> bool {
+        for _ in 0..n {
+            if self.tick().contains(pin) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// A plain binding holds its key while the button is down.
+#[test]
+fn a_press_holds_its_key_until_release() {
+    let mut r = Rig::new("S = SPACE");
+    assert!(!r.tick().contains("key_space"));
+    r.set(Btn::S, true);
+    assert!(r.tick().contains("key_space"));
+    assert!(r.ticks(30).contains("key_space"), "still held");
+    r.set(Btn::S, false);
+    assert!(!r.ticks(6).contains("key_space"));
+}
+
+// Tap and hold: a short press fires the first key after release, a long one
+// fires the second while held.
+#[test]
+fn tap_fires_on_release_and_hold_fires_while_held() {
+    let mut r = Rig::new("W = R E");
+    r.set(Btn::W, true);
+    assert!(!r.ticks(5).contains("key_r"), "a tap waits for the release");
+    r.set(Btn::W, false);
+    assert!(r.seen_within(3, "key_r"), "the tap key fires after release");
+    assert!(!r.ticks(10).contains("key_r"), "and lets go on its own");
+
+    let mut r = Rig::new("W = R E");
+    r.set(Btn::W, true);
+    let pins = r.ticks(20); // past the 150 ms hold
+    assert!(pins.contains("key_e"), "hold fires while held");
+    assert!(!pins.contains("key_r"));
+    r.set(Btn::W, false);
+    let pins = r.ticks(2);
+    assert!(!pins.contains("key_e"), "and releases with the button");
+    assert!(!pins.contains("key_r"), "a held press never taps");
+}
+
+// Holds and taps keep their timing however long the config has run. The
+// runtime's clock was an f32 adding one tick at a time: at the 8 kHz the
+// settings allow it ran double speed after ~34 minutes and stopped after ~68,
+// and from then on no hold ever came due and a tap's key never let go. A
+// user's `- = R_ 3'` stopped holding half an hour into a game.
+#[test]
+fn holds_and_taps_keep_time_in_a_long_session() {
+    const DT_8K: f32 = 1.0 / 8000.0;
+    for minutes in [0.0, 35.0, 70.0, 330.0] {
+        let cfg = compile("- = R_ 3'");
+        let mut rt = Runtime::default();
+        rt.wind_clock(minutes * 60.0);
+        let mut run = |held: bool, secs: f32| {
+            let timings = resolve(&cfg, rt.chords()).timings;
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..(secs / DT_8K) as usize {
+                let pins = rt.tick(&cfg, &timings, DT_8K, &|b| held && b == Btn::Minus, &|_| false).pins.clone();
+                seen.extend(pins);
+            }
+            seen
+        };
+        // Held past the 150 ms hold time: R goes down, and only then.
+        let early = run(true, 0.120);
+        assert!(!early.contains("key_r"), "{minutes} min: not before the hold time");
+        let held = run(true, 0.100);
+        assert!(held.contains("key_r"), "{minutes} min: the hold fires: {held:?}");
+        assert!(!run(false, 0.100).contains("key_r"), "{minutes} min: and lets go");
+        // A tap: 3 pressed on release, and let go again shortly after.
+        run(true, 0.050);
+        let tapped = run(false, 0.020);
+        assert!(tapped.contains("key_3"), "{minutes} min: the tap fires: {tapped:?}");
+        run(false, 0.100);
+        let after = run(false, 0.001);
+        assert!(!after.contains("key_3"), "{minutes} min: a tap's key lets go: {after:?}");
+    }
+}
+
+// Turbo only starts once the button has been held, then pulses.
+#[test]
+fn turbo_pulses_after_the_hold_time() {
+    let mut r = Rig::new("S = SPACE+");
+    r.set(Btn::S, true);
+    let mut pulses = 0;
+    let mut was = false;
+    for _ in 0..60 {
+        let on = r.tick().contains("key_space");
+        if on && !was {
+            pulses += 1;
+        }
+        was = on;
+    }
+    // 600 ms: 150 ms of hold, then a pulse every 80 ms.
+    assert!(
+        (4..=6).contains(&pulses),
+        "expected a handful of turbo pulses, got {pulses}"
+    );
+}
+
+// A toggle stays on after the button is released, and the next press clears it.
+#[test]
+fn a_toggle_latches_until_pressed_again() {
+    let mut r = Rig::new("ZL = ^RMOUSE\\");
+    r.set(Btn::Zl, true);
+    assert!(r.tick().contains("mouse_right"));
+    r.set(Btn::Zl, false);
+    assert!(
+        r.ticks(10).contains("mouse_right"),
+        "the toggle holds after release"
+    );
+    r.set(Btn::Zl, true);
+    assert!(
+        !r.tick().contains("mouse_right"),
+        "pressing again clears it"
+    );
+}
+
+// An instant press lets go by itself while the button is still down.
+#[test]
+fn an_instant_press_releases_itself() {
+    let mut r = Rig::new("E = !C\\");
+    r.set(Btn::E, true);
+    assert!(r.tick().contains("key_c"));
+    assert!(
+        !r.ticks(8).contains("key_c"),
+        "instant presses release themselves"
+    );
+}
+
+// A release modifier clears a toggle another binding set.
+#[test]
+fn a_release_modifier_clears_a_toggle() {
+    let mut r = Rig::new("S = ^SPACE\\\nE = -SPACE\\");
+    r.set(Btn::S, true);
+    assert!(r.tick().contains("key_space"));
+    r.set(Btn::S, false);
+    r.tick();
+    r.set(Btn::E, true);
+    assert!(
+        !r.tick().contains("key_space"),
+        "the release modifier clears the latch"
+    );
+}
+
+// While a chord button is held, the chorded binding replaces the button own one —
+// and the chord button keeps doing its own job.
+#[test]
+fn a_chord_replaces_the_buttons_own_binding() {
+    let mut r = Rig::new("W = R\nL = Q\nL,W = 3");
+    r.set(Btn::L, true);
+    assert!(
+        r.tick().contains("key_q"),
+        "the chord button still does its own job"
+    );
+    r.set(Btn::W, true);
+    let pins = r.tick();
+    assert!(pins.contains("key_3"), "the chorded binding applies");
+    assert!(!pins.contains("key_r"), "not the plain binding");
+    // Let the chord go and W gets its own binding back on the next press.
+    r.set(Btn::W, false);
+    r.set(Btn::L, false);
+    r.ticks(2);
+    r.set(Btn::W, true);
+    assert!(r.tick().contains("key_r"));
+}
+
+// With two chords held, the one pressed last wins.
+#[test]
+fn the_latest_chord_wins() {
+    let mut r = Rig::new("W = R\nL,W = 3\nZL,W = 4");
+    r.set(Btn::L, true);
+    r.tick();
+    r.set(Btn::Zl, true);
+    r.tick();
+    r.set(Btn::W, true);
+    let pins = r.tick();
+    assert!(
+        pins.contains("key_4"),
+        "the last chord pressed wins: {pins:?}"
+    );
+    assert!(!pins.contains("key_3"));
+}
+
+// A double press inside the window uses its own binding, and the single press
+// TAP is held back long enough not to fire as well. (A single-key binding fires
+// on the press instead, which JSM applies on the first press either way — hence
+// the tap/hold binding here.)
+#[test]
+fn a_double_press_holds_back_the_single_tap() {
+    let cfg = "N = SCROLLDOWN NONE
+N,N = X";
+    // One press: the tap waits out the double window, then fires.
+    let mut r = Rig::new(cfg);
+    r.set(Btn::N, true);
+    r.ticks(3);
+    r.set(Btn::N, false);
+    assert!(
+        !r.ticks(3).contains("scroll_down"),
+        "the tap waits for the double window"
+    );
+    assert!(
+        r.seen_within(25, "scroll_down"),
+        "a lone tap still fires, a little late"
+    );
+
+    // Two presses inside the window: the double binding fires, the tap does not.
+    // Watched across the WHOLE sequence, so a held-back tap cannot slip past.
+    let mut r = Rig::new(cfg);
+    let mut saw_x = false;
+    let mut saw_scroll = false;
+    let watch = |r: &mut Rig, n: usize, saw_x: &mut bool, saw_scroll: &mut bool| {
+        for _ in 0..n {
+            let pins = r.tick();
+            *saw_x |= pins.contains("key_x");
+            *saw_scroll |= pins.contains("scroll_down");
+        }
+    };
+    r.set(Btn::N, true);
+    watch(&mut r, 3, &mut saw_x, &mut saw_scroll);
+    r.set(Btn::N, false);
+    watch(&mut r, 3, &mut saw_x, &mut saw_scroll);
+    r.set(Btn::N, true);
+    watch(&mut r, 20, &mut saw_x, &mut saw_scroll);
+    assert!(saw_x, "the double press fires");
+    assert!(!saw_scroll, "the single press tap must not fire too");
+}
+
+// Two buttons pressed together inside the window use the simultaneous binding
+// instead of their own.
+#[test]
+fn a_simultaneous_press_replaces_both_bindings() {
+    // Unsided SHIFT deliberately: this test is about the window, and its
+    // "didn't fire" assertions have to be able to fail.
+    let mut r = Rig::new("L = SHIFT\nR = E\nL+R = Q");
+    r.set(Btn::L, true);
+    let pins = r.tick();
+    assert!(!pins.contains("key_shift"), "L waits to see if R joins it");
+    r.set(Btn::R, true);
+    let pins = r.tick();
+    assert!(pins.contains("key_q"), "the pair fires: {pins:?}");
+    assert!(!pins.contains("key_shift") && !pins.contains("key_e"));
+    r.set(Btn::R, false);
+    assert!(!r.ticks(3).contains("key_q"), "letting either go ends it");
+}
+
+// Pressed alone, a button that has a simultaneous binding still works — just
+// after the window.
+#[test]
+fn a_lone_press_survives_the_simultaneous_window() {
+    let mut r = Rig::new("L = SHIFT\nR = E\nL+R = Q");
+    r.set(Btn::L, true);
+    assert!(
+        r.seen_within(10, "key_shift"),
+        "L own binding starts after the window"
+    );
+}
+
+// A diagonal takes over from the button already pressing, and hands back when
+// one of the two is released.
+#[test]
+fn a_diagonal_takes_over_and_hands_back() {
+    let mut r = Rig::new("UP = 1\nUP*RIGHT = 2\nRIGHT = 3");
+    r.set(Btn::Up, true);
+    assert!(r.tick().contains("key_1"));
+    r.set(Btn::Right, true);
+    let pins = r.tick();
+    assert!(
+        pins.contains("key_2"),
+        "the diagonal binding applies: {pins:?}"
+    );
+    assert!(!pins.contains("key_1") && !pins.contains("key_3"));
+    r.set(Btn::Right, false);
+    let pins = r.ticks(2);
+    assert!(
+        pins.contains("key_1"),
+        "the still-held button gets its binding back: {pins:?}"
+    );
+    assert!(!pins.contains("key_2"));
+}
+
+// The timings a config sets are the ones used.
+#[test]
+fn the_configs_own_hold_time_applies() {
+    let mut r = Rig::new("HOLD_PRESS_TIME = 50\nW = R E");
+    r.set(Btn::W, true);
+    assert!(
+        r.ticks(7).contains("key_e"),
+        "50 ms hold should have fired by 70 ms"
+    );
+}
+
+// ── triggers and sticks ──────────────────────────────────────────────────────
+
+use super::analog::{Analog, Pad, RingMode, StickMode, TriggerMode};
+
+/// A config's analog settings, driven a tick at a time with a pad in hand.
+struct Stage {
+    s: super::analog::Settings,
+    a: Analog,
+    pad: Pad,
+}
+
+impl Stage {
+    fn new(text: &str) -> Stage {
+        let c = compile(text);
+        let bad: Vec<&LineInfo> = c
+            .lines
+            .iter()
+            .filter(|l| matches!(l.status, LineStatus::Error(_)))
+            .collect();
+        assert!(bad.is_empty(), "config should compile: {bad:?}");
+        Stage {
+            s: c.settings,
+            a: Analog::default(),
+            pad: Pad::default(),
+        }
+    }
+    /// Advance one tick on whatever the pad is reporting.
+    fn tick(&mut self) -> &Analog {
+        self.a.tick(&self.s, DT, &self.pad);
+        &self.a
+    }
+    /// Put the left trigger at `v` and advance one tick.
+    fn pull(&mut self, v: f32) -> &Analog {
+        self.pad.triggers[0] = Some(v);
+        self.a.tick(&self.s, DT, &self.pad);
+        &self.a
+    }
+    fn pull_for(&mut self, v: f32, ticks: usize) -> &Analog {
+        for _ in 0..ticks {
+            self.pull(v);
+        }
+        &self.a
+    }
+    /// Put the left stick at (x, y) and advance one tick.
+    fn stick(&mut self, x: f32, y: f32) -> &Analog {
+        self.pad.sticks[0] = (x, y);
+        self.a.tick(&self.s, DT, &self.pad);
+        &self.a
+    }
+}
+
+/// Comfortably past the 150 ms skip delay, in ticks.
+const SKIP: usize = 20;
+
+// The threshold decides when the soft pull counts as a press, and JSM's default
+// of 0 means the slightest press.
+#[test]
+fn the_trigger_threshold_decides_when_a_pull_counts() {
+    let mut t = Stage::new("TRIGGER_THRESHOLD = 0.5");
+    assert!(
+        !t.pull(0.4).down(Btn::Zl),
+        "under the threshold is not a press"
+    );
+    assert!(t.pull(0.6).down(Btn::Zl), "over it is");
+    assert!(
+        !t.pull(0.5).down(Btn::Zl),
+        "exactly at it is not — JSM compares strictly"
+    );
+
+    let mut t = Stage::new("S = SPACE");
+    assert!(
+        t.pull(0.10).down(Btn::Zl),
+        "the default threshold is the slightest press"
+    );
+    assert!(!t.pull(0.0).down(Btn::Zl));
+}
+
+// A negative threshold is JSM's hair trigger: it presses while the trigger is
+// still being pulled and releases while it is coming back, without ever needing
+// to cross a level.
+#[test]
+fn a_hair_trigger_follows_the_movement_not_a_level() {
+    let mut t = Stage::new("TRIGGER_THRESHOLD = -1");
+    let mut pressed = false;
+    for v in [0.05, 0.10, 0.15, 0.20, 0.25] {
+        pressed |= t.pull(v).down(Btn::Zl);
+    }
+    assert!(
+        pressed,
+        "pulling it down presses, well short of any threshold"
+    );
+
+    let mut released = false;
+    for v in [0.20, 0.15, 0.10, 0.05, 0.0, 0.0] {
+        released |= !t.pull(v).down(Btn::Zl);
+    }
+    assert!(released, "and easing it back releases");
+}
+
+// The default mode ignores the full pull altogether, so a config that binds ZLF
+// without setting a mode gets nothing — and the line says so.
+#[test]
+fn no_full_is_the_default_and_says_so() {
+    let mut t = Stage::new("ZLF = LMOUSE");
+    let a = t.pull_for(1.0, 3);
+    assert!(a.down(Btn::Zl), "the soft pull still presses");
+    assert!(!a.down(Btn::Zlf), "the full pull is ignored in NO_FULL");
+
+    let c = compile("ZLF = LMOUSE");
+    assert!(
+        c.lines[0]
+            .notes
+            .iter()
+            .any(|n| n.contains("ZL_MODE is NO_FULL")),
+        "the line should explain itself: {:?}",
+        c.lines[0].notes
+    );
+}
+
+// NO_SKIP puts the full pull on top of the soft one; NO_SKIP_EXCLUSIVE swaps
+// one for the other.
+#[test]
+fn the_full_pull_can_join_the_soft_one_or_replace_it() {
+    let mut t = Stage::new("ZL_MODE = NO_SKIP");
+    assert!(t.pull(0.5).down(Btn::Zl));
+    let a = t.pull(1.0);
+    assert!(a.down(Btn::Zl) && a.down(Btn::Zlf), "NO_SKIP keeps both");
+
+    let mut t = Stage::new("ZL_MODE = NO_SKIP_EXCLUSIVE");
+    assert!(t.pull(0.5).down(Btn::Zl));
+    let a = t.pull(1.0);
+    assert!(
+        !a.down(Btn::Zl) && a.down(Btn::Zlf),
+        "EXCLUSIVE trades one for the other"
+    );
+    let a = t.pull(0.5);
+    assert!(
+        a.down(Btn::Zl) && !a.down(Btn::Zlf),
+        "and gives the soft pull back"
+    );
+}
+
+// MUST_SKIP: a quick full pull fires the full binding only; getting there slowly
+// leaves you on the soft binding, which the full pull no longer interrupts.
+#[test]
+fn must_skip_is_the_quick_pull_only() {
+    let mut t = Stage::new("ZL_MODE = MUST_SKIP");
+    t.pull(0.5);
+    let a = t.pull(1.0);
+    assert!(a.down(Btn::Zlf), "a quick full pull fires the full binding");
+    assert!(!a.down(Btn::Zl), "and skips the soft one");
+
+    let mut t = Stage::new("ZL_MODE = MUST_SKIP");
+    let a = t.pull_for(0.5, SKIP);
+    assert!(
+        a.down(Btn::Zl),
+        "waiting out the skip delay presses the soft binding"
+    );
+    let a = t.pull(1.0);
+    assert!(
+        a.down(Btn::Zl) && !a.down(Btn::Zlf),
+        "and once firing, reaching the full pull doesn't stop you"
+    );
+}
+
+// MAY_SKIP is the same quick pull, but a full pull after the soft one lands on
+// top instead of being ignored.
+#[test]
+fn may_skip_allows_the_full_pull_afterwards() {
+    let mut t = Stage::new("ZL_MODE = MAY_SKIP");
+    t.pull(0.5);
+    let a = t.pull(1.0);
+    assert!(
+        a.down(Btn::Zlf) && !a.down(Btn::Zl),
+        "quick full pull still skips the soft one"
+    );
+
+    let mut t = Stage::new("ZL_MODE = MAY_SKIP");
+    t.pull_for(0.5, SKIP);
+    let a = t.pull(1.0);
+    assert!(
+        a.down(Btn::Zl) && a.down(Btn::Zlf),
+        "a later full pull joins the soft one"
+    );
+}
+
+// The responsive modes press the soft binding at once and take it back if the
+// full pull turns up quickly.
+#[test]
+fn a_responsive_mode_presses_first_and_takes_it_back() {
+    let mut t = Stage::new("ZL_MODE = MUST_SKIP_R");
+    assert!(
+        t.pull(0.5).down(Btn::Zl),
+        "the soft binding is on straight away"
+    );
+    let a = t.pull(1.0);
+    assert!(a.down(Btn::Zlf), "the quick full pull fires");
+    assert!(!a.down(Btn::Zl), "and the soft binding is taken back");
+}
+
+// Letting go before the skip delay is up still sends the soft binding — a quick
+// tap of the trigger isn't swallowed by the wait.
+#[test]
+fn a_quick_tap_of_the_trigger_still_sends_the_soft_binding() {
+    let mut t = Stage::new("ZL_MODE = MUST_SKIP");
+    t.pull(0.5);
+    t.pull(0.5);
+    assert!(
+        t.pull(0.0).down(Btn::Zl),
+        "the held-back soft press fires on release"
+    );
+    assert!(!t.pull(0.0).down(Btn::Zl), "and is over the next tick");
+}
+
+// A pad that reports both an analog trigger and a digital trigger button trips
+// the button a fraction of the way down. That button must not count as a full
+// pull, or every dual-stage mode fires its full binding almost at once (reported
+// as "15% counts as a full pull").
+#[test]
+fn a_digital_trigger_pin_is_not_a_full_pull() {
+    let mut t = Stage::new("ZR_MODE = NO_SKIP");
+    t.pad.trigger_digital[1] = true; // asserted early, as a real pad does
+    let mut ever_full = false;
+    for v in [0.15, 0.15, 0.3, 0.5, 0.8, 0.9] {
+        t.pad.triggers[1] = Some(v);
+        ever_full |= t.tick().down(Btn::Zrf);
+    }
+    assert!(t.a.down(Btn::Zr), "the soft pull is pressed all along");
+    assert!(!ever_full, "nothing short of the end of the travel is a full pull");
+
+    // Pulled all the way, it fires.
+    t.pad.triggers[1] = Some(1.0);
+    t.tick();
+    assert!(t.tick().down(Btn::Zrf), "at the end of the travel it does");
+}
+
+// A pad with no analog trigger can't tell a soft pull from a full one, so JSM
+// forces NO_FULL on it rather than firing both.
+#[test]
+fn a_digital_trigger_never_fires_the_full_pull() {
+    let mut t = Stage::new("ZL_MODE = NO_SKIP");
+    t.pad.trigger_digital[0] = true;
+    // Over several ticks, because a full pull would only land on the second one.
+    let mut ever_full = false;
+    for _ in 0..4 {
+        ever_full |= t.tick().down(Btn::Zlf);
+    }
+    assert!(
+        t.a.down(Btn::Zl),
+        "the button still presses the soft binding"
+    );
+    assert!(
+        !ever_full,
+        "but nothing on a digital trigger reads as a full pull"
+    );
+}
+
+// A stick in a digital mode is eight sectors, and a diagonal lights both of its
+// directions the way JSM's do.
+#[test]
+fn stick_directions_are_eight_sectors() {
+    let mut t = Stage::new("LUP = W");
+    let a = t.stick(0.0, 1.0);
+    assert!(a.down(Btn::Lup) && !a.down(Btn::Lleft) && !a.down(Btn::Lright));
+    let a = t.stick(0.7, 0.7);
+    assert!(
+        a.down(Btn::Lup) && a.down(Btn::Lright),
+        "a diagonal is both"
+    );
+    let a = t.stick(0.3, 1.0);
+    assert!(
+        a.down(Btn::Lup) && !a.down(Btn::Lright),
+        "but leaning isn't: a sector is 90° wide"
+    );
+    let a = t.stick(-1.0, 0.0);
+    assert!(a.down(Btn::Lleft) && !a.down(Btn::Lup) && !a.down(Btn::Ldown));
+    let a = t.stick(0.05, 0.0);
+    for b in [Btn::Lleft, Btn::Lright, Btn::Lup, Btn::Ldown, Btn::Lring] {
+        assert!(
+            !a.down(b),
+            "inside the deadzone is nothing at all, and {} fired",
+            b.name()
+        );
+    }
+}
+
+// The ring fires whatever else the stick is doing, and which ring it is decides
+// whether it means "moved a little" or "pushed to the edge".
+#[test]
+fn the_ring_reads_how_far_the_stick_is_pushed() {
+    let mut t = Stage::new("LRING = LMOUSE");
+    assert!(
+        t.stick(0.0, 1.0).down(Btn::Lring),
+        "OUTER is the default ring"
+    );
+    assert!(!t.stick(0.0, 0.5).down(Btn::Lring));
+
+    let mut t = Stage::new("LEFT_RING_MODE = INNER\nLRING = LMOUSE");
+    assert!(
+        t.stick(0.0, 0.5).down(Btn::Lring),
+        "INNER is the other half of the travel"
+    );
+    assert!(!t.stick(0.0, 1.0).down(Btn::Lring));
+    assert!(
+        !t.stick(0.0, 0.0).down(Btn::Lring),
+        "centred is not a ring press"
+    );
+}
+
+// Axis inversion and controller orientation both turn the stick before its
+// directions are read.
+#[test]
+fn a_stick_can_be_inverted_or_turned_with_the_controller() {
+    let mut t = Stage::new("LEFT_STICK_AXIS = INVERTED\nLDOWN = S");
+    assert!(
+        t.stick(0.0, 1.0).down(Btn::Ldown),
+        "INVERTED flips both axes"
+    );
+
+    let mut t = Stage::new("LEFT_STICK_AXIS = STANDARD INVERTED\nLDOWN = S");
+    let a = t.stick(1.0, 1.0);
+    assert!(
+        a.down(Btn::Ldown) && a.down(Btn::Lright),
+        "one sign each, x then y"
+    );
+
+    let mut t = Stage::new("CONTROLLER_ORIENTATION = LEFT\nLUP = W");
+    assert!(
+        t.stick(1.0, 0.0).down(Btn::Lup),
+        "held sideways, right is up"
+    );
+}
+
+// Turning the stick in SCROLL_WHEEL mode spends the turn on notches, each one a
+// tap of the stick's left or right button.
+#[test]
+fn the_scroll_wheel_turns_into_notches() {
+    let mut t = Stage::new("LEFT_STICK_MODE = SCROLL_WHEEL\nLLEFT = SCROLLUP\nLRIGHT = SCROLLDOWN");
+    t.stick(1.0, 0.0);
+    // A quarter turn anticlockwise is three 30° notches' worth, but a notch
+    // holds its button for a moment, so only one fires at a time.
+    let a = t.stick(0.0, 1.0);
+    assert!(a.down(Btn::Lleft), "turning one way taps the left button");
+    assert!(!a.down(Btn::Lright));
+
+    let mut t = Stage::new("LEFT_STICK_MODE = SCROLL_WHEEL\nLLEFT = SCROLLUP\nLRIGHT = SCROLLDOWN");
+    t.stick(0.0, 1.0);
+    assert!(
+        t.stick(1.0, 0.0).down(Btn::Lright),
+        "and the other way taps the right one"
+    );
+
+    // Back to the middle forgets the turn rather than banking it.
+    let mut t = Stage::new("LEFT_STICK_MODE = SCROLL_WHEEL\nLLEFT = SCROLLUP");
+    t.stick(1.0, 0.0);
+    t.stick(0.0, 0.0);
+    assert!(
+        !t.stick(0.0, 1.0).down(Btn::Lleft),
+        "a lap through the centre is not a notch"
+    );
+}
+
+// A stick that aims the mouse drives no directions, and the line that bound one
+// says why rather than looking broken.
+#[test]
+fn a_stick_that_aims_the_mouse_has_no_directions() {
+    let mut t = Stage::new("LEFT_STICK_MODE = AIM\nLUP = W");
+    assert!(!t.stick(0.0, 1.0).down(Btn::Lup));
+
+    let c = compile("LEFT_STICK_MODE = AIM\nLUP = W");
+    assert_eq!(c.lines[0].status, LineStatus::Ok, "{:?}", c.lines[0]);
+    assert!(
+        c.lines[1]
+            .notes
+            .iter()
+            .any(|n| n.contains("LEFT_STICK_MODE")),
+        "the binding should explain itself: {:?}",
+        c.lines[1].notes
+    );
+
+    // A mode a later phase owns is pending, and drives nothing at all.
+    let c = compile("LEFT_STICK_MODE = MOUSE_RING\nLUP = W");
+    assert!(
+        matches!(c.lines[0].status, LineStatus::Pending(p) if p.contains("absolute mouse")),
+        "{:?}",
+        c.lines[0]
+    );
+}
+
+// The settings this phase runs are read off the config, not guessed at.
+#[test]
+fn trigger_and_stick_settings_are_read() {
+    let c = compile(
+        "ZR_MODE = MAY_SKIP_R\nRIGHT_STICK_MODE = SCROLL_WHEEL\nSCROLL_SENS = 45\n\
+        LEFT_STICK_DEADZONE_INNER = 0.2\nSTICK_DEADZONE_OUTER = 0.05\nRIGHT_RING_MODE = INNER",
+    );
+    assert!(
+        c.lines.iter().all(|l| l.status == LineStatus::Ok),
+        "{:?}",
+        c.lines
+    );
+    assert_eq!(c.settings.zr, TriggerMode::MaySkipR);
+    assert_eq!(c.settings.right.mode, StickMode::ScrollWheel);
+    assert_eq!(c.settings.right.scroll_sens, 45.0);
+    assert_eq!(c.settings.left.inner_dz, 0.2);
+    assert_eq!(
+        c.settings.right.inner_dz, 0.15,
+        "one stick's deadzone is its own"
+    );
+    assert_eq!(
+        c.settings.left.outer_dz, 0.05,
+        "the unprefixed one sets both"
+    );
+    assert_eq!(c.settings.right.outer_dz, 0.05);
+    assert_eq!(c.settings.right.ring, RingMode::Inner);
+    assert_eq!(c.settings.left.ring, RingMode::Outer);
+
+    // A value JSM knows but we don't run yet names its phase; a typo is an error.
+    assert!(
+        matches!(one("LEFT_STICK_MODE = MOUSE_RING").status, LineStatus::Pending(p)
+        if p.contains("absolute mouse pin"))
+    );
+    assert!(matches!(
+        one("ZL_MODE = SORT_OF").status,
+        LineStatus::Error(_)
+    ));
+    assert!(matches!(
+        one("TRIGGER_THRESHOLD = half").status,
+        LineStatus::Error(_)
+    ));
+}
+
+// ── aiming: gyro, stick aim, flick ───────────────────────────────────────────
+
+use super::aim::{Aim, AxisMask, Gyro, SnapMode};
+
+/// A config's aiming, driven a tick at a time with a gyro and sticks in hand.
+struct Aiming {
+    cfg: Compiled,
+    a: Aim,
+    analog: Analog,
+    /// What the physical pad is reporting.
+    pad: Pad,
+    /// The virtual pad the config drives, when it drives one.
+    pad_out: super::pad::Pad,
+    /// Gravity, and the accelerometer it is worked out from.
+    motion: super::motion::Motion,
+    accel: Option<glam::Vec3>,
+    gravity: super::motion::Gravity,
+    gyro: Gyro,
+    actions: std::collections::HashSet<GyroAction>,
+    down: std::collections::HashSet<Btn>,
+}
+
+impl Aiming {
+    fn new(text: &str) -> Aiming {
+        let cfg = compile(text);
+        let bad: Vec<&LineInfo> = cfg
+            .lines
+            .iter()
+            .filter(|l| matches!(l.status, LineStatus::Error(_)))
+            .collect();
+        assert!(bad.is_empty(), "config should compile: {bad:?}");
+        Aiming {
+            cfg,
+            a: Aim::default(),
+            analog: Analog::default(),
+            pad: Pad::default(),
+            pad_out: super::pad::Pad::default(),
+            motion: super::motion::Motion::default(),
+            accel: None,
+            gravity: super::motion::Gravity::default(),
+            gyro: Gyro::default(),
+            actions: std::collections::HashSet::new(),
+            down: std::collections::HashSet::new(),
+        }
+    }
+    /// Turn the pad at this many degrees a second and advance one tick.
+    fn turn(&mut self, pitch: f32, yaw: f32) -> glam::Vec2 {
+        self.gyro = Gyro {
+            roll: 0.0,
+            pitch,
+            yaw,
+        };
+        self.tick()
+    }
+    fn stick(&mut self, side: usize, x: f32, y: f32) -> glam::Vec2 {
+        self.pad.sticks[side] = (x, y);
+        self.tick()
+    }
+    fn tick(&mut self) -> glam::Vec2 {
+        self.aimed().mouse
+    }
+    /// Everything one tick of aiming produced, not just the mouse half.
+    fn aimed(&mut self) -> super::aim::Aimed {
+        // Gravity first, so a gravity-referenced space and the motion stick have
+        // something to measure against, then all five sticks.
+        let gravity = self.motion.tick(self.accel, DT);
+        self.gravity = gravity;
+        self.pad.sticks[super::analog::MOTION] =
+            super::motion::motion_stick(gravity, self.cfg.settings.motion);
+        self.analog.tick(&self.cfg.settings, DT, &self.pad);
+        let down = self.down.clone();
+        self.a.tick(
+            &self.cfg.aim,
+            &self.cfg.pad,
+            &self.cfg.motion,
+            &self.cfg.cc,
+            gravity,
+            DT,
+            self.gyro,
+            &self.analog,
+            &self.actions,
+            &|b| down.contains(&b),
+        )
+    }
+    /// One tick of aiming, then one of the pad side it feeds.
+    fn to_pad(&mut self) -> super::pad::Out {
+        let aimed = self.aimed();
+        self.pad_out.tick(
+            &self.cfg.pad,
+            DT,
+            &self.analog,
+            self.cfg.aim.stick_power,
+            aimed.gyro_dps,
+            aimed.flick_dps,
+            super::motion::steer(
+                self.gravity,
+                self.cfg.settings.orientation,
+                self.cfg.settings.motion.inner_dz * 180.0,
+                (1.0 - self.cfg.settings.motion.outer_dz) * 180.0,
+                self.cfg.aim.stick_power,
+            ),
+        )
+    }
+    fn pad_ticks(&mut self, n: usize) -> super::pad::Out {
+        let mut last = super::pad::Out::default();
+        for _ in 0..n {
+            last = self.to_pad();
+        }
+        last
+    }
+    fn ticks(&mut self, n: usize) -> glam::Vec2 {
+        let mut last = glam::Vec2::ZERO;
+        for _ in 0..n {
+            last = self.tick();
+        }
+        last
+    }
+}
+
+/// Enough gyro sensitivity to see, and a calibration that keeps the numbers
+/// readable: 1 mouse count per degree turned.
+const AIM_CFG: &str = "GYRO_SENS = 1\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0";
+
+// Turning the pad moves the mouse: right is +x, and up is +y because our bus
+// counts the screen upward even though JSM counts it down.
+#[test]
+fn turning_the_pad_moves_the_mouse() {
+    let mut a = Aiming::new(AIM_CFG);
+    let right = a.turn(0.0, 90.0);
+    assert!(right.x > 0.0, "turning right aims right: {right:?}");
+    assert!(right.y.abs() < 1e-6, "and not up or down");
+
+    let left = a.turn(0.0, -90.0);
+    assert!(left.x < 0.0, "and turning left aims left: {left:?}");
+
+    let up = a.turn(90.0, 0.0);
+    assert!(up.y > 0.0, "tilting up aims up: {up:?}");
+
+    // A degree turned is a mouse count at this calibration, whatever the tick.
+    let moved = a.turn(0.0, 100.0).x;
+    assert!(
+        (moved - 100.0 * DT).abs() < 0.01,
+        "a degree is a count: {moved}"
+    );
+}
+
+// Sensitivity multiplies the turn, and zero sensitivity — JSM's default — aims
+// with nothing at all.
+#[test]
+fn gyro_sensitivity_scales_the_turn_and_zero_means_off() {
+    let mut a = Aiming::new(AIM_CFG);
+    let one = a.turn(0.0, 90.0).x;
+    let mut b = Aiming::new("GYRO_SENS = 4\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0");
+    let four = b.turn(0.0, 90.0).x;
+    assert!(
+        (four - one * 4.0).abs() < 0.01,
+        "four times the sensitivity: {four} vs {one}"
+    );
+
+    let mut off = Aiming::new("REAL_WORLD_CALIBRATION = 1");
+    assert_eq!(
+        off.turn(0.0, 90.0),
+        glam::Vec2::ZERO,
+        "JSM starts at zero sensitivity"
+    );
+}
+
+// The ramp: slow turns get the low sensitivity, fast ones the high, and in
+// between it interpolates.
+#[test]
+fn the_sensitivity_ramp_runs_between_its_two_thresholds() {
+    let cfg = "MIN_GYRO_SENS = 1\nMAX_GYRO_SENS = 5\nMIN_GYRO_THRESHOLD = 10\n\
+        MAX_GYRO_THRESHOLD = 110\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0";
+    let mut a = Aiming::new(cfg);
+    // At the bottom of the ramp the low sensitivity applies.
+    let slow = a.turn(0.0, 10.0).x / (10.0 * DT);
+    assert!(
+        (slow - 1.0).abs() < 0.05,
+        "slow turns stay at MIN_GYRO_SENS: {slow}"
+    );
+    // Halfway up, halfway between the two.
+    let mid = a.turn(0.0, 60.0).x / (60.0 * DT);
+    assert!((mid - 3.0).abs() < 0.05, "halfway is halfway: {mid}");
+    // At the top, and beyond it, the high sensitivity.
+    let fast = a.turn(0.0, 200.0).x / (200.0 * DT);
+    assert!(
+        (fast - 5.0).abs() < 0.05,
+        "fast turns reach MAX_GYRO_SENS: {fast}"
+    );
+}
+
+// The cutoff ignores a slow drift, and fades the gyro back in over the recovery
+// band rather than snapping it on.
+#[test]
+fn the_cutoff_ignores_a_slow_drift() {
+    let cfg = "GYRO_SENS = 1\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0\n\
+        GYRO_CUTOFF_SPEED = 10\nGYRO_CUTOFF_RECOVERY = 20";
+    let mut a = Aiming::new(cfg);
+    assert_eq!(a.turn(0.0, 5.0).x, 0.0, "under the cutoff, nothing moves");
+    let half = a.turn(0.0, 15.0).x;
+    let full = a.turn(0.0, 40.0).x;
+    assert!(
+        half > 0.0 && half < 15.0 * DT,
+        "halfway through recovery it is faded: {half}"
+    );
+    assert!(
+        (full - 40.0 * DT).abs() < 0.01,
+        "past recovery it is all there: {full}"
+    );
+}
+
+// Which gyro axis drives which mouse axis is the config's to choose, and either
+// can be inverted.
+#[test]
+fn the_gyro_axes_can_be_swapped_and_inverted() {
+    let mut a = Aiming::new(&format!("{AIM_CFG}\nMOUSE_X_FROM_GYRO_AXIS = X"));
+    assert_eq!(a.cfg.aim.mouse_x_from, AxisMask::X);
+    let tilt = a.turn(90.0, 0.0);
+    assert!(tilt.x > 0.0, "tilting now aims sideways: {tilt:?}");
+
+    let mut a = Aiming::new(&format!("{AIM_CFG}\nGYRO_AXIS_X = INVERTED"));
+    assert!(
+        a.turn(0.0, 90.0).x < 0.0,
+        "inverted, turning right aims left"
+    );
+
+    let mut a = Aiming::new(&format!("{AIM_CFG}\nMOUSE_X_FROM_GYRO_AXIS = NONE"));
+    assert_eq!(a.turn(0.0, 90.0).x, 0.0, "and NONE means nothing drives it");
+}
+
+// A gyro button holds the gyro off (or on) while it is held, and a binding's own
+// GYRO_OFF overrides whatever the setting said.
+#[test]
+fn a_button_can_hold_the_gyro_off_or_on() {
+    let mut a = Aiming::new(&format!("{AIM_CFG}\nGYRO_OFF = R3"));
+    assert!(a.turn(0.0, 90.0).x > 0.0, "the gyro is on to begin with");
+    a.down.insert(Btn::R3);
+    assert_eq!(a.turn(0.0, 90.0).x, 0.0, "and off while the button is held");
+
+    let mut a = Aiming::new(&format!("{AIM_CFG}\nGYRO_ON = ZL"));
+    assert_eq!(a.turn(0.0, 90.0).x, 0.0, "GYRO_ON is the other way up");
+    a.down.insert(Btn::Zl);
+    assert!(a.turn(0.0, 90.0).x > 0.0, "on only while held");
+
+    // NO_GYRO_BUTTON takes the button away again.
+    let mut a = Aiming::new(&format!("{AIM_CFG}\nGYRO_OFF = R3\nNO_GYRO_BUTTON"));
+    a.down.insert(Btn::R3);
+    assert!(
+        a.turn(0.0, 90.0).x > 0.0,
+        "with no button, the gyro is simply on"
+    );
+
+    // A binding's action wins over the setting while it is asserted.
+    let mut a = Aiming::new(AIM_CFG);
+    a.actions.insert(GyroAction::Off);
+    assert_eq!(
+        a.turn(0.0, 90.0).x,
+        0.0,
+        "GYRO_OFF as a binding blocks it too"
+    );
+}
+
+// Aiming with a stick: pushing it moves the mouse, and the deadzone holds it
+// still.
+#[test]
+fn a_stick_can_aim_the_mouse() {
+    let cfg = "RIGHT_STICK_MODE = AIM\nSTICK_SENS = 100\nREAL_WORLD_CALIBRATION = 1";
+    let mut a = Aiming::new(cfg);
+    let out = a.stick(1, 1.0, 0.0);
+    assert!(
+        out.x > 0.0 && out.y.abs() < 1e-6,
+        "pushing right aims right: {out:?}"
+    );
+    let up = a.stick(1, 0.0, 1.0);
+    assert!(up.y > 0.0, "and pushing up aims up: {up:?}");
+    assert_eq!(
+        a.stick(1, 0.05, 0.0),
+        glam::Vec2::ZERO,
+        "inside the deadzone, nothing"
+    );
+
+    // How far it is pushed is shaped by STICK_POWER and only then scaled, so a
+    // half push with a squared curve aims at a quarter speed.
+    let cfg = "RIGHT_STICK_MODE = AIM\nSTICK_SENS = 100\nREAL_WORLD_CALIBRATION = 1\n\
+        STICK_POWER = 2\nSTICK_DEADZONE_INNER = 0\nSTICK_DEADZONE_OUTER = 0";
+    let mut a = Aiming::new(cfg);
+    let half = a.stick(1, 0.5, 0.0).x;
+    let full = a.stick(1, 1.0, 0.0).x;
+    assert!(
+        (half - 0.25 * 100.0 * DT).abs() < 1e-4,
+        "half push, quarter speed: {half}"
+    );
+    assert!(
+        (full - 100.0 * DT).abs() < 1e-4,
+        "full push, full speed: {full}"
+    );
+}
+
+// Flick stick: pushing the stick out turns the camera to face that way, paid out
+// over FLICK_TIME rather than all at once. At a calibration of one count per
+// degree, a flick's whole movement is the angle it turned through.
+#[test]
+fn a_flick_turns_the_camera_to_face_the_stick() {
+    let cfg = "RIGHT_STICK_MODE = FLICK\nREAL_WORLD_CALIBRATION = 1\nFLICK_TIME = 0.1";
+    let mut a = Aiming::new(cfg);
+    a.stick(1, 0.0, 0.0);
+    // Straight back is half a turn.
+    a.stick(1, 0.0, -1.0);
+    let (mut total, mut biggest) = (0.0f32, 0.0f32);
+    for _ in 0..30 {
+        let x = a.tick().x;
+        total += x;
+        biggest = biggest.max(x.abs());
+    }
+    assert!(
+        (total.abs() - 180.0).abs() < 2.0,
+        "a flick backwards turns 180 degrees' worth: {total}"
+    );
+    assert!(
+        biggest < total.abs() * 0.5,
+        "and it is eased over the flick time, not dumped in a tick: {biggest}"
+    );
+}
+
+// Turning the stick while it is held out traces the camera around with it.
+#[test]
+fn turning_a_held_flick_stick_traces_the_camera() {
+    let cfg = "RIGHT_STICK_MODE = FLICK\nREAL_WORLD_CALIBRATION = 1\nROTATE_SMOOTH_OVERRIDE = 0";
+    let mut a = Aiming::new(cfg);
+    a.stick(1, 0.0, 1.0);
+    a.ticks(30); // let the flick itself finish
+                 // A quarter turn of the stick is a quarter turn of the camera.
+    let traced = a.stick(1, 1.0, 0.0).x;
+    assert!(
+        (traced.abs() - 90.0).abs() < 2.0,
+        "the camera follows the stick round: {traced}"
+    );
+
+    // FLICK_ONLY leaves the tracing out.
+    let mut b = Aiming::new(
+        "RIGHT_STICK_MODE = FLICK_ONLY\nREAL_WORLD_CALIBRATION = 1\nROTATE_SMOOTH_OVERRIDE = 0",
+    );
+    b.stick(1, 0.0, 1.0);
+    b.ticks(30);
+    let traced = b.stick(1, 1.0, 0.0).x;
+    assert!(traced.abs() < 1.0, "FLICK_ONLY doesn't trace: {traced}");
+
+    // ROTATE_ONLY is the other half: it traces without ever flicking.
+    let mut c = Aiming::new(
+        "RIGHT_STICK_MODE = ROTATE_ONLY\nREAL_WORLD_CALIBRATION = 1\nROTATE_SMOOTH_OVERRIDE = 0",
+    );
+    c.stick(1, 0.0, 0.0);
+    let flick = c.stick(1, 0.0, -1.0).x + c.ticks(30).x;
+    assert!(flick.abs() < 1.0, "ROTATE_ONLY doesn't flick: {flick}");
+    assert!(
+        (c.stick(1, 1.0, 0.0).x.abs() - 90.0).abs() < 2.0,
+        "but it does trace"
+    );
+}
+
+// Snapping rounds a flick to the nearest quarter or eighth of a turn.
+#[test]
+fn a_flick_can_snap_to_quarters() {
+    let cfg = "RIGHT_STICK_MODE = FLICK\nREAL_WORLD_CALIBRATION = 1\n\
+        FLICK_SNAP_MODE = 4\nFLICK_SNAP_STRENGTH = 1";
+    let mut a = Aiming::new(cfg);
+    assert_eq!(a.cfg.aim.flick_snap, SnapMode::Four);
+    a.stick(1, 0.0, 0.0);
+    // Pushed nearly-but-not-quite sideways: it snaps to the quarter turn.
+    a.stick(1, 0.95, 0.31);
+    let mut total = 0.0;
+    for _ in 0..40 {
+        total += a.tick().x;
+    }
+    assert!(
+        (total.abs() - 90.0).abs() < 2.0,
+        "snapped to a quarter turn: {total}"
+    );
+
+    // Without snapping it turns through the angle it was actually given.
+    let mut b = Aiming::new("RIGHT_STICK_MODE = FLICK\nREAL_WORLD_CALIBRATION = 1");
+    b.stick(1, 0.0, 0.0);
+    b.stick(1, 0.95, 0.31);
+    let mut total = 0.0;
+    for _ in 0..40 {
+        total += b.tick().x;
+    }
+    assert!(
+        (total.abs() - 72.0).abs() < 2.0,
+        "unsnapped, the angle is its own: {total}"
+    );
+}
+
+// The settings this phase runs are read off the config.
+#[test]
+fn aiming_settings_are_read() {
+    let c = compile(
+        "MIN_GYRO_SENS = 2 3\nGYRO_SMOOTH_TIME = 0.05\nFLICK_TIME = 0.25\n\
+        IN_GAME_SENS = 2\nSTICK_POWER = 1.5\nTRACKBALL_DECAY = 3\nGYRO_SPACE = LOCAL",
+    );
+    assert!(
+        c.lines.iter().all(|l| l.status == LineStatus::Ok),
+        "{:?}",
+        c.lines
+    );
+    assert_eq!(
+        c.aim.min_sens,
+        (2.0, 3.0),
+        "a pair setting takes one number per axis"
+    );
+    assert_eq!(c.aim.smooth_time, 0.05);
+    assert_eq!(c.aim.flick_time, 0.25);
+    assert_eq!(c.aim.in_game_sens, 2.0);
+    assert_eq!(c.aim.stick_power, 1.5);
+    assert_eq!(c.aim.trackball_decay, 3.0);
+
+    // A gyro space measured against gravity is live, and says what it leans on.
+    let space = one("GYRO_SPACE = PLAYER_TURN");
+    assert_eq!(space.status, LineStatus::Ok);
+    assert!(
+        space.notes.iter().any(|n| n.contains("accelerometer")),
+        "it says which sensor it needs: {:?}",
+        space.notes
+    );
+    assert!(
+        matches!(
+            one("REAL_WORLD_CALIBRATION = 0").status,
+            LineStatus::Error(_)
+        ),
+        "a calibration of zero would divide the aim by nothing"
+    );
+}
+
+// ── modeshifts: settings that change while a button is held ──────────────────
+
+// `button,SETTING = value` reads that value while the button is held, and the
+// config's own value again when it isn't.
+#[test]
+fn a_chord_changes_a_setting_while_it_is_held() {
+    let cfg = compile("GYRO_SENS = 1\nZL,GYRO_SENS = 4");
+    assert!(cfg.lines.iter().all(|l| l.status == LineStatus::Ok), "{:?}", cfg.lines);
+    assert_eq!(cfg.modeshifts.len(), 1);
+
+    assert_eq!(resolve(&cfg, &[]).aim.min_sens, (1.0, 1.0), "nothing held: the config's own");
+    assert_eq!(resolve(&cfg, &[Btn::Zl]).aim.min_sens, (4.0, 4.0), "held: the chord's");
+    assert_eq!(resolve(&cfg, &[Btn::R]).aim.min_sens, (1.0, 1.0), "another button changes nothing");
+}
+
+// Two chords over the same setting: the one pressed last wins, and each chord
+// still gets its say over the settings the other doesn't touch.
+#[test]
+fn the_latest_chord_wins_setting_by_setting() {
+    let cfg = compile("GYRO_SENS = 1\nZL,GYRO_SENS = 4\nZR,GYRO_SENS = 9\nZR,IN_GAME_SENS = 2");
+    // The stack is oldest first, as the press machinery keeps it.
+    assert_eq!(resolve(&cfg, &[Btn::Zl, Btn::Zr]).aim.min_sens, (9.0, 9.0), "ZR pressed later");
+    assert_eq!(resolve(&cfg, &[Btn::Zr, Btn::Zl]).aim.min_sens, (4.0, 4.0), "ZL pressed later");
+
+    // IN_GAME_SENS is only ZR's, so it applies whichever went down last.
+    let both = resolve(&cfg, &[Btn::Zr, Btn::Zl]);
+    assert_eq!(both.aim.in_game_sens, 2.0, "a setting only one chord touches still applies");
+}
+
+// A modeshift is checked when the config is compiled, so a bad value is an error
+// on its own line rather than a surprise when the button is pressed.
+#[test]
+fn a_modeshift_with_a_bad_value_is_an_error() {
+    let info = one("ZL,GYRO_SENS = lots");
+    assert!(matches!(info.status, LineStatus::Error(ref e) if e.contains("number")), "{info:?}");
+    assert!(compile("ZL,GYRO_SENS = lots").modeshifts.is_empty(), "and it doesn't run");
+
+    // Only a chord can carry a setting; the other combo operators can't.
+    let info = one("ZL+GYRO_SENS = 2");
+    assert!(matches!(info.status, LineStatus::Error(ref e) if e.contains("chord")), "{info:?}");
+}
+
+// Timings shift too, and the press machinery feels it: a shorter hold time while
+// the chord is held means the hold binding fires sooner.
+#[test]
+fn a_chord_can_shorten_the_hold_time() {
+    let mut r = Rig::new("W = R E\nZL,HOLD_PRESS_TIME = 30");
+    r.set(Btn::W, true);
+    // The default 150 ms hold hasn't arrived yet at 50 ms.
+    assert!(!r.ticks(5).contains("key_e"), "the base hold time still applies");
+    r.set(Btn::W, false);
+    r.ticks(2);
+
+    r.set(Btn::Zl, true);
+    r.ticks(2); // the chord stack is read as the last tick left it
+    r.set(Btn::W, true);
+    assert!(r.ticks(5).contains("key_e"), "held, the chord's 30 ms hold fires sooner");
+}
+
+// The stick-recentre rule: when a chord that changed a stick's mode is released
+// while the stick is still pushed, the stick does nothing at all until it comes
+// back to centre — otherwise the mode underneath would be handed a stick already
+// out at full.
+#[test]
+fn a_stick_waits_for_centre_after_its_modeshift_ends() {
+    let _guard = alone();
+    let uid = 7101;
+    let cfg = "LUP = W\nZL,LEFT_STICK_MODE = AIM\nSTICK_SENS = 100";
+    let snap = jsm_snap(uid, cfg, false);
+    let key = format!("collector:{uid}");
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let up = Signal::Vec2(glam::Vec2::new(0.0, 1.0));
+
+    let mut run = |chord: bool, stick: bool| -> PinSigs {
+        let mut dev: BusMap = BusMap::default();
+        if chord {
+            dev.insert((PAD.to_string(), "left_trigger".to_string()), Signal::Float(1.0));
+        }
+        dev.insert(
+            (PAD.to_string(), "left_stick".to_string()),
+            if stick { up } else { Signal::Vec2(glam::Vec2::ZERO) },
+        );
+        let mut collector: BusMap = BusMap::default();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+        collector.into_iter()
+            .filter(|((d, _), _)| *d == key)
+            .map(|((_, p), s)| (p, s))
+            .collect()
+    };
+
+    // Base mode: the stick's directions drive their key.
+    let bus = run(false, true);
+    assert!(on(&bus, "key_w"), "the base mode reads directions");
+
+    // Hold ZL: the stick aims instead, so the direction stops.
+    run(true, true);
+    let bus = run(true, true);
+    assert!(!on(&bus, "key_w"), "while the chord is held the stick aims: {bus:?}");
+
+    // Let go of ZL with the stick still pushed: neither mode acts.
+    let bus = run(false, true);
+    assert!(!on(&bus, "key_w"), "still pushed, the stick waits for centre");
+    let bus = run(false, true);
+    assert!(!on(&bus, "key_w"), "and keeps waiting");
+
+    // Back to centre, then pushed again: the base mode is back.
+    run(false, false);
+    let bus = run(false, true);
+    assert!(on(&bus, "key_w"), "once recentred the base mode reads it again: {bus:?}");
+}
+
+// A flick that hasn't finished paying out isn't cut off by a modeshift: the stick
+// stays in flick mode (JSM drops it to FLICK_ONLY) until the turn is done.
+#[test]
+fn a_modeshift_cannot_cut_a_flick_off_mid_turn() {
+    let mut a = Aiming::new("RIGHT_STICK_MODE = FLICK\nREAL_WORLD_CALIBRATION = 1\nFLICK_TIME = 0.2");
+    a.stick(1, 0.0, 0.0);
+    a.stick(1, 0.0, -1.0);
+    assert!(a.a.flick_unfinished(1), "the flick is still paying out");
+    // Once it has run its course it lets go again.
+    a.ticks(40);
+    assert!(!a.a.flick_unfinished(1), "and stops holding the mode when it is done");
+
+    // A stick that never flicked never claims the mode — JSM's own check reads
+    // "percent done < 1", which is true before any flick at all.
+    let mut b = Aiming::new("RIGHT_STICK_MODE = AIM\nSTICK_SENS = 100");
+    b.stick(1, 0.0, 0.0);
+    assert!(!b.a.flick_unfinished(1), "an untouched stick isn't mid-flick");
+}
+
+// ── the node on the bus ──────────────────────────────────────────────────────
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use flexinput_core::Signal;
+
+use crate::graph::NodeSnap;
+use crate::state::NodeState;
+
+const PAD: &str = "gilrs:xinput:0";
+
+/// Editor focus is process-wide (the UI sets it for whichever editor has the
+/// keyboard), and while it is on the config's key and mouse output pauses. So any
+/// test that runs a node has to hold this, or a focus test running beside it makes
+/// every key read as released — an intermittent failure that looks like a bug in
+/// whatever the test was actually about.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+/// Take the lock *and* put editor focus back to off. Every helper that runs a node
+/// goes through this, so a new test cannot forget it: the lock is held for the call
+/// and dropped after, which is enough because nothing here nests.
+fn alone() -> Alone {
+    // Taking it twice on one thread would deadlock on a std mutex, and a deadlock is
+    // the worst failure to debug: no message, no backtrace, just a test that never
+    // ends. Say what went wrong instead. (This cost an hour once — the `*_unlocked`
+    // helpers exist for callers that already hold it.)
+    assert!(
+        !HELD.with(|h| h.get()),
+        "this thread already holds the test lock — use the `run_*_unlocked` form inside          a test that took `alone()` itself"
+    );
+    let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    HELD.with(|h| h.set(true));
+    crate::eval::set_jsm_editor_focus(false);
+    Alone(guard)
+}
+
+thread_local! {
+    static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The lock, plus the flag that makes a second take on the same thread say so.
+struct Alone(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+impl Drop for Alone {
+    fn drop(&mut self) {
+        HELD.with(|h| h.set(false));
+    }
+}
+
+fn jsm_snap(uid: usize, text: &str, strict: bool) -> NodeSnap {
+    let mut params = HashMap::new();
+    params.insert("_automap_device_id".to_string(), serde_json::json!(PAD));
+    params.insert(
+        "jsm_tabs".to_string(),
+        serde_json::json!([{ "name": "main", "text": text }]),
+    );
+    params.insert("jsm_strict".to_string(), serde_json::json!(strict));
+    NodeSnap {
+        node_uid: uid,
+        module_id: "module.jsm".to_string(),
+        params,
+        n_outputs: 1,
+        input_sources: vec![None],
+        device_id: None,
+        output_pin_ids: Vec::new(),
+        aux_f32_override: None,
+        sink_target: None,
+        inline_subgraph: None,
+    }
+}
+
+/// Run the node for `ticks` with the given pad pins held, and return what it
+/// published on its own bus.
+fn run_node(text: &str, strict: bool, held: &[&str], ticks: usize) -> PinSigs {
+    let sigs: Vec<(&str, Signal)> = held.iter().map(|p| (*p, Signal::Bool(true))).collect();
+    run_node_with(text, strict, &sigs, ticks)
+}
+
+/// The same, with the pad reporting whatever these signals say.
+/// A `@` binding reaches a Macro Output port, and by the route the other mapping
+/// modules use — the reserved macro namespace, NOT the AutoMap bus.
+///
+/// This is the half that can't be seen from the parser: a macro pin published
+/// onto the bus would leak to sinks, and one published every tick would claim
+/// the port whether or not anything here binds it.
+#[test]
+fn an_at_binding_drives_a_macro_port_through_the_macro_namespace() {
+    let _guard = alone();
+    let uid = 909;
+    let mut snap = jsm_snap(uid, "S = @Reload", false);
+    snap.params.insert(
+        "_macro_ports".to_string(),
+        serde_json::json!([{ "name": "Reload", "pin": "macro:aa11bb22" }]),
+    );
+    let key = format!("collector:{uid}");
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+
+    // Nothing held: the port is not written at all. Absent IS released for a
+    // macro target, and writing "off" every tick would fight every other writer.
+    let mut collector: BusMap = BusMap::default();
+    super::eval::jsm_publish(&snap, uid, &BusMap::default(), &mut collector, &mut state, 0.010);
+    assert!(
+        !collector.contains_key(&("macro".to_string(), "macro:aa11bb22".to_string())),
+        "an idle port must not be claimed: {collector:?}"
+    );
+
+    // Held: the port is asserted in the macro namespace.
+    let mut dev: BusMap = BusMap::default();
+    dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+    let mut collector: BusMap = BusMap::default();
+    super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+    assert_eq!(
+        collector
+            .get(&("macro".to_string(), "macro:aa11bb22".to_string()))
+            .map(|s| s.as_bool()),
+        Some(true),
+        "the port should be asserted: {collector:?}"
+    );
+    // And it never appears on the bus, where a sink would see it.
+    assert!(
+        !collector.keys().any(|(d, p)| *d == key && p.starts_with("macro:")),
+        "a macro pin leaked onto the bus: {collector:?}"
+    );
+}
+
+/// A tap/hold binding behind AutoMap curves — one, or two in series — taps and
+/// holds as it does straight off the pad.
+#[test]
+fn a_hold_works_behind_automap_curves() {
+    use crate::eval::{eval_automap_curve_node, AUTOMAP_CURVE_ID, AUTOMAP_CURVE_PIN_PARAM};
+    let _guard = alone();
+    let curve = |uid: usize, pin: &str, dev: &str, from: Option<&str>| {
+        let mut n = jsm_snap(uid, "", false);
+        n.module_id = AUTOMAP_CURVE_ID.to_string();
+        n.params.clear();
+        n.params.insert("_automap_device_id".into(), serde_json::json!(dev));
+        if let Some(c) = from {
+            n.params.insert("_automap_collector_id".into(), serde_json::json!(c));
+        }
+        n.params.insert(AUTOMAP_CURVE_PIN_PARAM.into(), serde_json::json!(pin));
+        n.params.insert("points".into(), serde_json::json!([[0.0, 0.0], [1.0, 0.5]]));
+        n.params.insert("biases".into(), serde_json::json!([0.0]));
+        n
+    };
+    // (curves, the JSM node's device, its collector), as the graph wires them.
+    let chains: Vec<(Vec<NodeSnap>, &str, &str)> = vec![
+        (vec![curve(31, "left_stick", PAD, None)], PAD, "collector:31"),
+        (
+            vec![
+                curve(31, "left_stick", PAD, None),
+                curve(32, "gyro", PAD, Some("collector:31")),
+            ],
+            // What the graph builder gave it until now: the FIRST curve's key
+            // as its "device", one hop short of the pad.
+            "collector:31",
+            "collector:32",
+        ),
+    ];
+    for (curves, dev_id, from) in chains {
+        let mut jsm = jsm_snap(4243, "W = R E\nS = SPACE", false);
+        jsm.params.insert("_automap_device_id".into(), serde_json::json!(dev_id));
+        jsm.params.insert("_automap_collector_id".into(), serde_json::json!(from));
+        let mut state: HashMap<usize, NodeState> = HashMap::new();
+        let mut run = |held: &[&str], ticks: usize| {
+            let mut dev: BusMap = BusMap::default();
+            for p in ["btn_west", "btn_south"] {
+                dev.insert((PAD.to_string(), p.to_string()), Signal::Bool(held.contains(&p)));
+            }
+            dev.insert((PAD.to_string(), "left_stick".to_string()), Signal::Vec2(glam::Vec2::ZERO));
+            dev.insert((PAD.to_string(), "gyro_z".to_string()), Signal::Float(0.0));
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..ticks {
+                let mut col: BusMap = BusMap::default();
+                for c in &curves {
+                    eval_automap_curve_node(c, c.node_uid, &dev, &mut col, &mut state, 0.010);
+                }
+                super::eval::jsm_publish(&jsm, 4243, &dev, &mut col, &mut state, 0.010);
+                for ((d, p), s) in col.iter() {
+                    if d == "collector:4243" && s.as_bool() {
+                        seen.insert(p.to_string());
+                    }
+                }
+            }
+            seen
+        };
+        let n = curves.len();
+        assert!(run(&["btn_south"], 3).contains("key_space"), "{n} curve(s): a plain press");
+        run(&[], 5);
+        let held = run(&["btn_west"], 25);
+        assert!(held.contains("key_e"), "{n} curve(s): the hold fires: {held:?}");
+        assert!(!held.contains("key_r"), "{n} curve(s): a held press never taps");
+        run(&[], 5);
+        run(&["btn_west"], 3);
+        assert!(run(&[], 5).contains("key_r"), "{n} curve(s): a tap fires on release");
+    }
+}
+
+/// The Tune panel's graph marks the speed the node's own curve reads: the gyro
+/// as the node receives it — reshaped upstream, here halved by a curve on the
+/// bus — not the pad's raw rate. And nothing while the gyro is off.
+#[test]
+fn the_curve_mark_follows_the_gyro_the_node_receives() {
+    let _guard = alone();
+    let uid = 911;
+    let speed = |text: &str| {
+        let mut snap = jsm_snap(uid, text, false);
+        snap.params.insert("_automap_collector_id".to_string(), serde_json::json!("collector:77"));
+        let mut dev: BusMap = BusMap::default();
+        dev.insert((PAD.to_string(), "gyro_z".to_string()), Signal::Float(0.1));
+        let mut collector: BusMap = BusMap::default();
+        collector.insert(("collector:77".to_string(), "gyro_z".to_string()), Signal::Float(0.05));
+        let mut state: HashMap<usize, NodeState> = HashMap::new();
+        let mut v = 0.0;
+        for _ in 0..50 {
+            let mut c = collector.clone();
+            let out = super::eval::jsm_publish(&snap, uid, &dev, &mut c, &mut state, 0.010);
+            v = match out.get(super::eval::curve_dps_out(snap.n_outputs)).copied().flatten() {
+                Some(Signal::Float(f)) => f,
+                other => panic!("no curve speed published: {other:?}"),
+            };
+        }
+        v
+    };
+    // 0.05 of the bus's 2000°/s reference: the curve's half, not the pad's 200.
+    let on = speed("GYRO_SENS = 1");
+    assert!((on - 100.0).abs() < 1.0, "reads the curved gyro: {on}");
+    let off = speed("GYRO_SENS = 1\nGYRO_ON = R");
+    assert_eq!(off, 0.0, "the gyro is off until R is held");
+}
+
+/// The macro an `@Name` waits for is made a frame after the name is typed, and
+/// the text doesn't change again: the config has to pick it up regardless.
+#[test]
+fn a_macro_made_after_the_text_is_picked_up_without_another_edit() {
+    let _guard = alone();
+    let uid = 910;
+    let mut snap = jsm_snap(uid, "S = @Reload", false);
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut dev: BusMap = BusMap::default();
+    dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+    let pressed = |snap: &NodeSnap, state: &mut HashMap<usize, NodeState>| {
+        let mut collector: BusMap = BusMap::default();
+        super::eval::jsm_publish(snap, uid, &dev, &mut collector, state, 0.010);
+        collector.get(&("macro".to_string(), "macro:aa11bb22".to_string())).map(|s| s.as_bool())
+    };
+    assert_eq!(pressed(&snap, &mut state), None, "no macro yet");
+    snap.params.insert(
+        "_macro_ports".to_string(),
+        serde_json::json!([{ "name": "Reload", "pin": "macro:aa11bb22" }]),
+    );
+    // A tick to compile, released, then pressed again.
+    pressed(&snap, &mut state);
+    assert_eq!(pressed(&snap, &mut state), Some(true), "bound once the macro exists");
+}
+
+/// Without the patch's table the name can't resolve, and the line says so rather
+/// than the binding quietly doing nothing.
+#[test]
+fn an_at_binding_with_no_table_is_an_error_rather_than_a_silent_no_op() {
+    let c = compile("S = @Reload");
+    // Waiting for its macro, which is said on the line, not a silent no-op.
+    assert!(
+        matches!(c.lines[0].status, LineStatus::Waiting(_)),
+        "{:?}",
+        c.lines[0].status
+    );
+    assert!(c.bindings.is_empty(), "an unresolved line binds nothing");
+}
+
+fn run_node_with(
+    text: &str,
+    strict: bool,
+    sigs: &[(&str, Signal)],
+    ticks: usize,
+) -> PinSigs {
+    let _guard = alone();
+    run_node_unlocked_with(text, strict, sigs, ticks)
+}
+
+/// The same, for a caller that already holds [`alone`] — the one test that wants
+/// editor focus left ON has to, since `alone` clears it.
+fn run_node_unlocked(
+    text: &str,
+    strict: bool,
+    held: &[&str],
+    ticks: usize,
+) -> PinSigs {
+    let sigs: Vec<(&str, Signal)> = held.iter().map(|p| (*p, Signal::Bool(true))).collect();
+    run_node_unlocked_with(text, strict, &sigs, ticks)
+}
+
+fn run_node_unlocked_with(
+    text: &str,
+    strict: bool,
+    sigs: &[(&str, Signal)],
+    ticks: usize,
+) -> PinSigs {
+    let uid = 4242;
+    let snap = jsm_snap(uid, text, strict);
+    let mut dev: BusMap = BusMap::default();
+    for (pin, sig) in sigs {
+        dev.insert((PAD.to_string(), pin.to_string()), *sig);
+    }
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    for _ in 0..ticks {
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+    }
+    let key = format!("collector:{uid}");
+    collector
+        .into_iter()
+        .filter(|((d, _), _)| *d == key)
+        .map(|((_, p), s)| (p, s))
+        .collect()
+}
+
+fn on(bus: &PinSigs, pin: &str) -> bool {
+    bus.get(pin).map(|s| s.as_bool()).unwrap_or(false)
+}
+
+/// Run the node over a sequence of pad frames — for what only movement can show
+/// — and return every pin it drove along the way.
+fn run_frames(
+    text: &str,
+    strict: bool,
+    frames: &[Vec<(&str, Signal)>],
+) -> std::collections::HashSet<String> {
+    let _guard = alone();
+    let uid = 4242;
+    let snap = jsm_snap(uid, text, strict);
+    let key = format!("collector:{uid}");
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut drove = std::collections::HashSet::new();
+    for frame in frames {
+        let mut dev: BusMap = BusMap::default();
+        for (pin, sig) in frame {
+            dev.insert((PAD.to_string(), pin.to_string()), *sig);
+        }
+        let mut collector: BusMap = BusMap::default();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+        for ((d, pin), sig) in collector {
+            if d == key && sig.as_bool() {
+                drove.insert(pin);
+            }
+        }
+    }
+    drove
+}
+
+// Pass-through mode: the config's key comes out, the button it used is taken
+// over, and a button it never mentions carries on to the game.
+#[test]
+fn a_bound_button_is_taken_over_and_the_rest_passes_through() {
+    let bus = run_node("S = SPACE", false, &["btn_south", "btn_north"], 2);
+    assert!(on(&bus, "key_space"), "the config drives its key");
+    assert!(!on(&bus, "btn_south"), "the button it bound is taken over");
+    assert!(
+        on(&bus, "btn_north"),
+        "a button it never mentions passes through"
+    );
+    // Downstream Combiners learn which pins this module consumed.
+    assert!(
+        bus.keys()
+            .any(|p| p.starts_with("__consumed__") && p.contains("btn_south")),
+        "the claimed pin is marked consumed: {:?}",
+        bus.keys().collect::<Vec<_>>()
+    );
+}
+
+// A stick direction reaches the keyboard through the bus, and the stick it came
+// from belongs to the config from then on.
+#[test]
+fn a_stick_direction_drives_its_key_and_claims_the_stick() {
+    let up = Signal::Vec2(glam::Vec2::new(0.0, 1.0));
+    let stick = |bus: &PinSigs| match bus.get("left_stick") {
+        Some(Signal::Vec2(v)) => *v,
+        other => panic!("the left stick should be a vector: {other:?}"),
+    };
+    let bus = run_node_with("LUP = W", false, &[("left_stick", up)], 2);
+    assert!(on(&bus, "key_w"), "the direction drives its key");
+    assert_eq!(
+        stick(&bus),
+        glam::Vec2::ZERO,
+        "and the stick itself is taken over"
+    );
+    assert_eq!(bus.get("left_stick_y").map(|s| s.as_float()), Some(0.0));
+
+    // A stick this config never reads as directions is left alone instead.
+    let bus = run_node_with("S = SPACE", false, &[("left_stick", up)], 2);
+    assert_eq!(
+        stick(&bus),
+        glam::Vec2::new(0.0, 1.0),
+        "an untouched stick passes straight through"
+    );
+
+    // And so is one whose mode a later phase owns: taking it over would silence
+    // the stick for a binding that can't run yet.
+    let bus = run_node_with(
+        "LEFT_STICK_MODE = MOUSE_RING\nLUP = W",
+        false,
+        &[("left_stick", up)],
+        2,
+    );
+    assert_eq!(
+        stick(&bus),
+        glam::Vec2::new(0.0, 1.0),
+        "a stick in a mode we don't run keeps passing through"
+    );
+    assert!(!on(&bus, "key_w"));
+}
+
+// The axes on their own are enough: a pad that publishes x and y but no vector
+// still drives the directions.
+#[test]
+fn stick_axes_work_without_the_vector() {
+    let bus = run_node_with(
+        "LRIGHT = D",
+        false,
+        &[("left_stick_x", Signal::Float(1.0))],
+        2,
+    );
+    assert!(on(&bus, "key_d"));
+}
+
+// The full pull is its own binding once the mode allows it, and it takes the
+// analog trigger over rather than passing it on half-pressed.
+#[test]
+fn a_full_pull_binding_runs_on_the_bus() {
+    let cfg = "ZR_MODE = NO_SKIP\nZR = LMOUSE\nZRF = RMOUSE";
+    let bus = run_node_with(cfg, false, &[("right_trigger", Signal::Float(0.5))], 2);
+    assert!(on(&bus, "mouse_left"), "the soft pull holds its key");
+    assert!(!on(&bus, "mouse_right"));
+
+    let bus = run_node_with(cfg, false, &[("right_trigger", Signal::Float(1.0))], 3);
+    assert!(
+        on(&bus, "mouse_left") && on(&bus, "mouse_right"),
+        "NO_SKIP keeps both: {bus:?}"
+    );
+    assert_eq!(
+        bus.get("right_trigger").map(|s| s.as_float()),
+        Some(0.0),
+        "the trigger is the config's now"
+    );
+
+    // Without a mode, the full pull can't fire — so the trigger isn't taken over
+    // on its account either.
+    let bus = run_node_with(
+        "ZRF = RMOUSE",
+        false,
+        &[("right_trigger", Signal::Float(1.0))],
+        2,
+    );
+    assert!(!on(&bus, "mouse_right"));
+    assert_eq!(
+        bus.get("right_trigger").map(|s| s.as_float()),
+        Some(1.0),
+        "a trigger nothing live reads keeps passing through"
+    );
+}
+
+// Aiming reaches the bus as a mouse displacement, and a config that aims with
+// the gyro takes the gyro over so it can't also drive a node downstream.
+#[test]
+fn gyro_aiming_reaches_the_bus_as_mouse_movement() {
+    // Half of the bus's full scale is 1000 deg/s of yaw.
+    let turn = [("gyro_z", Signal::Float(0.5))];
+    let bus = run_node_with("GYRO_SENS = 1\nREAL_WORLD_CALIBRATION = 1", false, &turn, 2);
+    match bus.get("mouse_move") {
+        Some(Signal::Vec2(v)) => assert!(v.x > 0.0, "turning right aims right: {v:?}"),
+        other => panic!("the gyro should move the mouse: {other:?}"),
+    }
+    assert_eq!(
+        bus.get("gyro_z").map(|s| s.as_float()),
+        Some(0.0),
+        "and the gyro belongs to the config now"
+    );
+
+    // At JSM's default sensitivity of zero, nothing aims and the gyro passes on.
+    let bus = run_node_with("S = SPACE", false, &turn, 2);
+    assert!(
+        bus.get("mouse_move").is_none(),
+        "no sensitivity, no movement"
+    );
+    assert_eq!(
+        bus.get("gyro_z").map(|s| s.as_float()),
+        Some(0.5),
+        "a gyro nothing reads keeps passing through"
+    );
+
+    // A stick set to aim is the config's too, even with no binding on it.
+    let push = [("right_stick", Signal::Vec2(glam::Vec2::new(1.0, 0.0)))];
+    let bus = run_node_with("RIGHT_STICK_MODE = AIM\nSTICK_SENS = 100", false, &push, 2);
+    match bus.get("mouse_move") {
+        Some(Signal::Vec2(v)) => assert!(v.x > 0.0, "the stick aims: {v:?}"),
+        other => panic!("the stick should move the mouse: {other:?}"),
+    }
+    match bus.get("right_stick") {
+        Some(Signal::Vec2(v)) => assert_eq!(*v, glam::Vec2::ZERO, "and is taken over"),
+        other => panic!("the stick should still be on the bus: {other:?}"),
+    }
+}
+
+
+// The bug that made a bound key stick down for ever: a sink latches what it was
+// last told, so a pin the config can drive has to be answered for on EVERY tick,
+// not only on the one where it happens to be released.
+#[test]
+fn a_released_key_stays_released() {
+    let _guard = alone();
+    let uid = 7001;
+    let snap = jsm_snap(uid, "L = E", false);
+    let key = format!("collector:{uid}");
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut seen = Vec::new();
+    for pressed in [true, true, true, false, false, false] {
+        let mut dev: BusMap = BusMap::default();
+        if pressed {
+            dev.insert((PAD.to_string(), "btn_lb".to_string()), Signal::Bool(true));
+        }
+        let mut collector: BusMap = BusMap::default();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+        seen.push(collector.get(&(key.clone(), "key_e".to_string())).map(|s| s.as_bool()));
+    }
+    assert_eq!(seen, vec![Some(true), Some(true), Some(true),
+                          Some(false), Some(false), Some(false)],
+        "the key must be held while the button is, and released for good after");
+}
+
+// The same trap for aiming: `mouse_move` is a one-shot displacement, so a sink
+// left holding the last one would nudge the cursor for ever.
+#[test]
+fn a_still_pad_publishes_no_more_movement() {
+    let cfg = "GYRO_SENS = 1
+REAL_WORLD_CALIBRATION = 1";
+    let turning = [("gyro_z", Signal::Float(0.5))];
+    let bus = run_node_with(cfg, false, &turning, 2);
+    match bus.get("mouse_move") {
+        Some(Signal::Vec2(v)) => assert!(v.x > 0.0, "turning moves the mouse: {v:?}"),
+        other => panic!("expected movement: {other:?}"),
+    }
+    let bus = run_node_with(cfg, false, &[("gyro_z", Signal::Float(0.0))], 2);
+    match bus.get("mouse_move") {
+        Some(Signal::Vec2(v)) => assert_eq!(*v, glam::Vec2::ZERO, "a still pad says so"),
+        other => panic!("a config that aims must answer every tick: {other:?}"),
+    }
+}
+
+// A binding onto the virtual pad's D-pad has to drive all three forms the D-pad
+// reaches a sink in. Driving only the direction Bool left the zeroed `dpad` Vec2
+// to land after it and cancel it, so the binding did nothing at the pad.
+#[test]
+fn a_dpad_binding_drives_the_axis_and_vector_too() {
+    let bus = run_node("S = X_UP", false, &["btn_south"], 2);
+    assert!(on(&bus, "dpad_up"), "the direction itself");
+    assert_eq!(bus.get("dpad_y").map(|s| s.as_float()), Some(1.0), "the axis form");
+    match bus.get("dpad") {
+        Some(Signal::Vec2(v)) => assert_eq!(*v, glam::Vec2::new(0.0, 1.0), "and the vector form"),
+        other => panic!("the D-pad vector should be published: {other:?}"),
+    }
+
+    // Let go and all three forms say so.
+    let bus = run_node("S = X_UP", false, &[], 2);
+    assert!(!on(&bus, "dpad_up"));
+    assert_eq!(bus.get("dpad_y").map(|s| s.as_float()), Some(0.0));
+
+    // A direction the config never touches keeps whatever the pad is doing.
+    let bus = run_node_with(
+        "S = X_UP",
+        false,
+        &[("btn_south", Signal::Bool(true)), ("dpad_left", Signal::Bool(true))],
+        2,
+    );
+    match bus.get("dpad") {
+        Some(Signal::Vec2(v)) => assert_eq!(*v, glam::Vec2::new(-1.0, 1.0),
+            "the pad's own direction survives alongside the config's"),
+        other => panic!("{other:?}"),
+    }
+}
+
+// Strict mode: nothing but the config's own output leaves the module.
+#[test]
+fn strict_mode_publishes_only_what_the_config_says() {
+    let bus = run_node("S = SPACE", true, &["btn_south", "btn_north"], 2);
+    assert!(on(&bus, "key_space"));
+    assert!(
+        !on(&bus, "btn_north"),
+        "strict mode holds back the rest of the pad"
+    );
+}
+
+// A config can drive a virtual pad rather than the keyboard, and an analog
+// destination goes to full.
+#[test]
+fn a_pad_binding_drives_the_pad_pin() {
+    let bus = run_node("S = X_LT", false, &["btn_south"], 2);
+    assert_eq!(bus.get("left_trigger").map(|s| s.as_float()), Some(1.0));
+}
+
+// While an editor has keyboard focus, keys pause but pad output carries on —
+// otherwise a binding under test types into the config you are writing.
+#[test]
+fn keys_pause_while_an_editor_has_focus() {
+    // The only test that wants focus ON, so it drives the node itself: `run_node`
+    // clears the flag on the way in, which is what stops every other test from
+    // inheriting it.
+    let _guard = alone();
+    crate::eval::set_jsm_editor_focus(true);
+    let bus = run_node_unlocked("S = SPACE\nE = X_A", false, &["btn_south", "btn_east"], 2);
+    crate::eval::set_jsm_editor_focus(false);
+    assert!(
+        !on(&bus, "key_space"),
+        "keys pause while typing in the editor"
+    );
+    assert!(
+        on(&bus, "btn_south"),
+        "pad output carries on, so the mapping is still felt"
+    );
+
+    // Still holding the lock, so the unlocked form again — `run_node` would try to
+    // take it a second time, and a std mutex is not reentrant.
+    let bus = run_node_unlocked("S = SPACE", false, &["btn_south"], 2);
+    assert!(
+        on(&bus, "key_space"),
+        "and keys resume once the editor loses focus"
+    );
+}
+
+
+// An analog trigger counts as a press without a digital trigger pin, which is
+// how JSM reads ZL/ZR by default.
+#[test]
+fn an_analog_trigger_presses_its_button() {
+    let _guard = alone();
+    let uid = 4243;
+    let snap = jsm_snap(uid, "ZR = LMOUSE", false);
+    let mut dev: BusMap = BusMap::default();
+    dev.insert(
+        (PAD.to_string(), "right_trigger".to_string()),
+        Signal::Float(0.6),
+    );
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    for _ in 0..2 {
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+    }
+    let key = format!("collector:{uid}");
+    assert_eq!(
+        collector
+            .get(&(key.clone(), "mouse_left".to_string()))
+            .map(|s| s.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        collector
+            .get(&(key, "right_trigger".to_string()))
+            .map(|s| s.as_float()),
+        Some(0.0),
+        "and the trigger itself is taken over"
+    );
+}
+
+// ── whole configs from JoyShockMapper's own GyroConfigs folder ───────────────
+//
+// The phase-1 acceptance case: a button-only config loads and plays, and every
+// line it carries that later phases will run says so instead of erroring.
+
+/// JSM's `GyroConfigs/xbox.txt`, verbatim (JoyShockMapper, MIT).
+const XBOX_CONFIG: &str = "\
+# This configuration file will map a virtual xbox controller for each connected controller.
+# There is a separate configuration file if you want to use joycons sideways as a xbox controller
+
+VIRTUAL_CONTROLLER = XBOX
+
+UP = X_UP
+DOWN = X_DOWN
+LEFT = X_LEFT
+RIGHT = X_RIGHT
+L = X_LB
+R = X_RB
+W = X_X
+S = X_A
+N = X_Y
+E = X_B
+L3 = X_LS
+R3 = X_RS
+- = X_BACK
++ = X_START
+HOME = X_GUIDE
+ZL_MODE = X_LT
+ZR_MODE = X_RT
+LEFT_STICK_MODE = LEFT_STICK
+RIGHT_STICK_MODE = RIGHT_STICK";
+
+/// The keyboard-and-mouse half of JSM's `GyroConfigs/Desktop.txt` (MIT).
+const DESKTOP_CONFIG: &str = "\
+# Windows interaction using gyro
+# Clear previous settings
+RESET_MAPPINGS
+
+# Calibration
+REAL_WORLD_CALIBRATION = 5.3333
+IN_GAME_SENS = 1
+COUNTER_OS_MOUSE_SPEED
+
+# DPAD is arrows
+LEFT = LEFT
+RIGHT = RIGHT
+UP = UP
+DOWN = DOWN
+
+# Mouse Buttons and wheel
+R = FMOUSE
+L = BMOUSE
+ZR = LMOUSE LMOUSE
+ZL = RMOUSE RMOUSE
+L3 = MMOUSE
+LEFT_STICK_MODE = SCROLL_WHEEL
+LLEFT = SCROLLUP
+LRIGHT = SCROLLDOWN
+SCROLL_SENS = 60
+
+# Button pad is common buttons
+S = ENTER
+W = SPACE
+N = BACKSPACE";
+
+fn errors(cfg: &Compiled) -> Vec<String> {
+    cfg.lines
+        .iter()
+        .enumerate()
+        .filter_map(|(i, l)| match &l.status {
+            LineStatus::Error(e) => Some(format!("line {}: {e}", i + 1)),
+            _ => None,
+        })
+        .collect()
+}
+
+// A real config compiles with nothing unexplained, its button bindings are live,
+// and the settings later phases own are pending rather than broken.
+#[test]
+fn jsms_own_xbox_config_loads_and_maps_its_buttons() {
+    let cfg = compile(XBOX_CONFIG);
+    assert!(
+        errors(&cfg).is_empty(),
+        "config should carry no errors: {:?}",
+        errors(&cfg)
+    );
+    // Fifteen button lines, all live.
+    assert_eq!(cfg.bindings.len(), 15, "every button line binds");
+    // The virtual controller is FlexInput's own wiring. Everything else in it —
+    // both triggers passed through to the pad, both sticks driving the pad's own
+    // — runs as of phase 5, so JSM's shipped Xbox config is now live end to end.
+    let ignored = cfg
+        .lines
+        .iter()
+        .filter(|l| matches!(l.status, LineStatus::Ignored(_)))
+        .count();
+    let pending: Vec<_> = cfg
+        .lines
+        .iter()
+        .filter(|l| matches!(l.status, LineStatus::Pending(_)))
+        .collect();
+    assert_eq!(ignored, 1, "VIRTUAL_CONTROLLER is ours to wire");
+    assert!(
+        pending.is_empty(),
+        "nothing in JSM's own Xbox config is still waiting: {pending:?}"
+    );
+
+    // And it plays: pressing a face button drives the pad pin it was mapped to.
+    let mut r = Rig::new(XBOX_CONFIG);
+    r.set(Btn::S, true);
+    assert!(r.tick().contains("btn_south"));
+    r.set(Btn::Minus, true);
+    assert!(
+        r.tick().contains("btn_back"),
+        "`-` is a button name, not a modifier"
+    );
+}
+
+// The desktop config's keyboard and mouse bindings play, including its tap/hold
+// pairs and the arrow keys (whose names collide with button names).
+#[test]
+fn jsms_own_desktop_config_plays_its_keys_and_mouse() {
+    let cfg = compile(DESKTOP_CONFIG);
+    assert!(
+        errors(&cfg).is_empty(),
+        "config should carry no errors: {:?}",
+        errors(&cfg)
+    );
+
+    let mut r = Rig::new(DESKTOP_CONFIG);
+    r.set(Btn::S, true);
+    assert!(r.tick().contains("key_enter"), "S = ENTER");
+    r.set(Btn::Left, true);
+    assert!(
+        r.tick().contains("key_arrowleft"),
+        "LEFT = LEFT is the arrow key on the output side"
+    );
+    r.set(Btn::R, true);
+    assert!(r.tick().contains("mouse_forward"), "R = FMOUSE");
+
+    // ZR = LMOUSE LMOUSE — tap and hold both click, so holding clicks and holds.
+    r.set(Btn::Zr, true);
+    assert!(
+        r.ticks(20).contains("mouse_left"),
+        "holding ZR holds the left button"
+    );
+
+    // And its scroll wheel turns, all the way from a stick on the bus to a
+    // wheel notch: SCROLL_SENS = 60, so a quarter turn is more than one notch.
+    let turn = |x: f32, y: f32| vec![("left_stick", Signal::Vec2(glam::Vec2::new(x, y)))];
+    let drove = run_frames(DESKTOP_CONFIG, false, &[turn(1.0, 0.0), turn(0.0, 1.0)]);
+    assert!(
+        drove.contains("scroll_up"),
+        "turning the stick scrolls: {drove:?}"
+    );
+    let drove = run_frames(DESKTOP_CONFIG, false, &[turn(0.0, 1.0), turn(1.0, 0.0)]);
+    assert!(
+        drove.contains("scroll_down"),
+        "and the other way scrolls back: {drove:?}"
+    );
+}
+
+// ── phase 5: virtual pad output ──────────────────────────────────────────────
+
+/// A stick told to be a virtual stick drives that stick, and a push out reads as
+/// a push out — the whole round trip through camera degrees per second and back.
+#[test]
+fn a_stick_can_be_the_virtual_pads_stick() {
+    let mut a = Aiming::new("LEFT_STICK_MODE = LEFT_STICK");
+    // Two ticks: JSM reads the previous tick's direction, so the first push has
+    // nothing to point at yet.
+    a.pad.sticks[0] = (1.0, 0.0);
+    let out = a.pad_ticks(2);
+    let v = out.sticks[0].expect("the left virtual stick is driven");
+    assert!(v.x > 0.9, "a stick pushed right pushes the virtual stick right: {v:?}");
+    assert!(v.y.abs() < 0.01, "and not up or down: {v:?}");
+    assert_eq!(out.sticks[1], None, "the right stick is left alone");
+
+    // And up is up. This one is worth its own assertion: the conversion runs
+    // through camera space, where y counts *down*, and it has to come back — get
+    // the round trip wrong and every virtual stick is inverted vertically, which
+    // is both very obvious to a player and invisible in a test that only pushes
+    // sideways.
+    let mut a = Aiming::new("LEFT_STICK_MODE = LEFT_STICK");
+    a.pad.sticks[0] = (0.0, 1.0);
+    let v = a.pad_ticks(2).sticks[0].expect("driven");
+    assert!(v.y > 0.9, "a stick pushed up pushes the virtual stick up: {v:?}");
+    assert!(v.x.abs() < 0.01, "and not left or right: {v:?}");
+}
+
+/// The gyro can drive a virtual stick instead of the mouse — and when it does,
+/// JSM stops moving the mouse entirely. Both halves are the point.
+#[test]
+fn the_gyro_can_drive_a_virtual_stick_instead_of_the_mouse() {
+    let cfg = format!("{AIM_CFG}\nGYRO_OUTPUT = RIGHT_STICK\nVIRTUAL_STICK_CALIBRATION = 100");
+    let mut a = Aiming::new(&cfg);
+    a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 50.0 };
+    let out = a.pad_ticks(3);
+    let v = out.sticks[1].expect("the right virtual stick is driven");
+    assert!(v.x > 0.1, "turning the pad pushes the virtual stick: {v:?}");
+    // Half the calibrated speed is half the stick, give or take the smoother.
+    assert!(v.x < 0.9, "and not all the way over at half speed: {v:?}");
+
+    let mut a = Aiming::new(&cfg);
+    a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 50.0 };
+    let aimed = a.aimed();
+    assert_eq!(
+        aimed.mouse,
+        glam::Vec2::ZERO,
+        "with the gyro pointed at a stick the mouse gets nothing"
+    );
+}
+
+/// A stick and the gyro pointed at the same virtual stick combine, rather than
+/// one overwriting the other — that is the whole reason JSM works in deg/s.
+#[test]
+fn a_stick_and_the_gyro_share_one_virtual_stick() {
+    let cfg = format!(
+        "{AIM_CFG}\nLEFT_STICK_MODE = LEFT_STICK\nGYRO_OUTPUT = LEFT_STICK\n\
+         VIRTUAL_STICK_CALIBRATION = 100"
+    );
+    let stick_only = {
+        let mut a = Aiming::new(&cfg);
+        a.pad.sticks[0] = (0.3, 0.0);
+        a.pad_ticks(3).sticks[0].expect("driven").x
+    };
+    let both = {
+        let mut a = Aiming::new(&cfg);
+        a.pad.sticks[0] = (0.3, 0.0);
+        a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 30.0 };
+        a.pad_ticks(3).sticks[0].expect("driven").x
+    };
+    assert!(
+        both > stick_only + 0.05,
+        "the gyro adds to the stick rather than replacing it: {stick_only} then {both}"
+    );
+}
+
+/// `ANGLE_TO_X`: how far the stick is turned off the Y axis becomes an X push,
+/// with no sideways travel needed — a stick that steers like a wheel.
+#[test]
+fn angle_to_axis_turns_a_lean_into_a_push() {
+    let cfg = "LEFT_STICK_MODE = LEFT_ANGLE_TO_X\nANGLE_TO_AXIS_DEADZONE_OUTER = 0";
+    // Straight up: no lean, no push.
+    let mut a = Aiming::new(cfg);
+    a.pad.sticks[0] = (0.0, 1.0);
+    let straight = a.pad_ticks(2).sticks[0].expect("driven");
+    assert!(straight.x.abs() < 0.01, "straight ahead is no steer: {straight:?}");
+    // Leaned 45 degrees to the right: half of the 90 degree span.
+    let mut a = Aiming::new(cfg);
+    a.pad.sticks[0] = (0.7071, 0.7071);
+    let leaned = a.pad_ticks(2).sticks[0].expect("driven");
+    assert!(
+        (leaned.x - 0.5).abs() < 0.05,
+        "45 degrees off the axis is half the range: {leaned:?}"
+    );
+    assert!(leaned.y.abs() < 0.001, "and the other axis stays put: {leaned:?}");
+}
+
+/// Winding: turning the stick round winds a value up, and it only comes back
+/// when the stick is let go.
+#[test]
+fn winding_builds_up_by_turning_and_unwinds_when_let_go() {
+    let cfg = "LEFT_STICK_MODE = LEFT_WIND_X\nWIND_STICK_RANGE = 360\nUNWIND_RATE = 100";
+    let mut a = Aiming::new(cfg);
+    // Turn the stick a quarter of the way round, held right out.
+    let mut wound = 0.0;
+    for step in 0..=8 {
+        let angle = std::f32::consts::FRAC_PI_2 * step as f32 / 8.0;
+        a.pad.sticks[0] = (angle.sin(), angle.cos());
+        wound = a.to_pad().sticks[0].expect("driven").x;
+    }
+    assert!(wound > 0.1, "turning one way winds one way: {wound}");
+
+    // Let the stick go: it unwinds back towards nothing.
+    a.pad.sticks[0] = (0.0, 0.0);
+    let after = a.pad_ticks(30).sticks[0].expect("driven").x;
+    assert!(
+        after.abs() < wound.abs() - 0.05,
+        "a released stick unwinds: {wound} then {after}"
+    );
+
+    // How hard the stick is pushed scales the winding: the same turn made with a
+    // half-pushed stick winds about half as far. Without that, a lazy nudge round
+    // the edge of the deadzone would wind as fast as a deliberate sweep.
+    let quarter_turn = |reach: f32| {
+        let mut a = Aiming::new(cfg);
+        let mut last = 0.0;
+        for step in 0..=8 {
+            let angle = std::f32::consts::FRAC_PI_2 * step as f32 / 8.0;
+            a.pad.sticks[0] = (reach * angle.sin(), reach * angle.cos());
+            last = a.to_pad().sticks[0].expect("driven").x;
+        }
+        last
+    };
+    let full = quarter_turn(1.0);
+    let half = quarter_turn(0.6);
+    assert!(
+        half < full * 0.8,
+        "a gentler push winds less for the same turn: {full} at full, {half} at 0.6"
+    );
+}
+
+/// `ZL_MODE = X_LT` hands the trigger straight to the virtual pad, and takes its
+/// own bindings out of the picture.
+#[test]
+fn a_trigger_can_pass_straight_through_to_the_pad() {
+    let out = run_node_with(
+        "ZL_MODE = X_LT\nZL = E",
+        false,
+        &[("left_trigger", Signal::Float(0.6))],
+        3,
+    );
+    assert_eq!(
+        out.get("left_trigger").map(|s| s.as_float()),
+        Some(0.6),
+        "the pull reaches the virtual trigger as it stands: {out:?}"
+    );
+    assert!(
+        !out.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+        "and the trigger's own binding no longer fires"
+    );
+}
+
+/// The same trigger still counts as pressed for chords, which is JSM's rule and
+/// the reason the pass-through doesn't simply skip the button machinery. Note the
+/// looser rule it uses: any pull at all is the soft press, and only the very end
+/// of travel is the full one — there is no state machine left to ask.
+#[test]
+fn a_passed_through_trigger_still_reads_as_pressed_for_chords() {
+    let mut s = Stage::new("ZL_MODE = X_LT");
+    assert!(!s.pull(0.0).down(Btn::Zl), "a resting trigger is not held");
+    assert!(
+        s.pull(0.5).down(Btn::Zl),
+        "half a pull is enough to chord with"
+    );
+    assert!(
+        !s.pull(0.5).down(Btn::Zlf),
+        "but half a pull is not the full pull"
+    );
+    assert!(s.pull(1.0).down(Btn::Zlf), "the end of travel is");
+}
+
+/// And the chord it supplies reaches all the way through to a chorded binding —
+/// the passed-through trigger has to stack a chord without ever entering the press
+/// machinery, so this is the end-to-end proof that the split works.
+#[test]
+fn a_passed_through_trigger_still_supplies_a_chord() {
+    let out = run_node_with(
+        "ZL_MODE = X_LT
+ZL,S = E",
+        false,
+        &[
+            ("left_trigger", Signal::Float(0.6)),
+            ("btn_south", Signal::Bool(true)),
+        ],
+        3,
+    );
+    assert!(
+        out.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+        "the chorded binding fires with the trigger pulled: {out:?}"
+    );
+
+    // Not pulled, no chord, no binding.
+    let out = run_node_with(
+        "ZL_MODE = X_LT
+ZL,S = E",
+        false,
+        &[("btn_south", Signal::Bool(true))],
+        3,
+    );
+    assert!(
+        !out.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+        "and not without it: {out:?}"
+    );
+}
+
+/// `STEER_X` is the motion stick's alone in JSM, which refuses it on a thumbstick.
+/// Saying "a later phase will do this" would be a lie, so it is an error with the
+/// alternative named.
+#[test]
+fn steer_on_a_thumbstick_says_it_will_never_work() {
+    let info = one("LEFT_STICK_MODE = LEFT_STEER_X");
+    match &info.status {
+        LineStatus::Error(why) => {
+            assert!(why.contains("MOTION_STICK_MODE"), "says where it does work: {why}");
+            assert!(why.contains("WIND_X"), "and what to use instead: {why}");
+        }
+        other => panic!("STEER_X on a thumbstick should be an error, got {other:?}"),
+    }
+}
+
+/// Every pad-output line says it needs a pad wired downstream, and the gyro one
+/// also warns that it silences the mouse — the surprise JSM has and never says.
+#[test]
+fn pad_output_lines_say_what_they_need_and_what_they_cost() {
+    let stick = one("LEFT_STICK_MODE = LEFT_STICK");
+    assert_eq!(stick.status, LineStatus::Ok);
+    assert!(
+        stick.notes.iter().any(|n| n.contains("virtual pad wired downstream")),
+        "a stick driving a pad says so: {:?}",
+        stick.notes
+    );
+
+    let gyro = one("GYRO_OUTPUT = LEFT_STICK");
+    assert!(
+        gyro.notes.iter().any(|n| n.contains("MOUSE_AREA")),
+        "and the gyro warns it silences the aiming sticks too: {:?}",
+        gyro.notes
+    );
+
+    // PS_MOTION claims nothing and explains what actually happens.
+    let motion = one("GYRO_OUTPUT = PS_MOTION");
+    assert_eq!(motion.status, LineStatus::Ok);
+    assert!(
+        motion.notes.iter().any(|n| n.contains("passes straight through")),
+        "PS_MOTION says the pad's own motion goes downstream: {:?}",
+        motion.notes
+    );
+}
+
+/// `GYRO_OUTPUT = PS_MOTION` must leave the gyro pins alone, or the DS4 sink it
+/// exists to feed would never see them.
+#[test]
+fn ps_motion_lets_the_pads_own_gyro_through() {
+    let cfg = format!("{AIM_CFG}\nGYRO_OUTPUT = PS_MOTION");
+    let out = run_node_with(&cfg, false, &[("gyro_z", Signal::Float(0.25))], 2);
+    assert_eq!(
+        out.get("gyro_z").map(|s| s.as_float()),
+        Some(0.25),
+        "the gyro passes through untouched: {out:?}"
+    );
+}
+
+/// A virtual stick lands on the bus in all three forms a sink might read, the
+/// same trap the D-pad hit: a sink prefers the Vec2, so a disagreeing pair of
+/// floats would be silently ignored — or worse, win.
+#[test]
+fn a_virtual_stick_drives_the_vector_and_both_axes() {
+    let out = run_node_with(
+        "RIGHT_STICK_MODE = RIGHT_STICK",
+        false,
+        &[("right_stick", Signal::Vec2(glam::Vec2::new(1.0, 0.0)))],
+        3,
+    );
+    let v = match out.get("right_stick") {
+        Some(Signal::Vec2(v)) => *v,
+        other => panic!("the vector form is published: {other:?}"),
+    };
+    assert!(v.x > 0.9, "and carries the push: {v:?}");
+    assert_eq!(out.get("right_stick_x").map(|s| s.as_float()), Some(v.x));
+    assert_eq!(out.get("right_stick_y").map(|s| s.as_float()), Some(v.y));
+}
+
+/// The undeadzone runs a game's own deadzone backwards: told the game ignores the
+/// first 30%, a gentle push should come out above 30% rather than under it.
+#[test]
+fn the_undeadzone_lifts_a_small_push_over_the_games_deadzone() {
+    // It bites on the gyro's contribution, not a stick's: a stick push has its
+    // own length divided out and multiplied straight back in, so for a stick
+    // alone the setting is a no-op. That is JSM's arithmetic, and it is the right
+    // answer — the stick already reaches the whole range, and it is the gyro's
+    // small nudges that the game's deadzone would swallow.
+    let nudge = |extra: &str| {
+        let cfg = format!(
+            "{AIM_CFG}\nGYRO_OUTPUT = LEFT_STICK\nVIRTUAL_STICK_CALIBRATION = 400\n{extra}"
+        );
+        let mut a = Aiming::new(&cfg);
+        a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 40.0 };
+        a.pad_ticks(3).sticks[0].expect("driven").x
+    };
+    let bare = nudge("");
+    let lifted = nudge("LEFT_STICK_UNDEADZONE_INNER = 0.3");
+    assert!(
+        bare < 0.3,
+        "without it a gentle turn stays inside the game's deadzone: {bare}"
+    );
+    assert!(lifted > 0.3, "with it the same turn clears it: {lifted}");
+}
+
+/// Every one of phase 5's settings is read, with a bad value called out rather
+/// than quietly ignored.
+#[test]
+fn every_pad_setting_is_read() {
+    let c = compile(
+        "VIRTUAL_STICK_CALIBRATION = 180\n\
+         LEFT_STICK_UNDEADZONE_INNER = 0.1\n\
+         LEFT_STICK_UNDEADZONE_OUTER = 0.2\n\
+         LEFT_STICK_UNPOWER = 2\n\
+         LEFT_STICK_VIRTUAL_SCALE = 1.5\n\
+         RIGHT_STICK_UNDEADZONE_INNER = 0.3\n\
+         RIGHT_STICK_UNPOWER = 3\n\
+         RIGHT_STICK_VIRTUAL_SCALE = 0.5\n\
+         ANGLE_TO_AXIS_DEADZONE_INNER = 5\n\
+         ANGLE_TO_AXIS_DEADZONE_OUTER = 15\n\
+         WIND_STICK_RANGE = 720\n\
+         WIND_STICK_POWER = 2\n\
+         UNWIND_RATE = 900\n\
+         FLICK_STICK_OUTPUT = LEFT_STICK",
+    );
+    assert!(errors(&c).is_empty(), "all of these are live: {:?}", errors(&c));
+    assert_eq!(c.pad.calibration, 180.0);
+    assert_eq!(c.pad.out[0].undeadzone_inner, 0.1);
+    assert_eq!(c.pad.out[0].undeadzone_outer, 0.2);
+    assert_eq!(c.pad.out[0].unpower, 2.0);
+    assert_eq!(c.pad.out[0].virtual_scale, 1.5);
+    assert_eq!(c.pad.out[1].undeadzone_inner, 0.3);
+    assert_eq!(c.pad.out[1].unpower, 3.0);
+    assert_eq!(c.pad.out[1].virtual_scale, 0.5);
+    assert_eq!(c.pad.angle_dz_inner, 5.0);
+    assert_eq!(c.pad.angle_dz_outer, 15.0);
+    assert_eq!(c.pad.wind_range, 720.0);
+    assert_eq!(c.pad.wind_power, 2.0);
+    assert_eq!(c.pad.unwind_rate, 900.0);
+    assert_eq!(c.pad.flick_dest, super::pad::Dest::LeftStick);
+
+    // And a value out of range is an error naming what it wanted.
+    for bad in [
+        "VIRTUAL_STICK_CALIBRATION = 0",
+        "LEFT_STICK_UNDEADZONE_INNER = 2",
+        "ANGLE_TO_AXIS_DEADZONE_INNER = 100",
+        "WIND_STICK_RANGE = 0",
+        "GYRO_OUTPUT = SIDEWAYS",
+    ] {
+        assert!(
+            matches!(one(bad).status, LineStatus::Error(_)),
+            "{bad} should be an error"
+        );
+    }
+}
+
+/// A flick bound for a stick turns at one speed for as long as the angle needs,
+/// rather than being eased out the way a mouse flick is.
+#[test]
+fn a_flick_to_a_stick_holds_a_steady_turn() {
+    let cfg = format!(
+        "{AIM_CFG}\nRIGHT_STICK_MODE = FLICK\nFLICK_STICK_OUTPUT = RIGHT_STICK\n\
+         VIRTUAL_STICK_CALIBRATION = 180"
+    );
+    let mut a = Aiming::new(&cfg);
+    // Push the stick straight left: a quarter turn to make.
+    a.pad.sticks[1] = (-1.0, 0.0);
+    let first = a.to_pad();
+    let v = first.sticks[1].expect("the flick drives the stick");
+    assert!(v.x.abs() > 0.9, "a flick pushes the stick right over: {v:?}");
+
+    // A quarter turn at 180 deg/s takes half a second — still going a tick later,
+    // and done well before a second is out.
+    let mid = a.pad_ticks(10).sticks[1].expect("driven");
+    assert!(mid.x.abs() > 0.9, "and holds it while the turn runs: {mid:?}");
+    let end = a.pad_ticks(500).sticks[1].expect("driven");
+    assert!(end.x.abs() < 0.1, "then stops when the angle is covered: {end:?}");
+}
+
+// ── phase 6: gravity, the motion stick and the touchpad ──────────────────────
+
+/// Our accelerometer, for a pad held in a named pose. The bus's accel basis is
+/// `(F, -R, U)` and an accelerometer at rest reads the direction that is *up*.
+fn accel_for(pose: &str) -> glam::Vec3 {
+    match pose {
+        // Up is out of the face.
+        "flat" => glam::Vec3::new(0.0, 0.0, 1.0),
+        // Nose points at the sky, so up is forward.
+        "nose up" => glam::Vec3::new(1.0, 0.0, 0.0),
+        "nose down" => glam::Vec3::new(-1.0, 0.0, 0.0),
+        // The right grip is down, so up is towards the pad's left, which is +y.
+        "right grip down" => glam::Vec3::new(0.0, 1.0, 0.0),
+        "left grip down" => glam::Vec3::new(0.0, -1.0, 0.0),
+        "upside down" => glam::Vec3::new(0.0, 0.0, -1.0),
+        other => panic!("no such pose: {other}"),
+    }
+}
+
+/// Gravity in JSM's frame, once the estimate has settled on a pose.
+fn gravity_for(pose: &str) -> super::motion::Gravity {
+    let mut m = super::motion::Motion::default();
+    let a = accel_for(pose);
+    let mut g = super::motion::Gravity::default();
+    // The filter starts on its first reading, so one tick settles it; a few more
+    // make sure nothing drifts.
+    for _ in 0..40 {
+        g = m.tick(Some(a), DT);
+    }
+    g
+}
+
+/// The frame conversion, pose by pose. Everything else in phase 6 is measured
+/// against this, so if it is wrong nothing above it can be right — and a sign
+/// error here is invisible without hardware unless it is pinned like this.
+#[test]
+fn gravity_lands_in_jsms_frame() {
+    // JSM's frame is (right, up, forward) and gravity points down, so a pad held
+    // flat has gravity straight down its Y.
+    let flat = gravity_for("flat");
+    assert!(flat.known, "a pad reporting an accelerometer knows which way is down");
+    assert!((flat.v - glam::Vec3::new(0.0, -1.0, 0.0)).length() < 0.01, "flat: {:?}", flat.v);
+
+    // Nose up: the forward axis points at the sky, so gravity is along -Z.
+    let nose_up = gravity_for("nose up");
+    assert!((nose_up.v - glam::Vec3::new(0.0, 0.0, -1.0)).length() < 0.01, "nose up: {:?}", nose_up.v);
+
+    // Right grip down: gravity is along the pad's right, +X.
+    let grip = gravity_for("right grip down");
+    assert!((grip.v - glam::Vec3::new(1.0, 0.0, 0.0)).length() < 0.01, "right grip down: {:?}", grip.v);
+
+    // And a pad with no accelerometer says so, rather than claiming to be flat —
+    // the difference between a motion stick that rests and one that runs away.
+    let mut m = super::motion::Motion::default();
+    let g = m.tick(None, DT);
+    assert!(!g.known, "no accelerometer means no idea which way is down");
+}
+
+/// The motion stick: tilt the pad and the stick pushes the way it was tilted.
+#[test]
+fn the_motion_stick_follows_how_the_pad_is_tilted() {
+    let cfg = super::analog::StickCfg::default();
+    let (x, y) = super::motion::motion_stick(gravity_for("flat"), cfg);
+    assert!(x.abs() < 0.01 && y.abs() < 0.01, "held flat it rests: {x}, {y}");
+
+    // Tipping the nose down pushes the stick down and tipping it up pushes it up,
+    // which is JSM's `calY = -grav.z` — the pad tips the way the stick goes, like
+    // steering a plane rather than pulling a lever.
+    let (x, y) = super::motion::motion_stick(gravity_for("nose down"), cfg);
+    assert!(y < -0.4, "nose down pushes the stick down: {x}, {y}");
+    assert!(x.abs() < 0.01, "and not sideways: {x}");
+    let (_, up) = super::motion::motion_stick(gravity_for("nose up"), cfg);
+    assert!(up > 0.4, "and nose up pushes it up: {up}");
+
+    // Right grip down pushes it right.
+    let (x, y) = super::motion::motion_stick(gravity_for("right grip down"), cfg);
+    assert!(x > 0.4, "right grip down pushes the stick right: {x}, {y}");
+    assert!(y.abs() < 0.01, "and not up or down: {y}");
+
+    // A quarter turn is half of the half-turn the stick's range covers.
+    let (x, _) = super::motion::motion_stick(gravity_for("right grip down"), cfg);
+    assert!((x - 0.5).abs() < 0.02, "a quarter turn is half deflection: {x}");
+
+    // And with no accelerometer it stays centred rather than picking a direction.
+    let (x, y) = super::motion::motion_stick(super::motion::Gravity::default(), cfg);
+    assert_eq!((x, y), (0.0, 0.0));
+}
+
+/// `SET_MOTION_STICK_NEUTRAL` makes whatever pose the pad is in read as centred.
+#[test]
+fn the_motion_stick_can_be_recentred() {
+    let mut m = super::motion::Motion::default();
+    let a = accel_for("nose up");
+    let mut g = super::motion::Gravity::default();
+    for _ in 0..40 {
+        g = m.tick(Some(a), DT);
+    }
+    let cfg = super::analog::StickCfg::default();
+    let (_, before) = super::motion::motion_stick(g, cfg);
+    assert!(before.abs() > 0.4, "nose up is a long way off centre: {before}");
+
+    m.set_neutral(g);
+    let g = m.tick(Some(a), DT);
+    let (x, y) = super::motion::motion_stick(g, cfg);
+    assert!(
+        x.abs() < 0.02 && y.abs() < 0.02,
+        "after re-centring the same pose reads as centred: {x}, {y}"
+    );
+}
+
+/// The lean buttons fire past `LEAN_THRESHOLD` degrees of side tilt, and not
+/// before — the threshold is what stops a pad resting at an angle from holding one
+/// down for ever.
+#[test]
+fn leaning_the_pad_presses_the_lean_buttons() {
+    let s = super::motion::Settings { lean_threshold: 15.0, ..Default::default() };
+    let o = super::analog::Orientation::default();
+
+    let (l, r) = super::motion::lean(gravity_for("flat"), &s, o);
+    assert!(!l && !r, "held flat, neither");
+    let (l, r) = super::motion::lean(gravity_for("right grip down"), &s, o);
+    assert!(r && !l, "right grip down leans right");
+    let (l, r) = super::motion::lean(gravity_for("left grip down"), &s, o);
+    assert!(l && !r, "left grip down leans left");
+
+    // Just under the threshold, nothing; just over it, something.
+    let tilt = |deg: f32| {
+        let rad = deg.to_radians();
+        let mut m = super::motion::Motion::default();
+        let a = glam::Vec3::new(0.0, rad.sin(), rad.cos());
+        let mut g = super::motion::Gravity::default();
+        for _ in 0..40 {
+            g = m.tick(Some(a), DT);
+        }
+        super::motion::lean(g, &s, o)
+    };
+    assert!(!tilt(10.0).1, "10 degrees is inside the threshold");
+    assert!(tilt(20.0).1, "20 degrees is past it");
+
+    // No accelerometer, no lean — rather than both, or a stuck one.
+    let (l, r) = super::motion::lean(super::motion::Gravity::default(), &s, o);
+    assert!(!l && !r);
+}
+
+/// `PLAYER_TURN`: turning the pad about *gravity* turns the camera, whichever way
+/// the pad happens to be tilted. That is the whole point of the space — and the
+/// one thing a `LOCAL` config cannot do.
+#[test]
+fn player_turn_reads_a_turn_about_gravity_whatever_the_tilt() {
+    use super::motion::{gravity_space, JsmGyro, Space};
+    // Held flat, gravity is down JSM's -Y, so a yaw about the pad's own up axis is
+    // a turn: JSM's Y component of the gyro.
+    let flat = gravity_for("flat");
+    let (x, _) = gravity_space(Space::PlayerTurn, flat, JsmGyro { x: 0.0, y: 10.0, z: 0.0 });
+    assert!(x.abs() > 1.0, "flat, a yaw turns the camera: {x}");
+
+    // Nose up, the pad's *roll* axis is the one pointing at the sky, so the same
+    // turn now arrives on Z — and the space must still see it as a turn.
+    let nose_up = gravity_for("nose up");
+    let (x, _) = gravity_space(Space::PlayerTurn, nose_up, JsmGyro { x: 0.0, y: 0.0, z: 10.0 });
+    assert!(x.abs() > 1.0, "nose up, a roll turns the camera: {x}");
+
+    // And a pure pitch is not a turn in either pose.
+    for (name, g) in [("flat", flat), ("nose up", nose_up)] {
+        let (x, y) = gravity_space(Space::PlayerTurn, g, JsmGyro { x: 10.0, y: 0.0, z: 0.0 });
+        assert!(x.abs() < 0.01, "{name}: a pitch is not a turn: {x}");
+        assert!(y.abs() > 1.0, "{name}: but it is a pitch: {y}");
+    }
+}
+
+/// The gravity spaces fade out when the pad is held on its side, where a pitch
+/// axis worked out from gravity means almost nothing. Without that they flail.
+#[test]
+fn a_world_space_gives_up_when_the_pad_is_on_its_side() {
+    use super::motion::{gravity_space, JsmGyro, Space};
+    let upright = gravity_for("flat");
+    let (_, y) = gravity_space(Space::WorldTurn, upright, JsmGyro { x: 10.0, y: 0.0, z: 0.0 });
+    assert!(y.abs() > 1.0, "held flat a pitch reads as pitch: {y}");
+
+    // Gravity along the pad's right: neither flat nor upright.
+    let sideways = gravity_for("right grip down");
+    let (_, y) = gravity_space(Space::WorldTurn, sideways, JsmGyro { x: 10.0, y: 0.0, z: 0.0 });
+    assert!(y.abs() < 0.01, "on its side it stops guessing: {y}");
+}
+
+/// The touchpad grid: which cell a finger is in, by name.
+#[test]
+fn the_touchpad_grid_names_the_cell_a_finger_is_in() {
+    let mut t = super::touch::Touch::default();
+    let s = super::touch::Settings { grid: (2, 2), ..Default::default() };
+    let cfg = super::analog::StickCfg::default();
+    let at = |x: f32, y: f32| super::touch::Finger { active: true, x, y };
+    let off = super::touch::Finger::default();
+
+    // Top-left quarter is cell 1, then across, then down: 1 2 / 3 4. The bus's
+    // y counts up, so the top is +y.
+    let out = t.tick(&s, [at(-0.5, 0.5), off], cfg);
+    assert_eq!(out.cells[0], Some(1), "top left is T1");
+    let out = t.tick(&s, [at(0.5, 0.5), off], cfg);
+    assert_eq!(out.cells[0], Some(2), "top right is T2");
+    let out = t.tick(&s, [at(-0.5, -0.5), off], cfg);
+    assert_eq!(out.cells[0], Some(3), "bottom left is T3");
+    let out = t.tick(&s, [at(0.5, -0.5), off], cfg);
+    assert_eq!(out.cells[0], Some(4), "bottom right is T4");
+
+    // A finger lifted is in no cell at all.
+    let out = t.tick(&s, [off, off], cfg);
+    assert_eq!(out.cells[0], None);
+
+    // The far corners stay in range rather than falling off the end of T1..T25.
+    let out = t.tick(&s, [at(1.0, -1.0), off], cfg);
+    assert_eq!(out.cells[0], Some(4), "the very corner is still the last cell");
+    let out = t.tick(&s, [at(-1.0, 1.0), off], cfg);
+    assert_eq!(out.cells[0], Some(1), "and the first corner the first");
+}
+
+/// A touch stick is *relative*: it measures how far the finger has been dragged
+/// from wherever it landed, not where on the pad it is.
+#[test]
+fn a_touch_stick_measures_the_drag_not_the_place() {
+    let mut t = super::touch::Touch::default();
+    // A radius of 192 points is a tenth of the nominal width, so a tenth of the
+    // touchpad is full deflection — easy numbers to check.
+    let s = super::touch::Settings { stick_radius: 192.0, ..Default::default() };
+    let cfg = super::analog::StickCfg::default();
+    let at = |x: f32, y: f32| super::touch::Finger { active: true, x, y };
+
+    // Landing far to the right is not a push: the stick starts where the finger
+    // lands.
+    let out = t.tick(&s, [at(0.8, 0.0), super::touch::Finger::default()], cfg);
+    assert_eq!(out.sticks[0], (0.0, 0.0), "the tick a finger lands is not a drag");
+
+    // Dragging a fifth of the way right is a full push at this radius.
+    let out = t.tick(&s, [at(1.0, 0.0), super::touch::Finger::default()], cfg);
+    assert!(out.sticks[0].0 > 0.9, "dragging right pushes right: {:?}", out.sticks[0]);
+
+    // Lifting re-centres it, so the next touch starts fresh.
+    let out = t.tick(&s, [super::touch::Finger::default(); 2], cfg);
+    let _ = out;
+    let out = t.tick(&s, [at(-0.9, 0.0), super::touch::Finger::default()], cfg);
+    assert_eq!(out.sticks[0], (0.0, 0.0), "a new touch starts from centre");
+}
+
+/// Dragging up the touchpad pushes the touch stick up.
+#[test]
+fn a_touch_stick_agrees_with_a_stick_about_which_way_is_up() {
+    let mut t = super::touch::Touch::default();
+    let s = super::touch::Settings { stick_radius: 108.0, ..Default::default() };
+    let cfg = super::analog::StickCfg::default();
+    let at = |y: f32| super::touch::Finger { active: true, x: 0.0, y };
+    let off = super::touch::Finger::default();
+
+    t.tick(&s, [at(0.0), off], cfg);
+    // Towards the top of the touchpad is a larger y on the bus.
+    let out = t.tick(&s, [at(0.5), off], cfg);
+    assert!(out.sticks[0].1 > 0.9, "dragging up pushes the stick up: {:?}", out.sticks[0]);
+}
+
+/// `TOUCHPAD_MODE = MOUSE` drags the pointer, and ignores a second finger rather
+/// than doubling the speed.
+#[test]
+fn the_touchpad_can_drag_the_mouse() {
+    let mut t = super::touch::Touch::default();
+    let s = super::touch::Settings {
+        mode: super::touch::Mode::Mouse,
+        sens: (1.0, 1.0),
+        ..Default::default()
+    };
+    let cfg = super::analog::StickCfg::default();
+    let at = |x: f32, y: f32| super::touch::Finger { active: true, x, y };
+    let off = super::touch::Finger::default();
+
+    t.tick(&s, [at(0.0, 0.0), off], cfg);
+    let out = t.tick(&s, [at(0.1, 0.0), off], cfg);
+    assert!(out.mouse.x > 1.0, "dragging right moves the pointer right: {:?}", out.mouse);
+    // The bus counts both the touchpad's y and the mouse's up.
+    t.tick(&s, [at(0.1, 0.0), off], cfg);
+    let out = t.tick(&s, [at(0.1, -0.2), off], cfg);
+    assert!(out.mouse.y < -1.0, "dragging down moves the pointer down: {:?}", out.mouse);
+
+    // In grid mode the pointer stays put.
+    let mut t = super::touch::Touch::default();
+    let grid = super::touch::Settings::default();
+    t.tick(&grid, [at(0.0, 0.0), off], cfg);
+    let out = t.tick(&grid, [at(0.5, 0.0), off], cfg);
+    assert_eq!(out.mouse, glam::Vec2::ZERO, "grid mode is not a mouse");
+}
+
+/// The touchpad is a dual-stage trigger: a finger is the soft pull, a click the
+/// full one. `NO_SKIP` (JSM's default here) fires the soft stage on touch and adds
+/// the full one on click.
+#[test]
+fn a_finger_and_a_click_are_the_touchpads_two_stages() {
+    let mut s = Stage::new("TOUCHPAD_DUAL_STAGE_MODE = NO_SKIP");
+    let step = |s: &mut Stage, touching: bool, click: bool| {
+        s.pad.touching = touching;
+        s.pad.touch_click = click;
+        s.a.tick(&s.s, DT, &s.pad);
+        (s.a.down(Btn::Touch), s.a.down(Btn::Capture))
+    };
+    assert_eq!(step(&mut s, false, false), (false, false), "nothing on the pad");
+    assert_eq!(step(&mut s, true, false), (true, false), "a finger is the soft pull");
+    assert_eq!(step(&mut s, true, true), (true, true), "a click adds the full one");
+    // Lifting the finger and releasing the click in one tick releases the full
+    // stage first and the soft one a tick later. That is the dual-stage machine's
+    // own shape — JSM's `DelayFullPress` keeps the soft press while the full one
+    // goes — and it is shared with every real trigger, so it is left alone here
+    // rather than special-cased for the touchpad.
+    assert_eq!(step(&mut s, false, false), (true, false), "the click goes first");
+    assert_eq!(step(&mut s, false, false), (false, false), "then the finger");
+}
+
+/// `MUST_SKIP` on the touchpad tells a tap from a press, which only works because
+/// a finger reads as 0.99 rather than as a full pull.
+#[test]
+fn the_touchpad_can_tell_a_tap_from_a_click() {
+    let mut s = Stage::new("TOUCHPAD_DUAL_STAGE_MODE = MUST_SKIP");
+    s.pad.touching = true;
+    s.a.tick(&s.s, DT, &s.pad);
+    assert!(!s.a.down(Btn::Touch), "MUST_SKIP waits to see if a click follows");
+    s.pad.touch_click = true;
+    s.a.tick(&s.s, DT, &s.pad);
+    assert!(s.a.down(Btn::Capture), "a quick click fires the full stage");
+    assert!(!s.a.down(Btn::Touch), "and skips the soft one");
+}
+
+/// Every one of phase 6's settings is read, and a bad value is called out.
+#[test]
+fn every_motion_and_touch_setting_is_read() {
+    let c = compile(
+        "GYRO_SPACE = WORLD_LEAN\n\
+         LEAN_THRESHOLD = 25\n\
+         MOTION_STICK_MODE = NO_MOUSE\n\
+         MOTION_RING_MODE = INNER\n\
+         MOTION_DEADZONE_INNER = 18\n\
+         MOTION_DEADZONE_OUTER = 90\n\
+         MOTION_STICK_AXIS = INVERTED STANDARD\n\
+         TOUCHPAD_MODE = MOUSE\n\
+         GRID_SIZE = 5 5\n\
+         TOUCHPAD_SENS = 2 3\n\
+         TOUCHPAD_DUAL_STAGE_MODE = MAY_SKIP\n\
+         TOUCH_STICK_MODE = AIM\n\
+         TOUCH_RING_MODE = INNER\n\
+         TOUCH_STICK_RADIUS = 200\n\
+         TOUCH_DEADZONE_INNER = 0.4\n\
+         TOUCH_STICK_AXIS = STANDARD INVERTED",
+    );
+    assert!(errors(&c).is_empty(), "all of these are live: {:?}", errors(&c));
+    assert_eq!(c.motion.space, super::motion::Space::WorldLean);
+    assert_eq!(c.motion.lean_threshold, 25.0);
+    assert_eq!(c.settings.motion.ring, RingMode::Inner);
+    assert!((c.settings.motion.inner_dz - 0.1).abs() < 1e-6, "18 of 180 degrees");
+    assert!((c.settings.motion.outer_dz - 0.5).abs() < 1e-6, "90 of 180 degrees");
+    assert!(c.settings.motion.invert_x && !c.settings.motion.invert_y);
+    assert_eq!(c.touch.mode, super::touch::Mode::Mouse);
+    assert_eq!(c.touch.grid, (5, 5));
+    assert_eq!(c.touch.sens, (2.0, 3.0));
+    assert_eq!(c.settings.touchpad_dual_stage, super::analog::TriggerMode::MaySkip);
+    assert_eq!(c.settings.touch.mode, super::analog::StickMode::Aim);
+    assert_eq!(c.touch.stick_radius, 200.0);
+    assert_eq!(c.settings.touch.inner_dz, 0.4);
+    assert!(!c.settings.touch.invert_x && c.settings.touch.invert_y);
+
+    for bad in [
+        "GYRO_SPACE = SIDEWAYS",
+        "LEAN_THRESHOLD = 200",
+        "MOTION_DEADZONE_INNER = 400",
+        "TOUCHPAD_MODE = WOBBLE",
+        "GRID_SIZE = 6 6",
+        "TOUCH_STICK_RADIUS = 0",
+        "TOUCH_DEADZONE_INNER = 3",
+    ] {
+        assert!(
+            matches!(one(bad).status, LineStatus::Error(_)),
+            "{bad} should be an error"
+        );
+    }
+}
+
+/// A grid too big to name is refused with the reason, not clamped in silence —
+/// the buttons stop at `T25`, so a 6x6 grid has cells nothing can be bound to.
+#[test]
+fn a_grid_bigger_than_the_buttons_says_so() {
+    match one("GRID_SIZE = 6 6").status {
+        LineStatus::Error(why) => {
+            assert!(why.contains("T25"), "it names the limit: {why}");
+        }
+        other => panic!("a 36-cell grid should be an error, got {other:?}"),
+    }
+}
+
+/// `LEFT_STEER_X` is refused on a thumbstick and accepted on the motion stick —
+/// the same name, two answers, which is exactly what JSM does.
+#[test]
+fn steering_belongs_to_the_motion_stick_alone() {
+    assert!(matches!(
+        one("LEFT_STICK_MODE = LEFT_STEER_X").status,
+        LineStatus::Error(_)
+    ));
+    let ok = one("MOTION_STICK_MODE = LEFT_STEER_X");
+    assert_eq!(ok.status, LineStatus::Ok, "the motion stick can steer");
+    assert!(
+        ok.notes.iter().any(|n| n.contains("virtual pad wired downstream")),
+        "and says it needs a pad: {:?}",
+        ok.notes
+    );
+}
+
+/// Leaning the pad steers a virtual stick, with `MOTION_DEADZONE_OUTER` deciding
+/// how far you have to lean for full lock.
+#[test]
+fn leaning_the_pad_steers_a_virtual_stick() {
+    let reach = |pose: &str| {
+        super::motion::steer(
+            gravity_for(pose),
+            super::analog::Orientation::default(),
+            15.0,
+            135.0,
+            1.0,
+        )
+    };
+    let (_, flat) = reach("flat").expect("gravity is known");
+    assert!(flat < 0.01, "held flat it steers straight: {flat}");
+
+    let (sign, tilted) = reach("right grip down").expect("gravity is known");
+    assert!(sign > 0.0, "leaning right steers right");
+    // 90 degrees of lean, 15 in and 135 out, is (90-15)/(180-135-15) = 2.5 → full.
+    assert!(tilted > 0.99, "a quarter turn is already full lock: {tilted}");
+
+    // No accelerometer, no steering.
+    assert!(super::motion::steer(
+        super::motion::Gravity::default(),
+        super::analog::Orientation::default(),
+        15.0,
+        135.0,
+        1.0
+    )
+    .is_none());
+}
+
+/// The motion stick's directions are ordinary stick directions, so `MUP` behaves
+/// the way `LUP` does — running all five of JSM's sticks through one routine is
+/// what buys that.
+#[test]
+fn the_motion_sticks_directions_are_buttons_like_any_other() {
+    let out = run_node_with(
+        "MOTION_STICK_MODE = NO_MOUSE\nMRIGHT = E",
+        false,
+        &[
+            // Right grip down: gravity along the pad's right, so the motion stick
+            // pushes right.
+            ("accel_x", Signal::Float(0.0)),
+            ("accel_y", Signal::Float(1.0)),
+            ("accel_z", Signal::Float(0.0)),
+        ],
+        4,
+    );
+    assert!(
+        out.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+        "tilting the pad right presses the binding on MRIGHT: {out:?}"
+    );
+}
+
+/// A touchpad grid cell is a button, and it only fires while a finger is in it.
+#[test]
+fn a_grid_cell_is_a_button() {
+    let held = run_node_with(
+        "GRID_SIZE = 2 1\nT1 = E\nT2 = F",
+        false,
+        &[
+            ("touch1_active", Signal::Bool(true)),
+            ("touch1_x", Signal::Float(-0.5)),
+            ("touch1_y", Signal::Float(0.0)),
+        ],
+        3,
+    );
+    assert!(
+        held.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+        "a finger on the left half presses T1: {held:?}"
+    );
+    assert!(
+        !held.get("key_f").map(|s| s.as_bool()).unwrap_or(false),
+        "and not T2"
+    );
+
+    let lifted = run_node_with("GRID_SIZE = 2 1\nT1 = E\nT2 = F", false, &[], 3);
+    assert!(
+        !lifted.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+        "no finger, no press: {lifted:?}"
+    );
+}
+
+/// A config that reads the touchpad takes it over, so a Touch Zones module
+/// downstream doesn't act on the same finger — except in `PS_TOUCHPAD` mode, which
+/// exists to pass it on.
+#[test]
+fn reading_the_touchpad_claims_it_unless_the_mode_is_to_pass_it_on() {
+    let claimed = run_node_with(
+        "GRID_SIZE = 2 1\nT1 = E",
+        false,
+        &[("touch1_active", Signal::Bool(true)), ("touch1_x", Signal::Float(-0.5))],
+        2,
+    );
+    assert_eq!(
+        claimed.get("touch1_active").map(|s| s.as_bool()),
+        Some(false),
+        "the finger is consumed: {claimed:?}"
+    );
+
+    let passed = run_node_with(
+        "TOUCHPAD_MODE = PS_TOUCHPAD",
+        false,
+        &[("touch1_active", Signal::Bool(true)), ("touch1_x", Signal::Float(-0.5))],
+        2,
+    );
+    assert_eq!(
+        passed.get("touch1_active").map(|s| s.as_bool()),
+        Some(true),
+        "PS_TOUCHPAD hands it on: {passed:?}"
+    );
+}
+
+/// Gravity from an arbitrary direction of "up", for poses that have no name.
+fn gravity_from(up: glam::Vec3) -> super::motion::Gravity {
+    let mut m = super::motion::Motion::default();
+    let a = up.normalize();
+    let mut g = super::motion::Gravity::default();
+    for _ in 0..40 {
+        g = m.tick(Some(a), DT);
+    }
+    g
+}
+
+/// The world spaces fade out *gradually* as the pad is rolled onto its side —
+/// partial trust, not just on or off. The cliff-edge version of this test passes
+/// even with the fade removed, because a pad exactly on its side has no usable
+/// pitch axis at all and reads zero either way.
+#[test]
+fn a_world_space_fades_out_as_the_pad_rolls_onto_its_side() {
+    use super::motion::{gravity_space, JsmGyro, Space};
+    let pitch = JsmGyro { x: 10.0, y: 0.0, z: 0.0 };
+
+    // Held flat: fully trusted, the pitch comes through whole.
+    let (_, square) = gravity_space(Space::WorldTurn, gravity_for("flat"), pitch);
+    assert!(square.abs() > 9.0, "held flat a pitch comes through whole: {square}");
+
+    // Now a pose just inside the give-up band. Gravity is almost exactly along the
+    // pad's own pitch axis, which is the case the fade exists for: the world pitch
+    // axis is still computable — so the projection alone would let a reduced
+    // signal through — but it is meaningless, and the fade must silence it
+    // outright rather than merely quieten it. This is the assertion that separates
+    // "damped by the projection" from "faded out on purpose".
+    let on_its_side = gravity_from(glam::Vec3::new(0.125, 0.992, 0.0));
+    let (_, faded) = gravity_space(Space::WorldTurn, on_its_side, pitch);
+    assert!(
+        faded.abs() < 0.001,
+        "at the edge of the band it goes quiet altogether, not just quieter: {faded}"
+    );
+}
+
+/// The player spaces keep pitch as the pad's own, and keep it the right way up.
+#[test]
+fn the_player_spaces_keep_pitch_the_right_way_up() {
+    use super::motion::{gravity_space, JsmGyro, Space};
+    // The same pitch, through `LOCAL` and through `PLAYER_TURN`, must agree about
+    // which way the camera goes — the player spaces re-reference the horizontal
+    // half and leave pitch alone, so a config swapping between them shouldn't
+    // suddenly aim upside down.
+    let (_, player) = gravity_space(
+        Space::PlayerTurn,
+        gravity_for("flat"),
+        JsmGyro { x: 10.0, y: 0.0, z: 0.0 },
+    );
+    // `LOCAL` with JSM's defaults does `gyroY += inGyroX` against a screen whose y
+    // counts down, which phase 3 pins by the same reasoning: tilting up aims up.
+    let mut a = Aiming::new(&format!("{AIM_CFG}\nGYRO_SMOOTH_TIME = 0"));
+    a.gyro = Gyro { roll: 0.0, pitch: 10.0, yaw: 0.0 };
+    let local = a.ticks(3);
+    assert!(
+        player.signum() == -local.y.signum(),
+        "player pitch and local pitch agree about up (bus y counts up, JSM's down): \
+         player {player}, local {}",
+        local.y
+    );
+}
+
+/// Leaning past vertical keeps steering the same way instead of unwinding, which
+/// is what the fold-back past 90 degrees is for.
+#[test]
+fn steering_keeps_going_past_vertical() {
+    let reach = |up: glam::Vec3| {
+        super::motion::steer(
+            gravity_from(up),
+            super::analog::Orientation::default(),
+            15.0,
+            60.0,
+            1.0,
+        )
+        .expect("gravity is known")
+    };
+    // Rolled 45 degrees right: partway.
+    let (sign_45, at_45) = reach(glam::Vec3::new(0.0, 0.7071, 0.7071));
+    // Rolled 135 degrees right — past vertical, still going the same way, and
+    // further over than at 45.
+    let (sign_135, at_135) = reach(glam::Vec3::new(0.0, 0.7071, -0.7071));
+    assert!(sign_45 > 0.0 && sign_135 > 0.0, "both lean right");
+    assert!(
+        at_135 > at_45,
+        "past vertical it keeps steering further, not back: {at_45} then {at_135}"
+    );
+}
+
+/// Which cell owns the line between two of them. JSM rounds up and subtracts one,
+/// so the boundary belongs to the cell before it — worth pinning, because the
+/// obvious `floor` gives the other answer and only differs exactly here.
+#[test]
+fn a_finger_on_a_grid_line_belongs_to_the_cell_before_it() {
+    let mut t = super::touch::Touch::default();
+    let s = super::touch::Settings { grid: (2, 1), ..Default::default() };
+    let cfg = super::analog::StickCfg::default();
+    let at = |x: f32| super::touch::Finger { active: true, x, y: 0.0 };
+
+    let out = t.tick(&s, [at(0.0), super::touch::Finger::default()], cfg);
+    assert_eq!(
+        out.cells[0],
+        Some(1),
+        "dead centre of a two-column grid is the left cell"
+    );
+}
+
+/// A finger alone is never a full pull, however the dual-stage mode is set. That
+/// is what the 0.99 is for: without it a resting finger would fire the click.
+#[test]
+fn a_finger_alone_never_counts_as_a_click() {
+    for mode in ["NO_SKIP", "NO_SKIP_EXCLUSIVE", "MAY_SKIP", "MUST_SKIP"] {
+        let mut s = Stage::new(&format!("TOUCHPAD_DUAL_STAGE_MODE = {mode}"));
+        s.pad.touching = true;
+        for tick in 0..40 {
+            s.a.tick(&s.s, DT, &s.pad);
+            assert!(
+                !s.a.down(Btn::Capture),
+                "{mode}: a finger with no click never presses CAPTURE (tick {tick})"
+            );
+        }
+    }
+}
+
+// ── phase 7: feedback ────────────────────────────────────────────────────────
+
+/// What the feedback side wants written, as a lookup.
+fn fb_pins(text: &str, rumble: Option<(f32, f32)>) -> HashMap<String, f32> {
+    let c = compile(text);
+    assert!(errors(&c).is_empty(), "config should compile: {:?}", errors(&c));
+    super::feedback::pins(&c.fb, rumble)
+        .into_iter()
+        .map(|(p, v)| (p.to_string(), v))
+        .collect()
+}
+
+/// The light bar is set from a name or from hex, and reaches the pad as three
+/// channels.
+#[test]
+fn the_light_bar_takes_a_name_or_a_hex_value() {
+    let red = fb_pins("LIGHT_BAR = RED", None);
+    assert_eq!(red.get("lightbar_r"), Some(&1.0));
+    assert_eq!(red.get("lightbar_g"), Some(&0.0));
+    assert_eq!(red.get("lightbar_b"), Some(&0.0));
+
+    // JSM writes hex as `xRRGGBB`, and a bare one is taken too.
+    for spelling in ["LIGHT_BAR = x0000FF", "LIGHT_BAR = 0000FF"] {
+        let blue = fb_pins(spelling, None);
+        assert_eq!(blue.get("lightbar_b"), Some(&1.0), "{spelling}");
+        assert_eq!(blue.get("lightbar_r"), Some(&0.0), "{spelling}");
+    }
+
+    // And JSM's own default is white.
+    let plain = fb_pins("", None);
+    assert_eq!(plain.get("lightbar_r"), Some(&1.0));
+    assert_eq!(plain.get("lightbar_g"), Some(&1.0));
+    assert_eq!(plain.get("lightbar_b"), Some(&1.0));
+
+    assert!(matches!(one("LIGHT_BAR = TARTAN").status, LineStatus::Error(_)));
+
+    // `#RRGGBB` can never work: `#` starts a comment, so the value is gone before
+    // the colour is read. The error has to point that out, or it reads as a parser
+    // bug rather than as the config grammar.
+    match one("LIGHT_BAR = #0000FF").status {
+        LineStatus::Error(why) => assert!(
+            why.contains("starts a comment"),
+            "it explains why a hash cannot work: {why}"
+        ),
+        other => panic!("a commented-out value should be an error, got {other:?}"),
+    }
+}
+
+/// `RUMBLE = ON` (the default) leaves the game's rumble alone; `OFF` takes the
+/// group over and holds it at zero, which is the only way to stop it.
+#[test]
+fn rumble_off_takes_the_rumble_over_and_on_leaves_it_be() {
+    let on = fb_pins("RUMBLE = ON", None);
+    assert!(
+        !on.contains_key("rumble_strong"),
+        "with rumble on the group is left for the game: {on:?}"
+    );
+
+    let off = fb_pins("RUMBLE = OFF", None);
+    assert_eq!(
+        off.get("rumble_strong"),
+        Some(&0.0),
+        "with it off the group is claimed and held at zero: {off:?}"
+    );
+    assert_eq!(off.get("rumble_weak"), Some(&0.0));
+
+    // And the line says what it costs.
+    let line = one("RUMBLE = OFF");
+    assert!(
+        line.notes.iter().any(|n| n.contains("game's rumble stops")),
+        "it says the game's rumble stops: {:?}",
+        line.notes
+    );
+}
+
+/// A binding that rumbles takes the group over for as long as it is rumbling, even
+/// with `RUMBLE = ON` — and hands it straight back, or the pad would buzz for ever.
+#[test]
+fn a_rumble_binding_claims_the_group_only_while_it_rumbles() {
+    let quiet = fb_pins("RUMBLE = ON", None);
+    assert!(!quiet.contains_key("rumble_strong"), "nothing asking, nothing claimed");
+
+    let buzzing = fb_pins("RUMBLE = ON", Some((1.0, 0.5)));
+    assert_eq!(buzzing.get("rumble_strong"), Some(&1.0));
+    assert_eq!(buzzing.get("rumble_weak"), Some(&0.5));
+}
+
+/// JSM's own rumble amplitudes, as its names and its hex form give them.
+#[test]
+fn a_rumble_binding_carries_jsms_own_amplitudes() {
+    // `BIG_RUMBLE` is RFFFF, `SMALL_RUMBLE` is R0080 — high byte strong, low weak.
+    let big = steps("S = BIG_RUMBLE");
+    assert_eq!(big[0].out, super::names::Out::Rumble { strong: 1.0, weak: 1.0 });
+    let small = steps("S = SMALL_RUMBLE");
+    assert_eq!(
+        small[0].out,
+        super::names::Out::Rumble { strong: 0.0, weak: 128.0 / 255.0 }
+    );
+    let hex = steps("S = R8040");
+    assert_eq!(
+        hex[0].out,
+        super::names::Out::Rumble { strong: 128.0 / 255.0, weak: 64.0 / 255.0 }
+    );
+}
+
+/// Every one of JSM's adaptive-trigger effects lands on its pins, in JSM's
+/// parameter order and on the scale JSM's own encoder uses: zones /9, a 0-8
+/// force as `force - 1` of 7, feet and machine amplitudes as written of 7, and
+/// frequency and period /255.
+#[test]
+fn every_trigger_effect_lands_on_its_pins() {
+    use flexinput_core::automap::TriggerMode;
+    let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
+    let mode = |m: &HashMap<String, f32>, pin: &str| TriggerMode::from_pin(m[pin]);
+
+    // `RESISTANCE start force` — force 1-8 is the pad's 0-7.
+    let r = fb_pins("LEFT_TRIGGER_EFFECT = RESISTANCE 3 7", None);
+    assert_eq!(mode(&r, "trigger_l_mode"), TriggerMode::Feedback);
+    assert!(near(r["trigger_l_start"], 3.0 / 9.0), "zone 3 of 9");
+    assert!(near(r["trigger_l_strength"], 6.0 / 7.0), "force 7 is the pad's 6");
+    let full = fb_pins("LEFT_TRIGGER_EFFECT = RESISTANCE 3 8", None);
+    assert_eq!(full["trigger_l_strength"], 1.0, "force 8 is full");
+
+    // `BOW start end force snapForce`.
+    let b = fb_pins("LEFT_TRIGGER_EFFECT = BOW 2 5 4 6", None);
+    assert_eq!(mode(&b, "trigger_l_mode"), TriggerMode::Bow);
+    assert!(near(b["trigger_l_start"], 2.0 / 9.0) && near(b["trigger_l_end"], 5.0 / 9.0));
+    assert!(near(b["trigger_l_strength"], 3.0 / 7.0) && near(b["trigger_l_strength2"], 5.0 / 7.0));
+
+    // `GALLOPING start end firstFoot secondFoot frequency` — feet as written.
+    let g = fb_pins("RIGHT_TRIGGER_EFFECT = GALLOPING 1 8 3 5 100", None);
+    assert_eq!(mode(&g, "trigger_r_mode"), TriggerMode::Galloping);
+    assert!(near(g["trigger_r_start"], 1.0 / 9.0) && near(g["trigger_r_end"], 8.0 / 9.0));
+    assert!(near(g["trigger_r_strength"], 3.0 / 7.0) && near(g["trigger_r_strength2"], 5.0 / 7.0));
+    assert!(near(g["trigger_r_freq"], 100.0 / 255.0));
+
+    // `SEMI_AUTOMATIC start end force` — the click.
+    let s = fb_pins("RIGHT_TRIGGER_EFFECT = SEMI_AUTOMATIC 2 6 4", None);
+    assert_eq!(mode(&s, "trigger_r_mode"), TriggerMode::Weapon);
+    assert!(near(s["trigger_r_start"], 2.0 / 9.0) && near(s["trigger_r_end"], 6.0 / 9.0));
+    assert!(near(s["trigger_r_strength"], 3.0 / 7.0));
+
+    // `AUTOMATIC start force frequency` — vibration.
+    let a = fb_pins("LEFT_TRIGGER_EFFECT = AUTOMATIC 1 5 255", None);
+    assert_eq!(mode(&a, "trigger_l_mode"), TriggerMode::Vibration);
+    assert_eq!(a["trigger_l_freq"], 1.0, "frequency 255 of 255");
+    assert!(near(a["trigger_l_strength"], 4.0 / 7.0));
+
+    // `MACHINE start end forceA forceB frequency period` — amplitudes as written.
+    let m = fb_pins("LEFT_TRIGGER_EFFECT = MACHINE 1 9 3 4 40 60", None);
+    assert_eq!(mode(&m, "trigger_l_mode"), TriggerMode::Machine);
+    assert!(near(m["trigger_l_start"], 1.0 / 9.0) && near(m["trigger_l_end"], 1.0));
+    assert!(near(m["trigger_l_strength"], 3.0 / 7.0) && near(m["trigger_l_strength2"], 4.0 / 7.0));
+    assert!(near(m["trigger_l_freq"], 40.0 / 255.0) && near(m["trigger_l_period"], 60.0 / 255.0));
+
+    // `OFF` writes every pin of the group, so a previous effect can't shape it.
+    let off = fb_pins("LEFT_TRIGGER_EFFECT = OFF", None);
+    for pin in [
+        "trigger_l_mode", "trigger_l_start", "trigger_l_end", "trigger_l_strength",
+        "trigger_l_freq", "trigger_l_strength2", "trigger_l_period",
+    ] {
+        assert_eq!(off.get(pin), Some(&0.0), "{pin} is zeroed");
+    }
+}
+
+/// A number missing or out of JSM's range is an error that names it; a zero
+/// force or frequency is JSM's "no effect", which switches the trigger off and
+/// says so.
+#[test]
+fn trigger_effect_numbers_are_held_to_jsms_ranges() {
+    let error_of = |line: &str| match one(line).status {
+        LineStatus::Error(why) => why,
+        other => panic!("`{line}` should be an error, got {other:?}"),
+    };
+    assert!(error_of("LEFT_TRIGGER_EFFECT = RESISTANCE 3").contains("force"));
+    assert!(error_of("LEFT_TRIGGER_EFFECT = RESISTANCE 3 9").contains("0 to 8"));
+    assert!(error_of("LEFT_TRIGGER_EFFECT = SEMI_AUTOMATIC 1 6 4").contains("2 to 7"));
+    assert!(error_of("LEFT_TRIGGER_EFFECT = BOW 5 3 1 1").contains("end zone past"));
+    assert!(error_of("LEFT_TRIGGER_EFFECT = GALLOPING 1 8 5 3 100").contains("second foot past the first foot"));
+    assert!(error_of("LEFT_TRIGGER_EFFECT = MACHINE 1 9 3 8 40 60").contains("0 to 7"));
+
+    let zero = one("LEFT_TRIGGER_EFFECT = RESISTANCE 3 0");
+    assert_eq!(zero.status, LineStatus::Ok);
+    assert!(zero.notes.join(" ").contains("no effect"), "{:?}", zero.notes);
+    let out = fb_pins("LEFT_TRIGGER_EFFECT = AUTOMATIC 1 5 0", None);
+    assert_eq!(out["trigger_l_mode"], 0.0, "no frequency, no vibration: off");
+}
+
+/// `ON` — JSM's default — means "no effect of my own", so the group is left
+/// entirely alone and the game keeps whatever it set.
+#[test]
+fn an_adaptive_trigger_left_on_is_not_touched() {
+    let auto = fb_pins("LEFT_TRIGGER_EFFECT = ON", None);
+    assert!(
+        !auto.keys().any(|k| k.starts_with("trigger_l_")),
+        "nothing of the left trigger is claimed: {auto:?}"
+    );
+    // And the default is the same.
+    let plain = fb_pins("", None);
+    assert!(!plain.keys().any(|k| k.starts_with("trigger_")));
+}
+
+/// `ADAPTIVE_TRIGGER = OFF` overrules whatever effects are set — one switch to
+/// stop the triggers fighting you, which is how JSM uses it.
+#[test]
+fn adaptive_trigger_off_overrules_the_effects() {
+    let out = fb_pins(
+        "LEFT_TRIGGER_EFFECT = RESISTANCE 3 7\nADAPTIVE_TRIGGER = OFF",
+        None,
+    );
+    assert_eq!(out["trigger_l_mode"], 0.0, "the effect is switched off: {out:?}");
+    assert_eq!(out["trigger_l_strength"], 0.0);
+}
+
+/// Trigger travel calibration is the device card's, not the config's.
+#[test]
+fn trigger_travel_calibration_is_the_device_cards() {
+    for line in [
+        "LEFT_TRIGGER_OFFSET = 20",
+        "LEFT_TRIGGER_RANGE = 150",
+        "RIGHT_TRIGGER_OFFSET = 20",
+        "RIGHT_TRIGGER_RANGE = 150",
+    ] {
+        match one(line).status {
+            LineStatus::Ignored(why) => {
+                assert!(why.contains("device card"), "{line}: {why}");
+            }
+            other => panic!("{line} should be ignored with a reason, got {other:?}"),
+        }
+    }
+}
+
+/// Feedback reaches the pad on the override layer, keyed to the pad upstream —
+/// which is what lets it replace the game's rather than add to it.
+#[test]
+fn feedback_reaches_the_pad_it_came_from() {
+    let _guard = alone();
+    let uid = 4242;
+    let mut snap = jsm_snap(uid, "LIGHT_BAR = RED\nRUMBLE = OFF", false);
+    snap.params
+        .insert("_jsm_dest_dev".into(), serde_json::Value::String(PAD.into()));
+    let mut dev: BusMap = BusMap::default();
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    for _ in 0..2 {
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    let key = format!("feedback_override:{PAD}");
+    assert_eq!(
+        collector.get(&(key.clone(), "lightbar_r".to_string())).map(|s| s.as_float()),
+        Some(1.0),
+        "the light bar reaches the pad it came from"
+    );
+    assert_eq!(
+        collector.get(&(key, "rumble_strong".to_string())).map(|s| s.as_float()),
+        Some(0.0),
+        "and rumble is held at zero rather than left to the game"
+    );
+    let _ = &mut dev;
+}
+
+/// With no pad resolved upstream there is nowhere for feedback to go, and nothing
+/// is published — rather than a stray `feedback_override:` nobody drains.
+#[test]
+fn feedback_with_no_pad_upstream_goes_nowhere() {
+    let _guard = alone();
+    let uid = 4243;
+    let snap = jsm_snap(uid, "LIGHT_BAR = RED", false);
+    let dev: BusMap = BusMap::default();
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    assert!(
+        !collector.keys().any(|(k, _)| k.starts_with("feedback_override:")),
+        "nothing published with nowhere to send it"
+    );
+}
+
+/// Every one of phase 7's settings is read.
+#[test]
+fn every_feedback_setting_is_read() {
+    let c = compile(
+        "RUMBLE = OFF\n\
+         LIGHT_BAR = x123456\n\
+         ADAPTIVE_TRIGGER = ON\n\
+         LEFT_TRIGGER_EFFECT = RESISTANCE 4 5\n\
+         RIGHT_TRIGGER_EFFECT = AUTOMATIC 2 3 120",
+    );
+    assert!(errors(&c).is_empty(), "all live: {:?}", errors(&c));
+    assert!(!c.fb.rumble);
+    assert_eq!(c.fb.light_bar, (0x12, 0x34, 0x56));
+    assert!(c.fb.adaptive);
+    assert_eq!(
+        c.fb.trigger[0],
+        super::feedback::Effect::Resistance { start: 4, force: 5 }
+    );
+    assert_eq!(
+        c.fb.trigger[1],
+        super::feedback::Effect::Automatic { start: 2, force: 3, frequency: 120 }
+    );
+
+    for bad in [
+        "RUMBLE = MAYBE",
+        "ADAPTIVE_TRIGGER = SOMETIMES",
+        "LIGHT_BAR = xZZZZZZ",
+        "LEFT_TRIGGER_EFFECT = SQUEEZE",
+    ] {
+        assert!(matches!(one(bad).status, LineStatus::Error(_)), "{bad}");
+    }
+}
+
+/// A feedback setting can be chorded like any other, which is what phase 4 bought.
+#[test]
+fn feedback_settings_can_be_chorded() {
+    let c = compile("ZL,LIGHT_BAR = RED");
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    let held = super::parse::resolve(&c, &[Btn::Zl]);
+    assert_eq!(held.fb.light_bar, (0xFF, 0x00, 0x00), "held, it is red");
+    let idle = super::parse::resolve(&c, &[]);
+    assert_eq!(idle.fb.light_bar, (0xFF, 0xFF, 0xFF), "let go, back to white");
+}
+
+/// Every colour name JSM accepts, and what it is. A config written against JSM's
+/// names has to light the same colour here, and "it compiled" is not that.
+#[test]
+fn every_colour_name_is_the_colour_it_says() {
+    for (name, want) in [
+        ("BLACK", (0.0, 0.0, 0.0)),
+        ("WHITE", (1.0, 1.0, 1.0)),
+        ("RED", (1.0, 0.0, 0.0)),
+        ("GREEN", (0.0, 1.0, 0.0)),
+        ("BLUE", (0.0, 0.0, 1.0)),
+        ("YELLOW", (1.0, 1.0, 0.0)),
+        ("CYAN", (0.0, 1.0, 1.0)),
+        ("MAGENTA", (1.0, 0.0, 1.0)),
+        ("PINK", (1.0, 0.0, 1.0)),
+        ("ORANGE", (1.0, 128.0 / 255.0, 0.0)),
+        ("PURPLE", (128.0 / 255.0, 0.0, 1.0)),
+        ("GREY", (128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0)),
+        ("GRAY", (128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0)),
+    ] {
+        let out = fb_pins(&format!("LIGHT_BAR = {name}"), None);
+        let got = (out["lightbar_r"], out["lightbar_g"], out["lightbar_b"]);
+        assert!(
+            (got.0 - want.0).abs() < 1e-6
+                && (got.1 - want.1).abs() < 1e-6
+                && (got.2 - want.2).abs() < 1e-6,
+            "{name} should be {want:?}, got {got:?}"
+        );
+    }
+}
+
+/// A binding that rumbles reaches the pad, end to end — the binding fires, the
+/// amplitude lands on the override layer keyed to the pad upstream.
+#[test]
+fn a_rumble_binding_reaches_the_pad() {
+    let _guard = alone();
+    let uid = 4244;
+    let mut snap = jsm_snap(uid, "S = BIG_RUMBLE", false);
+    snap.params
+        .insert("_jsm_dest_dev".into(), serde_json::Value::String(PAD.into()));
+    let mut dev: BusMap = BusMap::default();
+    dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let key = format!("feedback_override:{PAD}");
+    let mut strongest = 0.0f32;
+    for _ in 0..4 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+        if let Some(v) = collector.get(&(key.clone(), "rumble_strong".to_string())) {
+            strongest = strongest.max(v.as_float());
+        }
+    }
+    assert!(
+        strongest > 0.9,
+        "pressing the button rumbles the pad it came from, got {strongest}"
+    );
+
+    // And with nothing pressed, the rumble group is left to the game — `RUMBLE` is
+    // on by default, so nothing is claimed.
+    let dev: BusMap = BusMap::default();
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    for _ in 0..4 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    assert!(
+        !collector.contains_key(&(key, "rumble_strong".to_string())),
+        "with nothing rumbling the game keeps the group"
+    );
+}
+
+// ── phase 8: action layers ───────────────────────────────────────────────────
+
+/// A node holding several tabs, with the first one open.
+fn tabbed_snap(uid: usize, tabs: &[(&str, &str)]) -> NodeSnap {
+    let mut snap = jsm_snap(uid, tabs[0].1, false);
+    let list: Vec<serde_json::Value> = tabs
+        .iter()
+        .map(|(n, t)| {
+            serde_json::json!({ "name": n.to_string(), "text": t.to_string() })
+        })
+        .collect();
+    snap.params.insert("jsm_tabs".into(), serde_json::Value::Array(list));
+    snap.params.insert("jsm_active_tab".into(), serde_json::json!(0));
+    snap
+}
+
+/// Run a tabbed node, pressing whatever is named, and return what it drove.
+fn run_tabs(
+    tabs: &[(&str, &str)],
+    steps: &[(&[&str], usize)],
+) -> Vec<std::collections::HashSet<String>> {
+    let _guard = alone();
+    let uid = 5150;
+    let snap = tabbed_snap(uid, tabs);
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut seen = Vec::new();
+    for (held, ticks) in steps {
+        let mut dev: BusMap = BusMap::default();
+        for pin in *held {
+            dev.insert((PAD.to_string(), pin.to_string()), Signal::Bool(true));
+        }
+        for _ in 0..*ticks {
+            collector.clear();
+            super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+        }
+        seen.push(
+            collector
+                .iter()
+                .filter(|((_, p), v)| p.starts_with("key_") && v.as_bool())
+                .map(|((_, p), _)| p.to_string())
+                .collect(),
+        );
+    }
+    seen
+}
+
+/// A press that switches layers is finished by the layer it started in, as JSM
+/// keeps a press's mapping until the button lets go: `L3 = Q' "L3.txt"\`
+/// switches on the press and still taps Q on release. The layer switched to
+/// takes the held button as already down, not as a press of its own; its own
+/// binding is the next press's — which taps W and switches back on release.
+#[test]
+fn a_press_that_switches_layers_finishes_on_the_layer_it_started_in() {
+    let _guard = alone();
+    let uid = 5151;
+    let snap = tabbed_snap(uid, &[
+        ("Base", "L3 = Q' \"L3.txt\"\\\nS = R"),
+        ("L3", "L3 = W' \"Base.txt\"/\nS = E"),
+    ]);
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    // Every key seen down over `ticks` with `held` held.
+    let mut run = |held: &[&str], ticks: usize| {
+        let mut dev: BusMap = BusMap::default();
+        for pin in held {
+            dev.insert((PAD.to_string(), pin.to_string()), Signal::Bool(true));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..ticks {
+            let mut collector: BusMap = BusMap::default();
+            super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+            seen.extend(
+                collector
+                    .iter()
+                    .filter(|((_, p), v)| p.starts_with("key_") && v.as_bool())
+                    .map(|((_, p), _)| p.to_string()),
+            );
+        }
+        seen
+    };
+    assert!(run(&["btn_south"], 3).contains("key_r"), "starts on Base");
+    run(&[], 3);
+
+    // Tap L3 on Base: the press switches to L3, the release still taps Q.
+    run(&["btn_ls"], 5);
+    let after = run(&[], 10);
+    assert!(after.contains("key_q"), "Base's tap fires on release: {after:?}");
+    assert!(!after.contains("key_w"), "the held L3 wasn't a press on the L3 layer: {after:?}");
+    assert!(run(&["btn_south"], 3).contains("key_e"), "and the L3 layer is running");
+    run(&[], 3);
+
+    // Tap L3 on the L3 layer: W on release, and back to Base.
+    run(&["btn_ls"], 5);
+    let after = run(&[], 10);
+    assert!(after.contains("key_w"), "the L3 layer's tap fires as it switches back: {after:?}");
+    assert!(run(&["btn_south"], 3).contains("key_r"), "back on Base");
+    run(&[], 3);
+
+    // Held past the hold time, it is no tap: no Q, but still on the L3 layer.
+    run(&["btn_ls"], 30);
+    let after = run(&[], 10);
+    assert!(!after.contains("key_q"), "a held press doesn't tap: {after:?}");
+    assert!(run(&["btn_south"], 3).contains("key_e"), "switched on the press all the same");
+}
+
+/// A tab is named by its file name alone, whatever path a JSM config used.
+#[test]
+fn a_tab_is_named_by_its_file_name_alone() {
+    for raw in [
+        "vehicle.txt",
+        "vehicle",
+        "GyroConfigs/vehicle.txt",
+        "Autoload/GTA5/vehicle.txt",
+        r"GyroConfigs\vehicle.txt",
+    ] {
+        assert_eq!(super::parse::tab_name(raw), "vehicle", "{raw}");
+    }
+}
+
+/// A button bound to a config file switches which tab is running — JSM's action
+/// layers, in a patch that keeps its configs as tabs.
+#[test]
+fn a_binding_can_switch_to_another_tab() {
+    let seen = run_tabs(
+        &[
+            ("base", "S = A\nHOME = \"driving.txt\""),
+            ("driving", "S = B\nHOME = \"base.txt\""),
+        ],
+        &[
+            // Press S on the base layer.
+            (&["btn_south"], 3),
+            // Switch, then press S again — the same button, a different key.
+            (&["btn_guide"], 3),
+            (&["btn_south"], 3),
+            // And back.
+            (&["btn_guide"], 3),
+            (&["btn_south"], 3),
+        ],
+    );
+    assert!(seen[0].contains("key_a"), "base layer: S is A — {:?}", seen[0]);
+    assert!(seen[2].contains("key_b"), "driving layer: S is B — {:?}", seen[2]);
+    assert!(!seen[2].contains("key_a"), "and not A any more — {:?}", seen[2]);
+    assert!(seen[4].contains("key_a"), "back on base: S is A again — {:?}", seen[4]);
+}
+
+/// Switching layers must release whatever the old one was driving. This is the
+/// stuck-key bug in a different coat: a key held when the layer changes has no
+/// binding left to release it. The old layer finishes the press — JSM keeps a
+/// press's mapping until its button lets go — so the key stays down while S
+/// does, and goes up with it.
+#[test]
+fn switching_layers_does_not_leave_a_key_held() {
+    let _guard = alone();
+    let uid = 5151;
+    let snap = tabbed_snap(
+        uid,
+        &[("base", "S = A\nHOME = \"driving.txt\""), ("driving", "N = B")],
+    );
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut dev: BusMap = BusMap::default();
+
+    // Hold S so A is down.
+    dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+    for _ in 0..3 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    assert_eq!(
+        collector.get(&(format!("collector:{uid}"), "key_a".to_string())).map(|s| s.as_bool()),
+        Some(true),
+        "A is held to start with"
+    );
+
+    // Now switch layers with S still held. The new tab has no binding for S at all.
+    dev.insert((PAD.to_string(), "btn_guide".to_string()), Signal::Bool(true));
+    for _ in 0..5 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    let a = |c: &BusMap| c.get(&(format!("collector:{uid}"), "key_a".to_string())).map(|s| s.as_bool());
+    assert_eq!(a(&collector), Some(true), "S's press still holds A, on the layer it started in");
+
+    // Let go of S: A goes up, although the running layer has no binding for S.
+    dev.remove(&(PAD.to_string(), "btn_south".to_string()));
+    for _ in 0..5 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    assert!(a(&collector) != Some(true), "the key the old layer was holding is not left down: {:?}", a(&collector));
+}
+
+/// `RESET_MAPPINGS` bound to a button puts the module back on the tab the editor
+/// has open, whatever layer it had wandered to.
+#[test]
+fn reset_mappings_goes_back_to_the_open_tab() {
+    let seen = run_tabs(
+        &[
+            ("base", "S = A\nHOME = \"driving.txt\""),
+            ("driving", "S = B\nN = \"RESET_MAPPINGS\""),
+        ],
+        &[
+            (&["btn_guide"], 3),
+            (&["btn_south"], 3),
+            (&["btn_north"], 3),
+            (&["btn_south"], 3),
+        ],
+    );
+    assert!(seen[1].contains("key_b"), "on the driving layer — {:?}", seen[1]);
+    assert!(seen[3].contains("key_a"), "reset put it back on base — {:?}", seen[3]);
+}
+
+/// A bare `RESET_MAPPINGS` line discards everything above it, which is what JSM
+/// does — and at the top of a file, where it usually sits, it says plainly that
+/// there was nothing to discard.
+#[test]
+fn a_bare_reset_mappings_line_discards_what_came_before() {
+    // Mid-file: the binding and the setting above it are gone.
+    let c = compile("S = A\nGYRO_SENS = 4\nRESET_MAPPINGS\nN = B");
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    assert_eq!(c.bindings.len(), 1, "only the binding below it survives");
+    assert_eq!(c.bindings[0].trigger, Trigger::Simple(Btn::N));
+    assert_eq!(c.aim.min_sens, (0.0, 0.0), "and the setting is back to default");
+
+    // At the top: nothing to discard, and the line says so rather than looking
+    // like it did something.
+    let c = compile("RESET_MAPPINGS\nS = A");
+    assert_eq!(c.lines[0].status, LineStatus::Ok);
+    assert!(
+        c.lines[0].notes.iter().any(|n| n.contains("nothing above it")),
+        "it says there was nothing to reset: {:?}",
+        c.lines[0].notes
+    );
+    assert_eq!(c.bindings.len(), 1, "and the binding below it is untouched");
+}
+
+/// Naming a config on its own line applies everything in that tab right there —
+/// JSM loads the file at that point, so its settings and bindings take effect.
+#[test]
+fn a_bare_config_name_applies_that_tab() {
+    let tabs = vec![(
+        "defaults".to_string(),
+        "GYRO_SENS = 3\nS = A\nN = C".to_string(),
+    )];
+    // The included tab's binding for S is replaced by the later one here; its
+    // binding for N, which nothing else touches, comes across.
+    let c = compile_with("defaults.txt\nS = B", &tabs);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    assert_eq!(c.aim.min_sens, (3.0, 3.0), "its settings apply");
+    let for_btn = |b: Btn| {
+        c.bindings
+            .iter()
+            .find(|x| x.trigger == Trigger::Simple(b))
+            .map(|x| x.steps[0].out.clone())
+    };
+    assert_eq!(for_btn(Btn::N), Some(pin("key_c")), "its bindings apply");
+    assert_eq!(
+        for_btn(Btn::S),
+        Some(pin("key_b")),
+        "and a later line here overrides one of them"
+    );
+    assert!(
+        c.lines[0].notes.iter().any(|n| n.contains("chain stops here")),
+        "the line says it does not follow a chain: {:?}",
+        c.lines[0].notes
+    );
+}
+
+/// Two configs naming each other must not compile for ever.
+#[test]
+fn configs_that_name_each_other_do_not_loop() {
+    let tabs = vec![
+        ("a".to_string(), "b.txt\nS = A".to_string()),
+        ("b".to_string(), "a.txt\nN = B".to_string()),
+    ];
+    // Compiling either one terminates; that it returns at all is the assertion.
+    let c = compile_with("b.txt", &tabs);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    assert!(
+        c.bindings.iter().any(|x| x.trigger == Trigger::Simple(Btn::N)),
+        "one level came across"
+    );
+}
+
+/// A rebound button uses the LAST binding, not the first — a binding is an
+/// assignment, as in JSM. The earlier line says which one took over.
+#[test]
+fn a_rebound_button_uses_the_last_binding() {
+    let c = compile("S = A\nS = B");
+    assert_eq!(c.bindings.len(), 1, "one binding, not two");
+    assert_eq!(c.bindings[0].steps[0].out, pin("key_b"), "the later one wins");
+    assert!(
+        c.lines[0].notes.iter().any(|n| n.contains("replaced by the binding on line 2")),
+        "the line that lost says so: {:?}",
+        c.lines[0].notes
+    );
+
+    // End to end: pressing the button sends the second key, not the first.
+    let out = run_node("S = A\nS = B", false, &["btn_south"], 3);
+    assert!(out.get("key_b").map(|s| s.as_bool()).unwrap_or(false), "{out:?}");
+    assert!(!out.get("key_a").map(|s| s.as_bool()).unwrap_or(false), "{out:?}");
+}
+
+/// Editing any tab recompiles, including one a layer switch would reach — and puts
+/// the module back on the tab the editor has open, rather than running a
+/// half-edited chain.
+#[test]
+fn an_edit_puts_the_module_back_on_the_open_tab() {
+    let _guard = alone();
+    let uid = 5152;
+    let mut snap = tabbed_snap(
+        uid,
+        &[("base", "S = A\nHOME = \"driving.txt\""), ("driving", "S = B")],
+    );
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut dev: BusMap = BusMap::default();
+    dev.insert((PAD.to_string(), "btn_guide".to_string()), Signal::Bool(true));
+    for _ in 0..3 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    // On the driving layer now: S is B.
+    let mut dev: BusMap = BusMap::default();
+    dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+    for _ in 0..3 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    assert_eq!(
+        collector.get(&(format!("collector:{uid}"), "key_b".to_string())).map(|s| s.as_bool()),
+        Some(true),
+        "the layer switch took"
+    );
+
+    // Now edit the OTHER tab. It recompiles, and lands back on the open one.
+    snap = tabbed_snap(
+        uid,
+        &[("base", "S = A\nHOME = \"driving.txt\"\n# edited"), ("driving", "S = B")],
+    );
+    for _ in 0..3 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    assert_eq!(
+        collector.get(&(format!("collector:{uid}"), "key_a".to_string())).map(|s| s.as_bool()),
+        Some(true),
+        "an edit puts it back on the tab being edited"
+    );
+}
+
+/// A console command JSM has and we don't is not an error — it is deliberately
+/// ignored, with the same reason the bare command line gives. A command means the
+/// same thing whether it is written on its own or bound to a button.
+#[test]
+fn a_console_command_binding_says_it_does_nothing_and_why() {
+    for (line, expect) in [
+        ("HOME = \"RECONNECT_CONTROLLERS\"", "tracks connected controllers"),
+        ("HOME = \"CALIBRATE_TRIGGERS\"", "device card"),
+        ("HOME = \"WHITELIST_ADD\"", "HidHide"),
+        ("HOME = \"QUIT\"", "nothing to do here"),
+    ] {
+        let info = one(line);
+        assert!(
+            matches!(info.status, LineStatus::Ignored(_)),
+            "{line} is ignored, not an error or a claim: {:?}",
+            info.status
+        );
+        let notes = info.notes.join(" ");
+        assert!(notes.contains(expect), "{line} says why: {notes}");
+    }
+
+    // And a command the module DOES run is live: `SET_MOTION_STICK_NEUTRAL` bound to
+    // a button is the useful form of it.
+    let live = one("HOME = \"SET_MOTION_STICK_NEUTRAL\"");
+    assert_eq!(live.status, LineStatus::Ok, "{live:?}");
+
+    // A binding that mixes a real key with an inert command still runs the key.
+    let mixed = one("HOME = A \"QUIT\"");
+    assert_eq!(mixed.status, LineStatus::Ok, "the key still fires: {mixed:?}");
+}
+
+/// Switching layers must actively release what the old layer was driving, not just
+/// stop mentioning it. A sink latches the last value it was told, so a key that
+/// simply falls off the bus stays DOWN — the stuck-key bug in a different coat.
+/// This is the assertion the weaker "it isn't true any more" version missed.
+#[test]
+fn switching_layers_publishes_the_old_layers_keys_as_released() {
+    let _guard = alone();
+    let uid = 5153;
+    let snap = tabbed_snap(
+        uid,
+        &[("base", "S = A\nHOME = \"driving.txt\""), ("driving", "N = B")],
+    );
+    let mut collector: BusMap = BusMap::default();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut dev: BusMap = BusMap::default();
+    let key = (format!("collector:{uid}"), "key_a".to_string());
+
+    dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+    for _ in 0..3 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    assert_eq!(collector.get(&key).map(|s| s.as_bool()), Some(true), "A starts held");
+
+    // Switch with S still held — its press finishes on the old layer, A held
+    // while S is — then let go of S and run on for a while.
+    dev.insert((PAD.to_string(), "btn_guide".to_string()), Signal::Bool(true));
+    for _ in 0..3 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    dev.remove(&(PAD.to_string(), "btn_south".to_string()));
+    for _ in 0..6 {
+        collector.clear();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, DT);
+    }
+    // A fresh map every tick, so this can only pass if the module actively says
+    // "off" — absence would leave the sink holding `true`.
+    assert_eq!(
+        collector.get(&key).map(|s| s.as_bool()),
+        Some(false),
+        "the new layer keeps telling the old layer's key it is released"
+    );
+}
+
+/// An included tab's bindings replace the host's for the same button, because the
+/// include happens at that point in the file and a binding is an assignment.
+#[test]
+fn an_included_tab_replaces_a_binding_made_above_it() {
+    let tabs = vec![("defaults".to_string(), "S = C".to_string())];
+    let c = compile_with("S = A\ndefaults.txt", &tabs);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    let s_binding: Vec<_> = c
+        .bindings
+        .iter()
+        .filter(|x| x.trigger == Trigger::Simple(Btn::S))
+        .collect();
+    assert_eq!(s_binding.len(), 1, "one binding for S, not two: {:?}", c.bindings);
+    assert_eq!(
+        s_binding[0].steps[0].out,
+        pin("key_c"),
+        "the included tab's binding wins, being further down the file"
+    );
+}
+
+/// A tab pulled in changes only the settings it names: a second include doesn't
+/// put back the defaults of everything the first one set. A user's layer read
+/// `FF14.txt` then `Gyro.txt`, and lost FF14's trigger modes to the second.
+#[test]
+fn a_second_include_keeps_the_settings_it_does_not_name() {
+    use super::analog::TriggerMode;
+    let tabs = vec![
+        ("FF14".to_string(), "ZR_MODE = NO_SKIP\nZL_MODE = NO_SKIP\nZRF = A".to_string()),
+        ("Gyro".to_string(), "GYRO_SENS = 2".to_string()),
+    ];
+    let c = compile_with("FF14.txt\nGyro.txt\nW = RMOUSE", &tabs);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    assert_eq!(c.settings.zr, TriggerMode::NoSkip, "FF14's ZR_MODE survives Gyro.txt");
+    assert_eq!(c.settings.zl, TriggerMode::NoSkip);
+    assert_eq!(c.aim.min_sens.0, 2.0, "and Gyro's own setting lands");
+    let notes: String = c.lines.iter().flat_map(|l| l.notes.clone()).collect();
+    assert!(!notes.contains("never fires"), "ZRF isn't called dead: {notes}");
+
+    // What the host set above an include stays too, unless the tab names it.
+    let c = compile_with("ZR_MODE = MAY_SKIP\nGyro.txt", &tabs);
+    assert_eq!(c.settings.zr, TriggerMode::MaySkip);
+    let c = compile_with("ZR_MODE = MAY_SKIP\nFF14.txt", &tabs);
+    assert_eq!(c.settings.zr, TriggerMode::NoSkip, "a setting the tab names is its");
+}
+
+/// Editing a tab the editor does NOT have open still recompiles — a layer a binding
+/// can reach is as live as the one on screen.
+#[test]
+fn editing_a_tab_that_is_not_open_still_recompiles() {
+    let _guard = alone();
+    let uid = 5154;
+    let run = |snap: &NodeSnap, state: &mut HashMap<usize, NodeState>| {
+        let mut collector: BusMap = BusMap::default();
+        let mut dev: BusMap = BusMap::default();
+        dev.insert((PAD.to_string(), "btn_guide".to_string()), Signal::Bool(true));
+        for _ in 0..3 {
+            collector.clear();
+            super::eval::jsm_publish(snap, uid, &dev, &mut collector, state, DT);
+        }
+        let mut dev: BusMap = BusMap::default();
+        dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+        for _ in 0..3 {
+            collector.clear();
+            super::eval::jsm_publish(snap, uid, &dev, &mut collector, state, DT);
+        }
+        collector
+            .iter()
+            .filter(|((_, p), v)| p.starts_with("key_") && v.as_bool())
+            .map(|((_, p), _)| p.to_string())
+            .collect::<std::collections::HashSet<String>>()
+    };
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+
+    let first = tabbed_snap(
+        uid,
+        &[("base", "HOME = \"driving.txt\""), ("driving", "S = B")],
+    );
+    let got = run(&first, &mut state);
+    assert!(got.contains("key_b"), "the second tab's binding runs: {got:?}");
+
+    // Edit the SECOND tab — the one not open. It has to take effect.
+    let edited = tabbed_snap(
+        uid,
+        &[("base", "HOME = \"driving.txt\""), ("driving", "S = D")],
+    );
+    let got = run(&edited, &mut state);
+    assert!(
+        got.contains("key_d") && !got.contains("key_b"),
+        "editing a tab that isn't open still recompiles: {got:?}"
+    );
+}
+
+/// After an edit the module is back on the open tab *and knows it*, so a binding can
+/// switch away again. Forgetting the second half leaves the switch looking like a
+/// no-op, which is invisible until someone presses the button twice.
+#[test]
+fn a_layer_can_be_switched_to_again_after_an_edit() {
+    let _guard = alone();
+    let uid = 5155;
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let press = |snap: &NodeSnap, state: &mut HashMap<usize, NodeState>, pins: &[&str]| {
+        let mut collector: BusMap = BusMap::default();
+        let mut dev: BusMap = BusMap::default();
+        for p in pins {
+            dev.insert((PAD.to_string(), p.to_string()), Signal::Bool(true));
+        }
+        for _ in 0..3 {
+            collector.clear();
+            super::eval::jsm_publish(snap, uid, &dev, &mut collector, state, DT);
+        }
+        collector
+            .iter()
+            .filter(|((_, p), v)| p.starts_with("key_") && v.as_bool())
+            .map(|((_, p), _)| p.to_string())
+            .collect::<std::collections::HashSet<String>>()
+    };
+    let tabs: &[(&str, &str)] = &[("base", "S = A\nHOME = \"driving.txt\""), ("driving", "S = B")];
+    let snap = tabbed_snap(uid, tabs);
+
+    press(&snap, &mut state, &["btn_guide"]);
+    let on_layer = press(&snap, &mut state, &["btn_south"]);
+    assert!(on_layer.contains("key_b"), "switched once: {on_layer:?}");
+
+    // An edit sends it back to the open tab.
+    let edited = tabbed_snap(
+        uid,
+        &[("base", "S = A\nHOME = \"driving.txt\"\n# edited"), ("driving", "S = B")],
+    );
+    let back = press(&edited, &mut state, &["btn_south"]);
+    assert!(back.contains("key_a"), "an edit puts it back on base: {back:?}");
+
+    // And the switch works again — it is not remembered as already done.
+    press(&edited, &mut state, &["btn_guide"]);
+    let again = press(&edited, &mut state, &["btn_south"]);
+    assert!(
+        again.contains("key_b"),
+        "the same binding switches away again: {again:?}"
+    );
+}
+
+// ── phase 9: the JSM_custom_curve fork ───────────────────────────────────────
+
+/// Each curve's shape, checked where its shape actually differs from a straight
+/// line. The three settings a curve does or doesn't consult matter more than the
+/// exact numbers, so each case picks a speed where the difference is unmistakable.
+#[test]
+fn every_acceleration_curve_has_the_shape_it_claims() {
+    use super::cc::{sensitivity, Curve, Settings as Cc};
+    let (lo, hi, cap) = (1.0f32, 5.0f32, 100.0f32);
+    // The linear position between the thresholds, for `LINEAR` only.
+    let t = |omega: f32| (omega / cap).min(1.0);
+    let at = |c: Cc, omega: f32| sensitivity(&c, omega, t(omega), cap, lo, hi);
+
+    // LINEAR is the straight line stock JSM draws.
+    let lin = Cc { curve: Curve::Linear, ..Default::default() };
+    assert!((at(lin, 0.0) - lo).abs() < 1e-5, "linear starts at the bottom");
+    assert!((at(lin, 50.0) - 3.0).abs() < 1e-5, "and is halfway at halfway");
+    assert!((at(lin, 100.0) - hi).abs() < 1e-5, "and reaches the top");
+
+    // NATURAL is halfway up at `vhalf`, and never quite reaches the top.
+    let nat = Cc { curve: Curve::Natural, natural_vhalf: 50.0, ..Default::default() };
+    assert!((at(nat, 0.0) - lo).abs() < 1e-5, "natural starts at the bottom");
+    assert!((at(nat, 50.0) - 3.0).abs() < 1e-4, "halfway at vhalf: {}", at(nat, 50.0));
+    // Three half-lives up it is at 7/8 of the way, still short of the top. (Far
+    // enough out the exponential underflows and it reaches `hi` exactly, which is a
+    // float limit rather than anything to assert about.)
+    let three_halves = at(nat, 150.0);
+    assert!(
+        three_halves < hi && three_halves > 4.0,
+        "approaches the top without reaching it: {three_halves}"
+    );
+
+    // QUADRATIC is flat early and steep late — under the line at halfway.
+    let quad = Cc { curve: Curve::Quadratic, ..Default::default() };
+    assert!(at(quad, 50.0) < at(lin, 50.0), "quadratic is gentler at halfway");
+    assert!((at(quad, 100.0) - hi).abs() < 1e-5, "and pegs at the cap");
+    assert!((at(quad, 200.0) - hi).abs() < 1e-5, "and stays there past it");
+
+    // SIGMOID starts exactly at the bottom, by construction.
+    let sig = Cc { curve: Curve::Sigmoid, sigmoid_mid: 50.0, sigmoid_width: 8.0, ..Default::default() };
+    assert!((at(sig, 0.0) - lo).abs() < 1e-5, "sigmoid is rescaled to start at lo");
+    assert!((at(sig, 50.0) - 3.0).abs() < 0.05, "and is halfway at its midpoint");
+    assert!(at(sig, 30.0) < at(lin, 30.0), "S-shaped: below the line early");
+    assert!(at(sig, 70.0) > at(lin, 70.0), "and above it late");
+
+    // JUMP hugs the bottom then steps up near the cap.
+    let jump = Cc { curve: Curve::Jump, jump_tau: 10.0, ..Default::default() };
+    assert!((at(jump, 0.0) - lo).abs() < 1e-5, "jump is rescaled to start at lo");
+    assert!(at(jump, 50.0) < 1.1, "and stays down until the cap is near: {}", at(jump, 50.0));
+    assert!((at(jump, 100.0) - hi).abs() < 1e-5, "then steps to the top");
+
+    // POWER with a tiny reference speed climbs almost at once.
+    let pow = Cc { curve: Curve::Power, power_vref: 0.01, power_exponent: 0.5, ..Default::default() };
+    assert!(at(pow, 0.0) <= lo + 1e-5, "power is at the bottom when standing still");
+    assert!(at(pow, 1.0) > at(lin, 1.0), "and climbs faster than the line: {}", at(pow, 1.0));
+}
+
+/// Only three of the six curves consult `MAX_GYRO_THRESHOLD` — the trap the plan
+/// calls out, and the one the editor has to warn about.
+#[test]
+fn three_curves_ignore_the_top_threshold_and_say_so() {
+    use super::cc::{sensitivity, Curve, Settings as Cc};
+    for curve in [Curve::Linear, Curve::Quadratic, Curve::Jump] {
+        assert!(curve.uses_max_threshold(), "{curve:?} uses the cap");
+    }
+    for curve in [Curve::Natural, Curve::Power, Curve::Sigmoid] {
+        assert!(!curve.uses_max_threshold(), "{curve:?} does not");
+        // And prove it: changing the cap changes nothing.
+        let c = Cc { curve, ..Default::default() };
+        let a = sensitivity(&c, 30.0, 0.3, 100.0, 1.0, 5.0);
+        let b = sensitivity(&c, 30.0, 0.3, 900.0, 1.0, 5.0);
+        assert!((a - b).abs() < 1e-6, "{curve:?} ignores the cap: {a} vs {b}");
+    }
+
+    // The editor says so on the line that picks the curve.
+    let warned = one("ACCEL_CURVE = SIGMOID");
+    assert_eq!(warned.status, LineStatus::Ok);
+    let notes = warned.notes.join(" ");
+    assert!(
+        notes.contains("MAX_GYRO_THRESHOLD"),
+        "it warns the top threshold stops mattering: {notes}"
+    );
+    // And it doesn't cry wolf for the three that do use it.
+    let quiet = one("ACCEL_CURVE = QUADRATIC");
+    assert!(
+        !quiet.notes.join(" ").contains("never looks at"),
+        "no warning for a curve that uses it: {:?}",
+        quiet.notes
+    );
+}
+
+/// Every fork setting says it is a fork setting, so nobody is surprised when a
+/// config using one won't load in a stock JSM build.
+#[test]
+fn fork_settings_say_they_are_the_forks() {
+    for line in [
+        "ACCEL_CURVE = NATURAL",
+        "GYRO_SMOOTHING_DECAY = ON",
+        "GYRO_ANGLE_SNAP = 10",
+        "DECEL_BRAKE_STRENGTH = 0.5",
+        "ROLL_CONTRIBUTION = 50",
+        "ONE_EURO_FILTER",
+    ] {
+        let info = one(line);
+        assert_eq!(info.status, LineStatus::Ok, "{line}: {:?}", info.status);
+        assert!(
+            info.notes.iter().any(|n| n.contains("JSM_custom_curve")),
+            "{line} names the fork: {:?}",
+            info.notes
+        );
+    }
+}
+
+/// `ONE_EURO_FILTER` is a command, not a setting — global and sticky, so it cannot
+/// be chorded. Reproducing that asymmetry is deliberate.
+#[test]
+fn the_one_euro_filter_is_a_command_and_cannot_be_chorded() {
+    let c = compile("ONE_EURO_FILTER");
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    assert!(c.cc.one_euro_enabled, "the command switches it on");
+    let notes = c.lines[0].notes.join(" ");
+    assert!(notes.contains("cannot be chorded"), "and says so: {notes}");
+
+    // As a chord it is not a setting at all, so the modeshift is refused.
+    assert!(
+        matches!(one("ZL,ONE_EURO_FILTER = ON").status, LineStatus::Error(_)),
+        "it is not a setting to chord"
+    );
+
+    // Its two tuning numbers, though, chord like anything else.
+    let c = compile("ZL,ONE_EURO_MIN_CUTOFF = 20");
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    let held = super::parse::resolve(&c, &[Btn::Zl]);
+    assert_eq!(held.cc.one_euro_min_cutoff, 20.0, "held, it is 20");
+    assert_eq!(
+        super::parse::resolve(&c, &[]).cc.one_euro_min_cutoff,
+        6.0,
+        "let go, back to the default"
+    );
+}
+
+/// The one-euro filter smooths a jittery signal at rest and lets a fast move
+/// through — the whole reason for it over a plain low-pass.
+#[test]
+fn the_one_euro_filter_smooths_jitter_but_not_a_fast_move() {
+    let settle = |values: &[f32]| {
+        let mut f = super::cc::OneEuro::default();
+        let mut last = 0.0;
+        for v in values {
+            last = f.filter(*v, DT, 6.0, 0.3);
+        }
+        last
+    };
+    // Jitter about zero: the filter should land near zero, not near the last sample.
+    let jitter: Vec<f32> = (0..40).map(|i| if i % 2 == 0 { 3.0 } else { -3.0 }).collect();
+    let calm = settle(&jitter);
+    assert!(calm.abs() < 1.5, "jitter at rest is smoothed away: {calm}");
+
+    // A sustained fast move: the filter should follow it closely.
+    let fast: Vec<f32> = (0..40).map(|_| 300.0).collect();
+    let followed = settle(&fast);
+    assert!(followed > 250.0, "a fast move comes through: {followed}");
+}
+
+/// Angle snap straightens a nearly-level turn without slowing it — the magnitude is
+/// kept, which is the point.
+#[test]
+fn angle_snap_straightens_a_turn_without_slowing_it() {
+    use super::cc::{angle_snap, Settings as Cc};
+    let s = Cc { angle_snap: 10.0, ..Default::default() };
+    // 5 degrees off horizontal: inside the zone, so it snaps flat.
+    let (x, y) = (100.0f32, 100.0 * 5.0f32.to_radians().tan());
+    let mag = (x * x + y * y).sqrt();
+    let (sx, sy) = angle_snap(&s, x, y);
+    assert!(sy.abs() < 1e-3, "the off-axis part goes: {sy}");
+    assert!((sx - mag).abs() < 1e-3, "and the speed is kept, not lost: {sx} vs {mag}");
+
+    // 30 degrees off: well outside, untouched.
+    let (x, y) = (100.0f32, 100.0 * 30.0f32.to_radians().tan());
+    assert_eq!(angle_snap(&s, x, y), (x, y), "outside the zone nothing happens");
+
+    // Nearly vertical snaps to vertical, and keeps its sign.
+    let (x, y) = (100.0 * 5.0f32.to_radians().tan(), -100.0f32);
+    let (sx, sy) = angle_snap(&s, x, y);
+    assert!(sx.abs() < 1e-3 && sy < 0.0, "snaps down, still downward: {sx}, {sy}");
+
+    // Switched off, it never touches anything.
+    let off = Cc::default();
+    assert_eq!(angle_snap(&off, 100.0, 3.0), (100.0, 3.0));
+}
+
+/// The eased snap ramps in rather than jumping — including the magnitude, which is
+/// where this deliberately departs from the fork.
+#[test]
+fn the_eased_angle_snap_ramps_in_from_nothing() {
+    use super::cc::{angle_snap, Settings as Cc};
+    let eased = Cc { angle_snap: 20.0, angle_snap_ease: true, ..Default::default() };
+    let at = |deg: f32| {
+        let (x, y) = (100.0f32, 100.0 * deg.to_radians().tan());
+        (angle_snap(&eased, x, y), (x * x + y * y).sqrt())
+    };
+    // Right at the edge of the zone the blend is zero, so NOTHING changes — neither
+    // axis. The fork gains magnitude here, which is what this departs from.
+    let ((sx, sy), _) = at(19.99);
+    let (x, y) = (100.0f32, 100.0 * 19.99f32.to_radians().tan());
+    assert!(
+        (sx - x).abs() < 0.5 && (sy - y).abs() < 0.5,
+        "at the edge of the zone the snap has not started: {sx}, {sy} against {x}, {y}"
+    );
+    // Halfway in, part way snapped.
+    let ((_, mid_y), _) = at(10.0);
+    let straight = 100.0 * 10.0f32.to_radians().tan();
+    assert!(mid_y.abs() < straight && mid_y.abs() > 0.0, "partly snapped: {mid_y}");
+    // All the way in, flat.
+    let ((_, in_y), _) = at(0.5);
+    assert!(in_y.abs() < straight * 0.2, "nearly flat: {in_y}");
+}
+
+/// The deceleration brake damps the tail of a fast stop, and does nothing when it is
+/// switched off or when the pad is turning steadily.
+#[test]
+fn the_deceleration_brake_only_bites_when_the_pad_is_stopping() {
+    use super::cc::{Brake, Settings as Cc};
+    let on = Cc { brake_strength: 0.8, brake_threshold: 25.0, ..Default::default() };
+
+    // Steady speed inside the band: nothing to brake.
+    let mut b = Brake::default();
+    let mut mult = 1.0;
+    for _ in 0..40 {
+        mult = b.tick(&on, DT, 30.0, 30.0);
+    }
+    assert!((mult - 1.0).abs() < 1e-6, "a steady turn is not braked: {mult}");
+
+    // Now a real stop: turning at 60 deg/s and arrested in a single tick, ending
+    // slow but still moving — that last part matters, because the speed gate is
+    // 2..60 deg/s, so the brake damps a camera that is still coasting rather than
+    // one already stopped. It is a brief pulse, so take the strongest damping seen.
+    let mut b = Brake::default();
+    for _ in 0..10 {
+        b.tick(&on, DT, 60.0, 60.0);
+    }
+    let mut hardest = 1.0f32;
+    for _ in 0..5 {
+        hardest = hardest.min(b.tick(&on, DT, 8.0, 8.0));
+    }
+    assert!(hardest < 0.9, "a hard stop is damped: {hardest}");
+
+    // And it lets go again once the deceleration is over.
+    let mut released = 0.0;
+    for _ in 0..20 {
+        released = b.tick(&on, DT, 8.0, 8.0);
+    }
+    assert!((released - 1.0).abs() < 1e-6, "then releases: {released}");
+
+    // Switched off, never anything.
+    let off = Cc::default();
+    let mut b = Brake::default();
+    for _ in 0..10 {
+        b.tick(&off, DT, 60.0, 60.0);
+    }
+    let mut mult = 1.0f32;
+    for _ in 0..5 {
+        mult = mult.min(b.tick(&off, DT, 8.0, 8.0));
+    }
+    assert_eq!(mult, 1.0, "with strength 0 it is inert");
+}
+
+/// `YAW_PLUS_ROLL` mixes a share of roll into the turn, and is default `LOCAL` when
+/// that share is zero.
+#[test]
+fn yaw_plus_roll_mixes_roll_into_the_turn() {
+    let with = |roll_pct: f32, roll_rate: f32| {
+        let cfg = format!(
+            "{AIM_CFG}\nGYRO_SPACE = YAW_PLUS_ROLL\nROLL_CONTRIBUTION = {roll_pct}"
+        );
+        let mut a = Aiming::new(&cfg);
+        a.gyro = Gyro { roll: roll_rate, pitch: 0.0, yaw: 30.0 };
+        a.ticks(3).x
+    };
+    // With no roll contribution, rolling the pad does nothing to the turn.
+    let plain = with(0.0, 0.0);
+    let rolled_but_ignored = with(0.0, 40.0);
+    assert!(
+        (plain - rolled_but_ignored).abs() < 1e-3,
+        "at 0% roll is ignored: {plain} vs {rolled_but_ignored}"
+    );
+    // With a share of it, the same roll changes the turn.
+    let mixed = with(100.0, 40.0);
+    assert!(
+        (mixed - plain).abs() > 0.1,
+        "at 100% roll joins the turn: {plain} then {mixed}"
+    );
+
+    // And `ROLL_CONTRIBUTION` says when it is doing nothing — which, now that
+    // LOCAL honours it too, is only in a gravity space.
+    let idle = compile("GYRO_SPACE = PLAYER_TURN\nROLL_CONTRIBUTION = 50").lines[1].clone();
+    assert!(
+        idle.notes.iter().any(|n| n.contains("only does anything")),
+        "a gravity space ignores it, and says so: {:?}",
+        idle.notes
+    );
+    // Under LOCAL it works, and says that it is FlexInput's doing rather than the
+    // fork's, since the same line in the fork would be inert.
+    let local = one("ROLL_CONTRIBUTION = 50");
+    assert!(
+        local.notes.iter().any(|n| n.contains("FlexInput also mixes")),
+        "LOCAL mixes it in: {:?}",
+        local.notes
+    );
+    assert!(
+        !local.notes.iter().any(|n| n.contains("only does anything")),
+        "and does not claim to be inert: {:?}",
+        local.notes
+    );
+}
+
+// ── LOCAL: roll share and axis offset (FlexInput's additions) ───────────────
+
+/// With JSM's default axis picks, LOCAL plus a roll share is YAW_PLUS_ROLL — the
+/// same share, the same sign. One setting, one meaning, in both spaces.
+#[test]
+fn local_with_a_roll_share_is_yaw_plus_roll() {
+    let run = |space: &str| {
+        let mut a = Aiming::new(&format!(
+            "{AIM_CFG}\nGYRO_SPACE = {space}\nROLL_CONTRIBUTION = 60"
+        ));
+        a.gyro = Gyro { roll: 40.0, pitch: 25.0, yaw: 30.0 };
+        a.ticks(3)
+    };
+    let local = run("LOCAL");
+    let ypr = run("YAW_PLUS_ROLL");
+    assert!(
+        (local - ypr).length() < 1e-5,
+        "LOCAL + roll share should match YAW_PLUS_ROLL: {local:?} vs {ypr:?}"
+    );
+    // And the roll really is in there.
+    let mut plain = Aiming::new(&format!("{AIM_CFG}\nGYRO_SPACE = LOCAL"));
+    plain.gyro = Gyro { roll: 40.0, pitch: 25.0, yaw: 30.0 };
+    assert!((plain.ticks(3).x - local.x).abs() > 0.1, "the share changes the turn");
+}
+
+/// LOCAL keeps the roll share working with any axis pick — it joins whichever
+/// axis drives the turn, which YAW_PLUS_ROLL (fixed to yaw) can't do.
+#[test]
+fn local_roll_share_joins_whatever_axis_drives_the_turn() {
+    // Horizontal from PITCH instead of yaw; still no yaw anywhere.
+    let run = |pct: f32| {
+        let mut a = Aiming::new(&format!(
+            "{AIM_CFG}\nMOUSE_X_FROM_GYRO_AXIS = X\nROLL_CONTRIBUTION = {pct}"
+        ));
+        a.gyro = Gyro { roll: 50.0, pitch: 0.0, yaw: 0.0 };
+        a.ticks(3).x
+    };
+    assert!(run(0.0).abs() < 1e-6, "no pitch and no share: nothing turns");
+    assert!(run(100.0).abs() > 0.1, "the roll share turns on its own");
+}
+
+/// A body turn with the pad held nose-up (far edge raised) by `hold` degrees, in
+/// our bus's gyro terms: the turn is about the world's up, which the pad sees as
+/// part yaw (about its face) and part roll (about its forward axis).
+fn body_turn(hold: f32, rate: f32) -> Gyro {
+    let (sin, cos) = hold.to_radians().sin_cos();
+    // JSM Y = -yaw and JSM Z = +roll (see `aim.rs`); a flat pad turning right is
+    // `yaw = rate`, so the tilted turn is JSM (0, -rate cos, -rate sin).
+    Gyro { roll: -rate * sin, pitch: 0.0, yaw: rate * cos }
+}
+
+/// LOCAL_AXIS_OFFSET says how far the neutral hold is pitched. Held at that angle,
+/// a body turn turns the camera as fully as a flat pad's yaw does — and without it,
+/// only the cosine share reaches the camera, which is the problem it exists for.
+#[test]
+fn local_axis_offset_measures_the_turn_about_the_neutral_hold() {
+    let run = |offset: f32, g: Gyro| {
+        let mut a = Aiming::new(&format!("{AIM_CFG}
+LOCAL_AXIS_OFFSET = {offset}"));
+        a.gyro = g;
+        a.tick()
+    };
+    let flat = run(0.0, body_turn(0.0, 90.0));
+    assert!(flat.x > 0.0 && flat.y.abs() < 1e-6, "0 is stock LOCAL: {flat:?}");
+
+    let hold = 40.0f32;
+    let stock = run(0.0, body_turn(hold, 90.0));
+    assert!(
+        (stock.x - flat.x * hold.to_radians().cos()).abs() < 1e-4,
+        "stock LOCAL loses the roll share of a tilted turn: {stock:?} vs {flat:?}"
+    );
+    let fixed = run(hold, body_turn(hold, 90.0));
+    assert!((fixed.x - flat.x).abs() < 1e-4, "the whole turn comes back: {fixed:?} vs {flat:?}");
+    assert!(fixed.y.abs() < 1e-6, "and a turn stays horizontal: {fixed:?}");
+
+    // The sign is not a coin toss: the wrong way round makes it worse, not better.
+    let wrong = run(-hold, body_turn(hold, 90.0));
+    assert!(wrong.x < stock.x, "a negative offset is a nose-down hold: {wrong:?}");
+}
+
+/// Pitch is the pad's own under any offset: the neutral hold is pitched ABOUT the
+/// pitch axis, so nothing about it changes.
+#[test]
+fn local_axis_offset_leaves_pitch_alone() {
+    let pitch_up = |offset: f32| {
+        let mut a = Aiming::new(&format!("{AIM_CFG}
+LOCAL_AXIS_OFFSET = {offset}"));
+        a.turn(90.0, 0.0)
+    };
+    let base = pitch_up(0.0);
+    assert!(base.y.abs() > 0.1, "not vacuous: {base:?}");
+    for offset in [-60.0, 25.0, 90.0] {
+        assert!((pitch_up(offset) - base).length() < 1e-6, "{offset}: {:?} vs {base:?}", pitch_up(offset));
+    }
+}
+
+/// The same turn `WORLD_TURN` measures from gravity, when the pad really is held at
+/// the offset's angle — so the offset and the gravity table at the top of
+/// `motion.rs` agree on which way nose-up is.
+#[test]
+fn local_axis_offset_agrees_with_world_turn_at_that_hold() {
+    let hold = 35.0f32;
+    let (sin, cos) = hold.to_radians().sin_cos();
+    let settle = |a: &mut Aiming| {
+        // Our accel reads (0,0,1) flat and (1,0,0) nose-up 90°.
+        a.accel = Some(glam::Vec3::new(sin, 0.0, cos));
+        for _ in 0..400 { a.turn(0.0, 0.0); }
+        a.gyro = body_turn(hold, 90.0);
+        a.tick()
+    };
+    let world = settle(&mut Aiming::new(&format!("{AIM_CFG}
+GYRO_SPACE = WORLD_TURN")));
+    let local = settle(&mut Aiming::new(&format!("{AIM_CFG}
+LOCAL_AXIS_OFFSET = {hold}")));
+    assert!(world.x > 0.1, "not vacuous: {world:?}");
+    assert!((world.x - local.x).abs() / world.x < 0.01, "{world:?} vs {local:?}");
+}
+
+/// With the offset set, `ROLL_CONTRIBUTION` is a share of roll about the NEUTRAL
+/// hold's forward axis — a body turn at that hold has none, so it adds nothing.
+#[test]
+fn local_roll_share_is_taken_about_the_neutral_hold() {
+    let run = |pct: f32| {
+        let mut a = Aiming::new(&format!("{AIM_CFG}
+LOCAL_AXIS_OFFSET = 30
+ROLL_CONTRIBUTION = {pct}"));
+        a.gyro = body_turn(30.0, 90.0);
+        a.tick()
+    };
+    assert!((run(0.0) - run(100.0)).length() < 1e-4, "{:?} vs {:?}", run(0.0), run(100.0));
+}
+
+/// The offset is a LOCAL thing: a gravity space ignores it, and the line says so.
+/// Either way the line says it is FlexInput's own, not JSM's.
+#[test]
+fn local_axis_offset_is_local_only_and_ours() {
+    let under_local = one("LOCAL_AXIS_OFFSET = 15");
+    assert_eq!(under_local.status, LineStatus::Ok);
+    assert!(under_local.notes.iter().any(|n| n.contains("FlexInput's own")), "{:?}", under_local.notes);
+    assert!(!under_local.notes.iter().any(|n| n.contains("only does anything")));
+
+    let under_gravity =
+        compile("GYRO_SPACE = WORLD_TURN\nLOCAL_AXIS_OFFSET = 15").lines[1].clone();
+    assert!(
+        under_gravity.notes.iter().any(|n| n.contains("only does anything with `GYRO_SPACE = LOCAL`")),
+        "{:?}",
+        under_gravity.notes
+    );
+
+    // A hold past vertical either way is an error, not a silent wrap.
+    assert!(matches!(one("LOCAL_AXIS_OFFSET = 91").status, LineStatus::Error(_)));
+    assert!(matches!(one("LOCAL_AXIS_OFFSET = -90").status, LineStatus::Ok));
+
+    // And a gravity space really ignores it.
+    let turn = |cfg: &str| {
+        let mut a = Aiming::new(cfg);
+        a.accel = Some(glam::Vec3::new(0.0, 0.0, 1.0)); // flat, face up
+        for _ in 0..200 { a.turn(0.0, 0.0); } // let gravity settle
+        a.turn(0.0, 90.0)
+    };
+    let base = turn(&format!("{AIM_CFG}\nGYRO_SPACE = PLAYER_TURN"));
+    let offs = turn(&format!("{AIM_CFG}\nGYRO_SPACE = PLAYER_TURN\nLOCAL_AXIS_OFFSET = 30"));
+    // Not vacuous: the gravity space is really turning the camera here.
+    assert!(base.length() > 0.1, "PLAYER_TURN should aim once gravity settles: {base:?}");
+    assert!((base - offs).length() < 1e-6, "{base:?} vs {offs:?}");
+}
+
+/// Decay smoothing is an alternative to the rolling average, and says that the two
+/// smoothing settings now mean something different.
+#[test]
+fn decay_smoothing_replaces_the_rolling_average() {
+    use super::cc::Decay;
+    // A slow step, well under the threshold, is smoothed: settle at rest first, since
+    // the smoother (like the fork's) starts on whatever it first sees, and a steady
+    // input converges to itself however hard it is smoothed.
+    let mut d = Decay::default();
+    for _ in 0..20 {
+        d.smooth(0.0, 0.0, DT, 0.125, 100.0);
+    }
+    let stepped = d.smooth(10.0, 0.0, DT, 0.125, 100.0).0;
+    assert!(stepped < 5.0, "a slow step is smoothed: {stepped}");
+
+    // Fast, past the threshold: straight through even from rest.
+    let mut d = Decay::default();
+    for _ in 0..20 {
+        d.smooth(0.0, 0.0, DT, 0.125, 100.0);
+    }
+    let fast = d.smooth(500.0, 0.0, DT, 0.125, 100.0).0;
+    assert!(fast > 450.0, "a fast one is not: {fast}");
+
+    // With either setting at zero it is a pass-through, as in the fork.
+    let mut d = Decay::default();
+    assert_eq!(d.smooth(10.0, 2.0, DT, 0.0, 100.0), (10.0, 2.0));
+    assert_eq!(d.smooth(10.0, 2.0, DT, 0.125, 0.0), (10.0, 2.0));
+
+    let line = one("GYRO_SMOOTHING_DECAY = ON");
+    assert!(
+        line.notes.iter().any(|n| n.contains("feel different")),
+        "it says the same numbers now feel different: {:?}",
+        line.notes
+    );
+}
+
+/// The two fork settings that cannot mean anything here say why.
+#[test]
+fn the_fork_settings_that_do_not_apply_say_why() {
+    match one("IGNORE_GYRO_DEVICES = 0x054c:0x0ce6").status {
+        LineStatus::Ignored(why) => {
+            assert!(why.contains("handed one device"), "{why}");
+        }
+        other => panic!("IGNORE_GYRO_DEVICES should be ignored with a reason, got {other:?}"),
+    }
+    for line in ["TELEMETRY_ENABLED = ON", "TELEMETRY_PORT = 5000"] {
+        match one(line).status {
+            LineStatus::Ignored(why) => {
+                assert!(why.contains("the GUI"), "{line}: {why}");
+            }
+            other => panic!("{line} should be ignored with a reason, got {other:?}"),
+        }
+    }
+}
+
+/// The fork's `MISC1`…`MISC6` are our `btn_misc1`…`6`, one for one.
+#[test]
+fn the_forks_misc_buttons_are_our_misc_pins() {
+    for n in 1..=6 {
+        let line = format!("MISC{n} = E");
+        let info = one(&line);
+        assert_eq!(info.status, LineStatus::Ok, "{line}: {:?}", info.status);
+    }
+    let out = run_node("MISC3 = E", false, &["btn_misc3"], 3);
+    assert!(
+        out.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+        "pressing the pad's third misc button fires the binding: {out:?}"
+    );
+    // Past six is not a button.
+    assert!(matches!(one("MISC7 = E").status, LineStatus::Error(_)));
+}
+
+/// The four fork names our bus has no pin for compile, never fire, and say so —
+/// rather than being called errors or being guessed onto a pin that might be
+/// something else entirely.
+#[test]
+fn the_fork_names_we_have_no_pin_for_say_they_never_fire() {
+    for (name, expect) in [
+        ("LTOUCH", "capacitive touch"),
+        ("RTOUCH", "capacitive touch"),
+        ("LMINI", "mini shoulder"),
+        ("RMINI", "mini shoulder"),
+    ] {
+        let info = one(&format!("{name} = E"));
+        assert_eq!(
+            info.status,
+            LineStatus::Ok,
+            "{name} is a real name, not an error: {:?}",
+            info.status
+        );
+        let notes = info.notes.join(" ");
+        assert!(notes.contains("never fires here"), "{name}: {notes}");
+        assert!(notes.contains(expect), "{name} says what it would need: {notes}");
+    }
+}
+
+/// Every one of phase 9's settings is read, with a bad value called out.
+#[test]
+fn every_fork_setting_is_read() {
+    let c = compile(
+        "ACCEL_CURVE = JUMP\n\
+         ACCEL_NATURAL_VHALF = 150\n\
+         ACCEL_POWER_VREF = 0.5\n\
+         ACCEL_POWER_EXPONENT = 2\n\
+         ACCEL_SIGMOID_MID = 40\n\
+         ACCEL_SIGMOID_WIDTH = 12\n\
+         ACCEL_JUMP_TAU = 3\n\
+         GYRO_SMOOTHING_DECAY = ON\n\
+         ONE_EURO_MIN_CUTOFF = 8\n\
+         ONE_EURO_SPEED_COEFF = 0.6\n\
+         GYRO_ANGLE_SNAP = 12\n\
+         GYRO_ANGLE_SNAP_EASE = ON\n\
+         DECEL_BRAKE_STRENGTH = 0.7\n\
+         DECEL_BRAKE_THRESHOLD = 40\n\
+         ROLL_CONTRIBUTION = -25",
+    );
+    assert!(errors(&c).is_empty(), "all live: {:?}", errors(&c));
+    assert_eq!(c.cc.curve, super::cc::Curve::Jump);
+    assert_eq!(c.cc.natural_vhalf, 150.0);
+    assert_eq!(c.cc.power_vref, 0.5);
+    assert_eq!(c.cc.power_exponent, 2.0);
+    assert_eq!(c.cc.sigmoid_mid, 40.0);
+    assert_eq!(c.cc.sigmoid_width, 12.0);
+    assert_eq!(c.cc.jump_tau, 3.0);
+    assert!(c.cc.decay_smoothing);
+    assert_eq!(c.cc.one_euro_min_cutoff, 8.0);
+    assert_eq!(c.cc.one_euro_speed_coeff, 0.6);
+    assert_eq!(c.cc.angle_snap, 12.0);
+    assert!(c.cc.angle_snap_ease);
+    assert_eq!(c.cc.brake_strength, 0.7);
+    assert_eq!(c.cc.brake_threshold, 40.0);
+    assert_eq!(c.cc.roll_contribution, -25.0);
+
+    for bad in [
+        "ACCEL_CURVE = SQUIGGLE",
+        "ACCEL_JUMP_TAU = -1",
+        "GYRO_ANGLE_SNAP = 90",
+        "GYRO_ANGLE_SNAP_EASE = MAYBE",
+        "DECEL_BRAKE_STRENGTH = 2",
+        "ROLL_CONTRIBUTION = 200",
+        "GYRO_SMOOTHING_DECAY = SOMETIMES",
+    ] {
+        assert!(matches!(one(bad).status, LineStatus::Error(_)), "{bad}");
+    }
+}
+
+/// The curve reaches the actual gyro output — the pipeline is wired, not just the
+/// settings parsed.
+#[test]
+fn the_chosen_curve_changes_what_the_gyro_does() {
+    let aim_with = |extra: &str, yaw: f32| {
+        let cfg = format!(
+            "MIN_GYRO_SENS = 1\nMAX_GYRO_SENS = 8\nMIN_GYRO_THRESHOLD = 0\n\
+             MAX_GYRO_THRESHOLD = 100\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0\n{extra}"
+        );
+        let mut a = Aiming::new(&cfg);
+        a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw };
+        a.ticks(3).x
+    };
+    // At a quarter of the way up the threshold band, QUADRATIC is far gentler than
+    // the straight line — the curve is doing the work, not the sens settings.
+    let linear = aim_with("ACCEL_CURVE = LINEAR", 25.0);
+    let quad = aim_with("ACCEL_CURVE = QUADRATIC", 25.0);
+    assert!(linear > 0.0 && quad > 0.0, "both aim: {linear}, {quad}");
+    assert!(
+        quad < linear * 0.7,
+        "quadratic is much gentler at a quarter speed: {quad} against {linear}"
+    );
+}
+
+/// The deceleration brake reaches the gyro output too, and leaves a steady turn
+/// alone.
+#[test]
+fn the_brake_reaches_the_gyro_output() {
+    let cfg = format!(
+        "{AIM_CFG}\nMIN_GYRO_SENS = 1\nMAX_GYRO_SENS = 1\nDECEL_BRAKE_STRENGTH = 1\n\
+         DECEL_BRAKE_THRESHOLD = 10"
+    );
+    // The same turn, once with the brake and once without, arrested in a tick.
+    let run = |cfg: &str| {
+        let mut a = Aiming::new(cfg);
+        a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 50.0 };
+        let steady = a.ticks(20).x;
+        a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 8.0 };
+        let mut lowest = f32::MAX;
+        for _ in 0..5 {
+            lowest = lowest.min(a.tick().x.abs());
+        }
+        (steady.abs(), lowest)
+    };
+    let (steady, braked) = run(&cfg);
+    // 50 deg/s at calibration 1 over a 10 ms tick is half a pixel — small numbers,
+    // but the comparison is what matters.
+    assert!(steady > 0.4, "a steady turn aims: {steady}");
+    let plain = format!("{AIM_CFG}\nMIN_GYRO_SENS = 1\nMAX_GYRO_SENS = 1");
+    let (_, unbraked) = run(&plain);
+    assert!(
+        braked < unbraked * 0.95,
+        "the brake damps the tail: {braked} against {unbraked}"
+    );
+}
+
+
+/// What `REAL_WORLD_CALIBRATION` means, pinned to a number anyone can check by hand:
+/// it is **mouse counts per degree turned**, so turning the pad through 90 degrees at
+/// `RWC = 1` and `GYRO_SENS = 1` moves the pointer 90 counts, and `IN_GAME_SENS`
+/// divides that.
+///
+/// This exists because a report came in that a calibration measured elsewhere seemed
+/// to need a multiplier of about four in this module. The formula here is JSM's own —
+/// `moveMouse(velocity * RWC / IN_GAME_SENS * dt)`, verified against
+/// `shapedSensitivityMoveMouse` in JSM's `InputHelpers.h` — so a constant factor can
+/// only come from what a number MEANS, not from the arithmetic. Pinning the meaning
+/// is how that stays true.
+#[test]
+fn real_world_calibration_is_mouse_counts_per_degree() {
+    // Turn at 90 deg/s for exactly one second, in 100 ticks of 10 ms.
+    let sweep = |extra: &str| {
+        let cfg = format!(
+            "GYRO_SENS = 1\nGYRO_SMOOTH_TIME = 0\nREAL_WORLD_CALIBRATION = 1\n{extra}"
+        );
+        let mut a = Aiming::new(&cfg);
+        a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 90.0 };
+        let mut total = 0.0;
+        for _ in 0..100 {
+            total += a.tick().x;
+        }
+        total
+    };
+    let ninety = sweep("");
+    assert!(
+        (ninety - 90.0).abs() < 0.5,
+        "90 degrees at RWC 1 is 90 counts, got {ninety}"
+    );
+
+    // Ten times the calibration is ten times the counts — it is a plain scale, so no
+    // multiplier can be hiding in it.
+    let times_ten = sweep("REAL_WORLD_CALIBRATION = 10");
+    assert!(
+        (times_ten - 900.0).abs() < 5.0,
+        "RWC scales linearly: {times_ten}"
+    );
+
+    // And `IN_GAME_SENS` divides it, which is the one place a factor of about four
+    // can come from: a calibration measured in-game already has the in-game
+    // sensitivity baked in, so setting both double-counts it.
+    let with_sens = sweep("IN_GAME_SENS = 4");
+    assert!(
+        (with_sens - 22.5).abs() < 0.5,
+        "IN_GAME_SENS divides the calibration: {with_sens}"
+    );
+
+    // `GYRO_SENS` multiplies on top, as JSM's own feel multiplier.
+    let double = sweep("GYRO_SENS = 2");
+    assert!((double - 180.0).abs() < 1.0, "GYRO_SENS multiplies: {double}");
+}
+
+/// `POWER` climbs steeply past its reference speed — the reference is what sets
+/// where, so it has to be the divisor and not a plain multiplier.
+#[test]
+fn the_power_curve_climbs_from_its_reference_speed() {
+    use super::cc::{sensitivity, Curve, Settings as Cc};
+    let (lo, hi, cap) = (1.0f32, 5.0f32, 100.0f32);
+    let at = |c: Cc, omega: f32| sensitivity(&c, omega, (omega / cap).min(1.0), cap, lo, hi);
+
+    // A hundredth of a degree per second reference: by 1 deg/s it is already at the
+    // top, because that is a hundred times the reference.
+    let quick = Cc { curve: Curve::Power, power_vref: 0.01, power_exponent: 0.5, ..Default::default() };
+    assert!(at(quick, 1.0) > 4.9, "far past the reference it is at the top: {}", at(quick, 1.0));
+
+    // Move the reference out and the same speed is barely off the bottom — which is
+    // the whole point of having one.
+    let slow = Cc { curve: Curve::Power, power_vref: 100.0, power_exponent: 0.5, ..Default::default() };
+    assert!(at(slow, 1.0) < 2.0, "well short of it, still low: {}", at(slow, 1.0));
+    assert!(
+        at(quick, 1.0) > at(slow, 1.0) * 2.0,
+        "the reference speed decides, not the exponent alone"
+    );
+}
+
+/// The one-euro filter's whole trick is that its cutoff opens up with speed, so it
+/// tracks a fast ramp closely while still smoothing a slow one. A plain low-pass
+/// cannot do both.
+#[test]
+fn the_one_euro_cutoff_opens_up_with_speed() {
+    let ramp = |beta: f32| {
+        let mut f = super::cc::OneEuro::default();
+        let mut last = 0.0;
+        // A steady climb of 20 deg/s per tick.
+        for i in 0..30 {
+            last = f.filter(i as f32 * 20.0, DT, 6.0, beta);
+        }
+        (29.0 * 20.0) - last
+    };
+    // With no speed coefficient it lags badly; with one it keeps up.
+    let lag_without = ramp(0.0);
+    let lag_with = ramp(3.0);
+    assert!(lag_without > 0.0, "a plain low-pass lags a ramp: {lag_without}");
+    assert!(
+        lag_with < lag_without * 0.5,
+        "opening the cutoff with speed cuts the lag: {lag_with} against {lag_without}"
+    );
+}
+
+/// The brake only watches for *slowing*, only inside its speed band, and only past
+/// its threshold. Each of the three is what stops it firing when it shouldn't.
+#[test]
+fn the_brake_ignores_speeding_up_a_dead_stop_and_a_gentle_slowdown() {
+    use super::cc::{Brake, Settings as Cc};
+    let on = Cc { brake_strength: 1.0, brake_threshold: 25.0, ..Default::default() };
+    let lowest = |from: f32, to: f32, thr: f32| {
+        let s = Cc { brake_threshold: thr, ..on };
+        let mut b = Brake::default();
+        for _ in 0..10 {
+            b.tick(&s, DT, from, from);
+        }
+        let mut worst = 1.0f32;
+        for _ in 0..5 {
+            worst = worst.min(b.tick(&s, DT, to, to));
+        }
+        worst
+    };
+
+    // Speeding up just as hard: not braking. Braking an acceleration would fight the
+    // flick it is supposed to be cleaning up after.
+    assert_eq!(lowest(8.0, 60.0, 25.0), 1.0, "a hard acceleration is not braked");
+
+    // Stopping dead: outside the 2..60 deg/s band, so nothing to damp — the camera
+    // has already stopped, and damping zero achieves nothing but a surprise on the
+    // next movement.
+    assert_eq!(lowest(60.0, 0.0, 25.0), 1.0, "a dead stop is not braked");
+
+    // Slowing gently, under the threshold: left alone. Without the threshold every
+    // ordinary slowdown would be damped.
+    assert_eq!(lowest(30.0, 28.0, 25.0), 1.0, "a gentle slowdown is under the threshold");
+
+    // And the same slowdown with a low enough threshold IS braked, which proves the
+    // threshold is what made the difference rather than the shape of the test.
+    assert!(lowest(30.0, 28.0, 0.5) < 1.0, "with a low threshold it bites");
+}
+
+/// Decay smoothing reaches the gyro output, and is off unless asked for.
+#[test]
+fn decay_smoothing_reaches_the_gyro_output() {
+    let step = |extra: &str| {
+        let cfg = format!(
+            "GYRO_SENS = 1\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0.125\n\
+             GYRO_SMOOTH_THRESHOLD = 500\n{extra}"
+        );
+        let mut a = Aiming::new(&cfg);
+        // Settle at rest, then step to a slow turn.
+        a.gyro = Gyro::default();
+        a.ticks(20);
+        a.gyro = Gyro { roll: 0.0, pitch: 0.0, yaw: 30.0 };
+        a.tick().x
+    };
+    let with_decay = step("GYRO_SMOOTHING_DECAY = ON");
+    let without = step("GYRO_SMOOTHING_DECAY = OFF");
+    // The full, unsmoothed value: 30 deg/s at calibration 1 over a 10 ms tick.
+    let full = 0.3;
+    assert!(with_decay > 0.0 && with_decay < full * 0.5, "decay smooths the step: {with_decay}");
+    assert!(without > 0.0 && without < full * 0.5, "so does the rolling average: {without}");
+    // Both smooth, so "is it smoothed" proves nothing. What proves the decay smoother
+    // is the one running is that it gives a DIFFERENT answer to the same two
+    // settings — which is exactly what the editor warns about on that line.
+    assert!(
+        (with_decay - without).abs() > full * 0.05,
+        "the two smoothers differ on the same settings: {with_decay} against {without}"
+    );
+}
+
+/// The one-euro filter reaches the gyro output, and only when its command is given.
+#[test]
+fn the_one_euro_filter_reaches_the_gyro_output() {
+    let jitter = |extra: &str| {
+        let cfg = format!(
+            "GYRO_SENS = 1\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0\n\
+             ONE_EURO_MIN_CUTOFF = 2\nONE_EURO_SPEED_COEFF = 0\n{extra}"
+        );
+        let mut a = Aiming::new(&cfg);
+        let mut worst = 0.0f32;
+        for i in 0..40 {
+            a.gyro = Gyro {
+                roll: 0.0,
+                pitch: 0.0,
+                yaw: if i % 2 == 0 { 60.0 } else { -60.0 },
+            };
+            if i > 10 {
+                worst = worst.max(a.tick().x.abs());
+            } else {
+                a.tick();
+            }
+        }
+        worst
+    };
+    let filtered = jitter("ONE_EURO_FILTER");
+    let raw = jitter("");
+    assert!(raw > 0.0, "the jitter comes through unfiltered: {raw}");
+    assert!(
+        filtered < raw * 0.5,
+        "the filter damps it: {filtered} against {raw}"
+    );
+}
+
+/// Angle snap reaches the gyro output: a turn a few degrees off level comes out
+/// level, and keeps its speed.
+#[test]
+fn angle_snap_reaches_the_gyro_output() {
+    let aim = |extra: &str| {
+        let cfg = format!(
+            "GYRO_SENS = 1\nREAL_WORLD_CALIBRATION = 1\nGYRO_SMOOTH_TIME = 0\n{extra}"
+        );
+        let mut a = Aiming::new(&cfg);
+        // Mostly yaw with a little pitch: about 6 degrees off level.
+        a.gyro = Gyro { roll: 0.0, pitch: 6.0, yaw: 60.0 };
+        a.ticks(3)
+    };
+    let plain = aim("");
+    assert!(plain.y.abs() > 0.01, "without snapping the tilt shows: {plain:?}");
+
+    let snapped = aim("GYRO_ANGLE_SNAP = 20");
+    assert!(
+        snapped.y.abs() < plain.y.abs() * 0.2,
+        "snapping levels it out: {snapped:?} against {plain:?}"
+    );
+    assert!(
+        snapped.x.abs() >= plain.x.abs() * 0.99,
+        "and the speed is kept, not lost: {snapped:?} against {plain:?}"
+    );
+}
+
+/// Each `MISC` button is its own pin, not all of them the first one.
+#[test]
+fn each_misc_button_is_its_own_pin() {
+    for n in 1..=6u8 {
+        let pin = format!("btn_misc{n}");
+        let out = run_node(&format!("MISC{n} = E"), false, &[&pin], 3);
+        assert!(
+            out.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+            "MISC{n} reads {pin}: {out:?}"
+        );
+        // And it is not some other pin: pressing the NEXT one must not fire it.
+        let other = format!("btn_misc{}", if n == 6 { 1 } else { n + 1 });
+        let wrong = run_node(&format!("MISC{n} = E"), false, &[&other], 3);
+        assert!(
+            !wrong.get("key_e").map(|s| s.as_bool()).unwrap_or(false),
+            "MISC{n} does not read {other}: {wrong:?}"
+        );
+    }
+}
+
+// ── sliders and the curve preview ────────────────────────────────────────────
+
+/// A numeric setting the module runs gets a slider; one it doesn't, doesn't.
+#[test]
+fn a_numeric_setting_gets_a_slider() {
+    let text = "GYRO_SENS = 4\nS = A\n# a comment\nRIGHT_STICK_MODE = AIM\nFLICK_TIME = 0.1";
+    let ks = super::knobs::knobs(text);
+    let names: Vec<&str> = ks.iter().map(|k| k.name.as_str()).collect();
+    assert_eq!(names, vec!["GYRO_SENS", "FLICK_TIME"], "only the numeric settings");
+    assert_eq!(ks[0].line, 0, "and it knows which line it is on");
+    assert_eq!(ks[0].value, 4.0);
+    assert_eq!(ks[1].line, 4);
+
+    // A setting this module doesn't run gets none — a slider on a dead line lies.
+    assert!(super::knobs::knobs("AUTOLOAD = ON").is_empty(), "an ignored setting");
+    assert!(
+        super::knobs::knobs("SCREEN_RESOLUTION_X = 1920").is_empty(),
+        "a pending setting"
+    );
+    // Nor does a binding, or a word that isn't a setting at all.
+    assert!(super::knobs::knobs("S = A\nFLOOMP = 3").is_empty());
+}
+
+/// A pair line gets one fader per number — one control cannot honestly stand for
+/// two, and silently dropping half the line would be worse. Each fader has its own
+/// key and label, and writes only its own number.
+#[test]
+fn a_paired_setting_gets_a_fader_per_number() {
+    let k = super::knobs::knobs("MIN_GYRO_SENS = 2 3");
+    assert_eq!(k.len(), 2, "a pair is two faders: {k:?}");
+    assert_eq!((k[0].value, k[0].part), (2.0, Some(0)));
+    assert_eq!((k[1].value, k[1].part), (3.0, Some(1)));
+    // The first half keeps the bare name as its key, so a fader pinned before a
+    // split still finds the horizontal; the second is told apart.
+    assert_eq!(k[0].key(), "MIN_GYRO_SENS");
+    assert_eq!(k[1].key(), "MIN_GYRO_SENS/2");
+    assert_eq!(k[1].label(), "MIN_GYRO_SENS V");
+    assert_eq!(super::knobs::key_setting(&k[1].key()), "MIN_GYRO_SENS");
+
+    let one = super::knobs::knobs("MIN_GYRO_SENS = 2");
+    assert_eq!(one.len(), 1, "one number is one fader");
+    assert_eq!(one[0].part, None);
+
+    // A setting that does NOT take a pair still gets nothing for two numbers.
+    assert!(super::knobs::knobs("GYRO_SMOOTH_TIME = 0.1 0.2").is_empty());
+    // And a chorded setting is a modeshift — which chord would the slider be for?
+    assert!(super::knobs::knobs("ZL,GYRO_SENS = 4").is_empty());
+}
+
+/// Each half of a pair rewrites only its own number, and nothing else on the line.
+#[test]
+fn each_half_of_a_pair_writes_its_own_number() {
+    use super::knobs::set_knob_part;
+    let line = "GYRO_SENS   =  2   3   # tuned";
+    assert_eq!(set_knob_part(line, 0, Some(1), 4.5, false), "GYRO_SENS   =  2   4.5   # tuned");
+    assert_eq!(set_knob_part(line, 0, Some(0), 1.0, false), "GYRO_SENS   =  1   3   # tuned");
+    // A single-number line is part `None`: its one number.
+    assert_eq!(set_knob_part("STICK_SENS = 360", 0, None, 540.0, false), "STICK_SENS = 540");
+}
+
+/// Splitting writes the number twice, which means exactly what it meant before —
+/// the split changes how the setting is tuned, never how it aims. Joining keeps
+/// the first number for both.
+#[test]
+fn split_and_join_round_trip_through_the_text() {
+    use super::knobs::{join_pair, knobs, split_pair, toggle_pair};
+    let text = "GYRO_SENS = 2 # base\nSTICK_SENS = 360";
+    let split = split_pair(text, 0);
+    assert_eq!(split.lines().next(), Some("GYRO_SENS = 2 2 # base"));
+    // Same meaning either way.
+    assert_eq!(compile(text).aim.min_sens, compile(&split).aim.min_sens);
+
+    let joined = join_pair("GYRO_SENS = 2 3", 0);
+    assert_eq!(joined, "GYRO_SENS = 2");
+
+    // `toggle_pair` picks the right one from the fader it is given.
+    let single = &knobs("STICK_SENS = 360")[0];
+    assert_eq!(toggle_pair("STICK_SENS = 360", single).as_deref(), Some("STICK_SENS = 360 360"));
+    let half = &knobs("STICK_SENS = 360 180")[1];
+    assert_eq!(toggle_pair("STICK_SENS = 360 180", half).as_deref(), Some("STICK_SENS = 360"));
+    // A setting with no pair form has nothing to toggle.
+    let plain = &knobs("STICK_POWER = 2")[0];
+    assert_eq!(toggle_pair("STICK_POWER = 2", plain), None);
+}
+
+/// GRID_SIZE's faders stop at 5 each, so a drag can never write a grid past the
+/// 25 cells JSM allows.
+#[test]
+fn grid_size_faders_stay_inside_twenty_five_cells() {
+    let k = super::knobs::knobs("GRID_SIZE = 3 2");
+    assert_eq!(k.len(), 2);
+    assert!(k.iter().all(|k| k.integral && k.hi * k.hi <= 25.0));
+    assert_eq!(k[0].label(), "GRID_SIZE cols");
+    assert_eq!(k[1].label(), "GRID_SIZE rows");
+}
+
+/// A slider's range is the span it moves through, and its position follows the
+/// value.
+#[test]
+fn a_slider_maps_its_value_onto_its_range() {
+    let k = &super::knobs::knobs("DECEL_BRAKE_STRENGTH = 0.5")[0];
+    assert_eq!((k.lo, k.hi), (0.0, 1.0), "a fraction has its natural bounds");
+    assert!((k.t() - 0.5).abs() < 1e-6, "halfway along");
+    assert!((k.at(0.25) - 0.25).abs() < 1e-6, "and back again");
+
+    // Milliseconds are whole numbers, so the slider lands on whole numbers.
+    let k = &super::knobs::knobs("HOLD_PRESS_TIME = 150")[0];
+    assert!(k.integral);
+    assert_eq!(k.at(0.1234), 123.0, "rounded, not 123.4 milliseconds");
+
+    // A value outside the slider's range still reads; the handle just pegs.
+    let k = &super::knobs::knobs("GYRO_SENS = 99")[0];
+    assert_eq!(k.value, 99.0, "the value is what the config says");
+    assert_eq!(k.t(), 1.0, "the handle pegs rather than running off the end");
+}
+
+/// Dragging a slider rewrites only the number, leaving the line otherwise as the
+/// author wrote it — name, spacing and trailing comment.
+#[test]
+fn setting_a_slider_rewrites_only_the_number() {
+    let text = "GYRO_SENS = 4   # feel free to tune\nS = A";
+    let out = super::knobs::set_knob(text, 0, 7.5, false);
+    assert_eq!(
+        out,
+        "GYRO_SENS = 7.5   # feel free to tune\nS = A",
+        "the comment and the rest of the file survive"
+    );
+
+    // A whole number is written without a pointless decimal tail.
+    assert_eq!(super::knobs::set_knob("GYRO_SENS = 4", 0, 6.0, false), "GYRO_SENS = 6");
+    assert_eq!(super::knobs::set_knob("HOLD_PRESS_TIME = 150", 0, 200.4, true), "HOLD_PRESS_TIME = 200");
+    // And a trailing newline is not eaten, or editing the last line would reflow
+    // the file every time.
+    assert_eq!(super::knobs::set_knob("GYRO_SENS = 4\n", 0, 5.0, false), "GYRO_SENS = 5\n");
+
+    // The rewritten text parses back to the value that was set — the round trip is
+    // the point, since the text is the only source of truth.
+    let out = super::knobs::set_knob("MIN_GYRO_THRESHOLD = 0\n", 0, 12.5, false);
+    assert_eq!(compile(&out).aim.min_threshold, 12.5);
+}
+
+/// The stick is how a pad types a number, so an empty slot has to become one —
+/// and the step has to suit the setting, or half of them are out of reach.
+#[test]
+fn a_deflection_puts_a_number_in_the_slot_and_then_walks_it() {
+    use super::cursor::Cursor;
+    let scrub = super::knobs::scrub;
+    let val = Cursor { line: 0, token: 2 };
+
+    // Nothing there yet: the first deflection seeds zero rather than stepping,
+    // whichever way the stick went. The direction steers it after that.
+    assert_eq!(scrub("GYRO_SENS = ?", val, 1).unwrap(), "GYRO_SENS = 0");
+    assert_eq!(scrub("GYRO_SENS = ?", val, -1).unwrap(), "GYRO_SENS = 0");
+    assert_eq!(scrub("GYRO_SENS = 0", val, 1).unwrap(), "GYRO_SENS = 1");
+    // Zero, unless the setting can't take zero — seeding a value the setting
+    // has no use for would be its own small lie.
+    assert_eq!(scrub("IN_GAME_SENS = ?", val, 1).unwrap(), "IN_GAME_SENS = 0.1");
+
+    // The step comes from the setting's own range. A deadzone walking in whole
+    // numbers would offer "off" and "all of it" and nothing in between.
+    assert_eq!(
+        scrub("LEFT_STICK_DEADZONE_INNER = 0", val, 1).unwrap(),
+        "LEFT_STICK_DEADZONE_INNER = 0.05"
+    );
+    // Milliseconds in a 0..1000 range walk in fifties, not in ones — 1ms is
+    // below what anyone can feel, and 200 pushes is not a gesture.
+    assert_eq!(scrub("HOLD_PRESS_TIME = 150", val, 1).unwrap(), "HOLD_PRESS_TIME = 200");
+    // But never coarser than a whole unit. Twenty steps across this setting's
+    // 0..50 would be a step of 2, walking straight past every odd number — and
+    // it is the gyro's deadzone, so it is the one people nudge while watching
+    // the curve.
+    assert_eq!(scrub("GYRO_CUTOFF_SPEED = 0", val, 1).unwrap(), "GYRO_CUTOFF_SPEED = 1");
+    assert_eq!(scrub("LEAN_THRESHOLD = 14", val, 1).unwrap(), "LEAN_THRESHOLD = 15");
+
+    // The steps land on multiples of themselves, so a number typed by hand is
+    // tidied onto the grid rather than carrying its offset through every push.
+    assert_eq!(scrub("GYRO_SENS = 3.7", val, 1).unwrap(), "GYRO_SENS = 4");
+    assert_eq!(scrub("GYRO_SENS = 3.7", val, -1).unwrap(), "GYRO_SENS = 3");
+    // The grid has to survive f32 division, in both directions. A value
+    // divided by its own step lands either side of the integer: 0.65 / 0.05 is
+    // 12.999999, and without slack pushing UP hands back 0.65 — a dead stick on
+    // an ordinary deadzone line. 0.18 / 0.02 is 9.0000009 and fails DOWNWARD.
+    assert_eq!(
+        scrub("LEFT_STICK_DEADZONE_OUTER = 0.65", val, 1).unwrap(),
+        "LEFT_STICK_DEADZONE_OUTER = 0.7"
+    );
+    assert_eq!(
+        scrub("GYRO_SMOOTH_TIME = 0.18", val, -1).unwrap(),
+        "GYRO_SMOOTH_TIME = 0.16"
+    );
+
+    // The range is also the floor and ceiling: most settings stop at zero, and
+    // the ones JSM lets go negative keep going.
+    assert_eq!(scrub("GYRO_SENS = 0", val, -1).unwrap(), "GYRO_SENS = 0");
+    assert_eq!(
+        scrub("TRIGGER_THRESHOLD = 0", val, -1).unwrap(),
+        "TRIGGER_THRESHOLD = -0.1",
+        "a hair trigger is a negative threshold"
+    );
+
+    // A modeshift sets the same setting, so the chord in front of the name
+    // doesn't change what its number means.
+    assert_eq!(scrub("ZL,GYRO_SENS = 2", val, 1).unwrap(), "ZL,GYRO_SENS = 3");
+    assert_eq!(
+        scrub("ZL,GYRO_SENS = 0", val, -1).unwrap(),
+        "ZL,GYRO_SENS = 0",
+        "and it stops where the setting stops, chord or no chord"
+    );
+
+    // A config already outside the slider's range is not dragged back over it
+    // in one push — that would swallow a number somebody meant to write.
+    assert_eq!(scrub("GYRO_SENS = 99", val, -1).unwrap(), "GYRO_SENS = 98");
+
+    // A setting with no range of its own still walks, in ones, unclamped.
+    assert_eq!(scrub("S = 4", val, -1).unwrap(), "S = 3");
+}
+
+/// The scrub refuses anything that isn't already a number or an empty slot: a
+/// thumb brushing the stick must not quietly turn a binding into a digit.
+#[test]
+fn the_stick_only_scrubs_what_is_already_a_number() {
+    use super::cursor::Cursor;
+    let scrub = super::knobs::scrub;
+
+    // A key name is left alone — delete it first, and the slot will take a
+    // number.
+    assert!(scrub("S = SPACE", Cursor { line: 0, token: 2 }, 1).is_none());
+    // So is the setting's name, the `=`, and a comment.
+    assert!(scrub("GYRO_SENS = 2", Cursor { line: 0, token: 0 }, 1).is_none());
+    assert!(scrub("GYRO_SENS = 2", Cursor { line: 0, token: 1 }, 1).is_none());
+    assert!(scrub("GYRO_SENS = 2 # 2 is plenty", Cursor { line: 0, token: 3 }, 1).is_none());
+    // A slot on a blank line is in the NAME position, where a number would be
+    // nonsense — the command list is what fills that.
+    assert!(scrub("?", Cursor { line: 0, token: 0 }, 1).is_none());
+    // And nothing under the cursor is not an edit.
+    assert!(scrub("
+", Cursor { line: 0, token: 0 }, 1).is_none());
+}
+
+/// The number the stick writes is a number the parser reads back — the text is
+/// the only source of truth, so a scrub that didn't round-trip would be a
+/// display that lied.
+#[test]
+fn a_scrubbed_number_reaches_the_config_it_was_typed_into() {
+    use super::cursor::Cursor;
+    let val = Cursor { line: 0, token: 2 };
+    let mut text = "MIN_GYRO_THRESHOLD = ?
+".to_string();
+    for _ in 0..4 {
+        text = super::knobs::scrub(&text, val, 1).expect("a value to walk");
+    }
+    assert_eq!(text, "MIN_GYRO_THRESHOLD = 3
+", "zero, then three steps of one");
+    assert_eq!(compile(&text).aim.min_threshold, 3.0);
+    // And the line the slider machinery sees agrees with it.
+    assert_eq!(super::knobs::knobs(&text)[0].value, 3.0);
+}
+
+/// `GYRO_SENS` writes BOTH ends of the ramp (JSM's own help: "sets both
+/// MIN_GYRO_SENS and MAX_GYRO_SENS to the same values"), so a config that sets a
+/// ramp and then writes it below has silently flattened that ramp. The file is
+/// legal and JSM would run it exactly this way — the editor's job is to say so.
+#[test]
+fn gyro_sens_under_a_ramp_flattens_it_and_the_editor_says_where() {
+    let text = "MIN_GYRO_SENS = 4.31\nMAX_GYRO_SENS = 8.45\nACCEL_CURVE = POWER\n\
+                GYRO_SENS = 2.3 2\nZR,GYRO_SENS = 1.9 1.9\n";
+    let cfg = compile(text);
+    // What actually runs: one flat sensitivity, the ramp gone.
+    assert_eq!(cfg.aim.min_sens, (2.3, 2.0));
+    assert_eq!(cfg.aim.max_sens, (2.3, 2.0));
+
+    let note_on = |i: usize| cfg.lines[i].notes.join(" ");
+    assert!(note_on(0).contains("line 4"), "MIN says who took it: {}", note_on(0));
+    assert!(note_on(1).contains("line 4"), "MAX says who took it: {}", note_on(1));
+    assert!(
+        note_on(3).contains("MIN_GYRO_SENS") && note_on(3).contains("MAX_GYRO_SENS"),
+        "and GYRO_SENS says what it did: {}",
+        note_on(3)
+    );
+    // The chorded one applies only while ZR is held, so it replaces nothing and
+    // must not be blamed for the flattening.
+    assert!(note_on(4).is_empty(), "a chord replaces nothing: {}", note_on(4));
+
+    // The ramp on its own is left alone — this must not cry wolf on a config
+    // that is doing exactly what it looks like.
+    // (Only the two sens lines: ACCEL_CURVE carries its own note saying the
+    // setting comes from the custom-curve fork, which is unrelated and correct.)
+    let fine = compile("MIN_GYRO_SENS = 4.31\nMAX_GYRO_SENS = 8.45\nACCEL_CURVE = POWER\n");
+    for i in 0..2 {
+        assert!(
+            fine.lines[i].notes.is_empty(),
+            "a ramp nothing overrides gets no note, but line {} says: {:?}",
+            i + 1,
+            fine.lines[i].notes
+        );
+    }
+}
+
+/// A slider's range is for the control to feel right in, not a limit on what the
+/// config may say. A value written outside it stays put until the slider is
+/// dragged, and then it lands inside — which is the only way one control can be
+/// both usable across the span people actually use and honest about the rest.
+#[test]
+fn a_value_outside_a_sliders_range_is_kept_until_the_slider_is_dragged() {
+    // Well past the highest calibration anyone has published, which is still
+    // not a limit — a game whose own sensitivity scale is tiny needs a big one.
+    let text = "REAL_WORLD_CALIBRATION = 2500\n";
+    let k = &super::knobs::knobs(text)[0];
+    assert_eq!(k.value, 2500.0, "the config's value is read as written");
+    assert_eq!((k.lo, k.hi), (0.0, 1000.0), "the span real configs live in");
+    assert_eq!(k.t(), 1.0, "the handle sits at the end rather than off the track");
+    // The parser still takes it — a slider has no say in what is legal.
+    assert_eq!(compile(text).aim.real_world_calibration, 2500.0);
+    // Dragging anywhere lands in range.
+    for t in [0.0, 0.5, 1.0] {
+        let v = k.at(t);
+        assert!((0.0..=1000.0).contains(&v), "at({t}) = {v}");
+    }
+    assert_eq!(compile(&super::knobs::set_knob(text, 0, k.at(0.5), false))
+        .aim.real_world_calibration, 500.0);
+}
+
+/// The calibration slider has to hold every number a real game asks for.
+///
+/// It absorbs each game's own sensitivity scale, so it spans three orders of
+/// magnitude: JSM's Desktop.txt ships 5.3333 for a 2D cursor, its 3D template
+/// starts from a first guess of 40, the README's worked example lands on 151.5,
+/// and GyroWiki puts Control near 300 at default sensitivity. An earlier cap of
+/// 10 put every 3D game off the end of the track.
+#[test]
+fn the_calibration_slider_holds_the_numbers_real_games_use() {
+    for (written, where_from) in [
+        (1.0, "a 2D game's first guess"),
+        (5.3333, "JSM's own Desktop.txt"),
+        (40.0, "the 3D template's first guess"),
+        (151.5, "the README's worked example"),
+        (300.0, "Control, on default sensitivity"),
+    ] {
+        let text = format!("REAL_WORLD_CALIBRATION = {written}\n");
+        let k = &super::knobs::knobs(&text)[0];
+        assert_eq!(k.value, written, "{where_from}");
+        assert!(
+            k.t() < 1.0,
+            "{where_from} ({written}) pegs the slider at its end"
+        );
+    }
+}
+
+/// The curve preview follows the curve the config chose, and its shape is the same
+/// one the gyro actually runs.
+#[test]
+fn the_curve_preview_matches_the_curve_the_config_chose() {
+    let curve_of = |extra: &str| {
+        let cfg = compile(&format!(
+            "MIN_GYRO_SENS = 1\nMAX_GYRO_SENS = 5\nMIN_GYRO_THRESHOLD = 0\n\
+             MAX_GYRO_THRESHOLD = 100\n{extra}"
+        ));
+        super::knobs::sens_curve(&cfg, 41)
+    };
+    let linear = curve_of("ACCEL_CURVE = LINEAR");
+    assert_eq!(linear.len(), 41, "as many samples as asked for");
+    assert!(linear[0].dps == 0.0, "starts at a standstill");
+    assert!((linear[0].sens - 1.0).abs() < 1e-5, "at the low sensitivity");
+    assert!(linear.last().unwrap().dps > 100.0, "and runs past the top threshold");
+
+    // Quadratic is below the straight line partway up, as it is in the engine.
+    // Sampled by SPEED, halfway up the threshold band — picking a fraction of the
+    // array instead would silently land past the top threshold (where every curve
+    // has saturated to the same value and the comparison proves nothing) the next
+    // time the speed axis changes.
+    let quad = curve_of("ACCEL_CURVE = QUADRATIC");
+    let at = |c: &[super::knobs::CurvePoint], dps: f32| {
+        c.iter()
+            .min_by(|a, b| (a.dps - dps).abs().total_cmp(&(b.dps - dps).abs()))
+            .unwrap()
+            .sens
+    };
+    const HALFWAY: f32 = 50.0; // half of MAX_GYRO_THRESHOLD
+    assert!(
+        at(&quad, HALFWAY) < at(&linear, HALFWAY),
+        "the preview shows the curve's shape: {} against {}",
+        at(&quad, HALFWAY),
+        at(&linear, HALFWAY)
+    );
+
+    // The speed axis is the custom-curve fork's: a fixed 500°/s, so a curve drawn
+    // here and the same curve drawn there are the same picture.
+    assert!(
+        (linear.last().unwrap().dps - 500.0).abs() < 1e-3,
+        "the fork's axis: {}",
+        linear.last().unwrap().dps
+    );
+
+    // A curve whose interesting range is past that is still drawn over a span
+    // that shows it — otherwise the three that ignore the threshold would be
+    // drawn into an unreadable corner.
+    let wide = curve_of("ACCEL_CURVE = NATURAL\nACCEL_NATURAL_VHALF = 600");
+    assert!(
+        wide.last().unwrap().dps >= 600.0,
+        "the span follows the curve's own settings: {}",
+        wide.last().unwrap().dps
+    );
+}
+
+/// Tuning is done by feel, so while a setting is being adjusted the input it
+/// governs has to keep reaching the game. Several settings don't name that input
+/// — they act on "whichever stick aims", or on whatever was routed to a virtual
+/// stick — so the answer comes from the config, never from a guess.
+#[test]
+fn a_setting_says_which_input_you_need_to_feel_it() {
+    use super::knobs::{feel_of, Feel, Hand};
+
+    let plain = compile("");
+    assert_eq!(feel_of(&plain, "GYRO_SENS"), Feel::Gyro);
+    assert_eq!(feel_of(&plain, "REAL_WORLD_CALIBRATION"), Feel::Gyro);
+    assert_eq!(feel_of(&plain, "ACCEL_SIGMOID_WIDTH"), Feel::Gyro, "the fork's too");
+    assert_eq!(feel_of(&plain, "LEAN_THRESHOLD"), Feel::Gyro, "accel is the same wire");
+    assert_eq!(feel_of(&plain, "TRIGGER_THRESHOLD"), Feel::Triggers);
+    // Lower case reads the same as a config may spell it either way.
+    assert_eq!(feel_of(&plain, "gyro_sens"), Feel::Gyro);
+
+    // A setting that names its side means that side.
+    assert_eq!(feel_of(&plain, "LEFT_STICK_DEADZONE_INNER"), Feel::Stick(Hand::Left));
+    assert_eq!(feel_of(&plain, "RIGHT_STICK_DEADZONE_OUTER"), Feel::Stick(Hand::Right));
+
+    // ...and one that doesn't means whichever stick the CONFIG aims with.
+    let right_aims = compile("RIGHT_STICK_MODE = AIM\n");
+    assert_eq!(feel_of(&right_aims, "STICK_POWER"), Feel::Stick(Hand::Right));
+    let left_aims = compile("LEFT_STICK_MODE = AIM\n");
+    assert_eq!(
+        feel_of(&left_aims, "STICK_POWER"),
+        Feel::Stick(Hand::Left),
+        "the unusual way round is still read, not assumed"
+    );
+
+    // A virtual-pad OUTPUT setting shapes whatever drives that stick. With the
+    // gyro routed there, the gyro is what you need to feel — not the stick whose
+    // name is on the setting.
+    let gyro_to_left = compile("GYRO_OUTPUT = LEFT_STICK\n");
+    assert_eq!(feel_of(&gyro_to_left, "LEFT_STICK_UNDEADZONE_INNER"), Feel::Gyro);
+    assert_eq!(
+        feel_of(&gyro_to_left, "RIGHT_STICK_UNDEADZONE_INNER"),
+        Feel::Stick(Hand::Right),
+        "the stick the gyro was NOT routed to is still its own"
+    );
+    assert_eq!(
+        feel_of(&gyro_to_left, "LEFT_STICK_DEADZONE_INNER"),
+        Feel::Stick(Hand::Left),
+        "an INPUT deadzone on the same stick is still the stick"
+    );
+    assert_eq!(feel_of(&gyro_to_left, "WIND_STICK_RANGE"), Feel::Gyro);
+    assert_eq!(
+        feel_of(&right_aims, "WIND_STICK_RANGE"),
+        Feel::Stick(Hand::Right),
+        "with the gyro left on the mouse, winding is the stick's"
+    );
+
+    // A press timing has nothing to feel by holding an axis, and the buttons that
+    // would show it are the ones that must NOT reach a live game while you tune.
+    assert_eq!(feel_of(&plain, "HOLD_PRESS_TIME"), Feel::Nothing);
+    assert_eq!(feel_of(&plain, "NOT_A_SETTING"), Feel::Nothing);
+}
+
+/// A gyro deadzone has to be visible on the curve, or the preview says a config
+/// aims at slow speeds when it throws them away. `GYRO_CUTOFF_SPEED` scales the
+/// VELOCITY before the sensitivity ramp reads it, so the curve folds it in.
+#[test]
+fn the_curve_shows_a_gyro_deadzone_that_the_config_actually_applies() {
+    use super::knobs::sens_curve_warped;
+    let at = |c: &[super::knobs::CurvePoint], dps: f32| {
+        c.iter()
+            .min_by(|a, b| (a.dps - dps).abs().total_cmp(&(b.dps - dps).abs()))
+            .unwrap()
+            .sens
+    };
+    // A hard cutoff: nothing below 5°/s reaches the game at all.
+    let cfg = compile("GYRO_SENS = 3\nGYRO_CUTOFF_SPEED = 5\n");
+    let hard = sens_curve_warped(&cfg, 400, 0.25);
+    assert_eq!(at(&hard, 1.0), 0.0, "inside the deadzone the curve is flat zero");
+    assert_eq!(at(&hard, 4.0), 0.0);
+    assert!((at(&hard, 50.0) - 3.0).abs() < 1e-3, "and full sensitivity past it");
+
+    // A recovery band fades back in across it rather than switching on.
+    let ramped = sens_curve_warped(
+        &compile("GYRO_SENS = 3\nGYRO_CUTOFF_SPEED = 5\nGYRO_CUTOFF_RECOVERY = 15\n"),
+        400,
+        0.25,
+    );
+    assert_eq!(at(&ramped, 1.0), 0.0, "still nothing below the cutoff");
+    let mid = at(&ramped, 10.0);
+    assert!(mid > 0.1 && mid < 2.9, "halfway up the band, part way in: {mid}");
+    assert!(at(&ramped, 20.0) > mid, "and further in higher up");
+
+    // No cutoff set: the curve is exactly what it was, so this can't quietly
+    // change the picture for every config that doesn't use one.
+    let plain = sens_curve_warped(&compile("GYRO_SENS = 3\n"), 400, 0.25);
+    assert!((at(&plain, 1.0) - 3.0).abs() < 1e-3);
+}
+
+/// Stretching the axis has to move the SAMPLES too. A deadzone a couple of
+/// degrees wide is a handful of pixels on a linear 500°/s axis; stretching the
+/// slow end without sampling it would draw that detail as one straight line
+/// between two far-apart points — the zoom would show nothing new.
+#[test]
+fn stretching_the_speed_axis_samples_where_it_stretched() {
+    use super::knobs::{sens_curve, sens_curve_warped};
+    let cfg = compile("GYRO_SENS = 3\nGYRO_CUTOFF_SPEED = 5\n");
+    let below = |c: &[super::knobs::CurvePoint]| c.iter().filter(|p| p.dps < 5.0).count();
+
+    let linear = sens_curve(&cfg, 200);
+    let logish = sens_curve_warped(&cfg, 200, 0.25);
+    assert!(
+        below(&logish) > below(&linear) * 5,
+        "the stretched end gets the samples: {} against {}",
+        below(&logish),
+        below(&linear)
+    );
+    // Both still span the same axis, so the two are the same curve drawn twice.
+    assert!((logish.last().unwrap().dps - linear.last().unwrap().dps).abs() < 1e-2);
+    assert_eq!(logish[0].dps, 0.0, "and both start at a standstill");
+
+    // An exponent of 1 is the plain axis, whichever way you ask for it.
+    let same = sens_curve_warped(&cfg, 64, 1.0);
+    for (a, b) in same.iter().zip(sens_curve(&cfg, 64).iter()) {
+        assert!((a.dps - b.dps).abs() < 1e-3 && (a.sens - b.sens).abs() < 1e-3);
+    }
+}
+
+/// `STICK_AXIS_X` / `STICK_AXIS_Y` invert the mouse a stick in `AIM` drives,
+/// separately from the gyro's own inversion — as in JSM, because wanting one
+/// inverted and not the other is the usual reason to set either.
+///
+/// These used to compile as "not live yet, arrives in phase 3" long after phase
+/// 3 had shipped, which is the sort of stale promise this module exists not to
+/// make.
+#[test]
+fn stick_axis_inversion_flips_the_stick_aim_and_leaves_the_gyro_alone() {
+    let base = "RIGHT_STICK_MODE = AIM\nSTICK_SENS = 100\nREAL_WORLD_CALIBRATION = 1";
+    let plain = Aiming::new(base).stick(1, 1.0, 0.0);
+    assert!(plain.x > 0.0, "right aims right by default");
+
+    let flipped = Aiming::new(&format!("{base}\nSTICK_AXIS_X = INVERTED")).stick(1, 1.0, 0.0);
+    assert!((flipped.x + plain.x).abs() < 1e-6, "inverted X mirrors it: {flipped:?}");
+
+    let up_plain = Aiming::new(base).stick(1, 0.0, 1.0);
+    let up_flip = Aiming::new(&format!("{base}\nSTICK_AXIS_Y = INVERTED")).stick(1, 0.0, 1.0);
+    assert!(up_plain.y > 0.0 && (up_flip.y + up_plain.y).abs() < 1e-6, "and Y: {up_flip:?}");
+
+    // One axis at a time: inverting X must not touch Y.
+    let only_x = Aiming::new(&format!("{base}\nSTICK_AXIS_X = INVERTED")).stick(1, 0.0, 1.0);
+    assert!((only_x.y - up_plain.y).abs() < 1e-6, "Y is untouched: {only_x:?}");
+
+    // It is the STICK's inversion, not the gyro's — setting the gyro's leaves
+    // the stick alone.
+    let gyro_only = Aiming::new(&format!("{base}\nGYRO_AXIS_X = INVERTED")).stick(1, 1.0, 0.0);
+    assert!((gyro_only.x - plain.x).abs() < 1e-6, "the gyro's setting isn't the stick's");
+
+    // And it compiles clean, rather than as a promise.
+    let cfg = compile("STICK_AXIS_X = INVERTED\nSTICK_AXIS_Y = STANDARD\n");
+    assert!(
+        cfg.lines.iter().all(|l| matches!(l.status, LineStatus::Ok)),
+        "both lines run: {:?}",
+        cfg.lines.iter().map(|l| &l.status).collect::<Vec<_>>()
+    );
+}
+
+/// Nothing tells the user to wait for a numbered phase.
+///
+/// The module was built in phases and its "not live yet" messages named them, so
+/// a setting could go on promising "arrives in phase 3" for months after phase 3
+/// shipped — a lie that ages into itself. A reason for something being missing
+/// stays true; a schedule does not, so no message may carry one.
+#[test]
+fn no_diagnostic_promises_a_numbered_phase() {
+    let src = include_str!("parse.rs");
+    for (n, line) in src.lines().enumerate() {
+        let lower = line.to_ascii_lowercase();
+        if lower.trim_start().starts_with("//") {
+            continue;
+        }
+        assert!(
+            !(lower.contains("phase 1") || lower.contains("phase 2") || lower.contains("phase 3")
+                || lower.contains("phase 4") || lower.contains("phase 5")
+                || lower.contains("later phase") || lower.contains("a later phase")),
+            "parse.rs:{} tells the user to wait for a phase: {}",
+            n + 1,
+            line.trim()
+        );
+    }
+}
+
+// ── the calibration sweep, end to end through the node ───────────────────────
+//
+// The parts most easily broken silently: that the `cal_*` params reach the
+// evaluator at all, that the sweep drives the bus instead of the config's own
+// aiming, and that the measurement comes back on the trailing outputs the widget
+// reads it from.
+
+/// Run a node for `ticks` at `dt` with the pad turning at a fixed rate, and
+/// return (bus, outputs). `gyro` names the pin and the rate in deg/s.
+fn run_sweep(
+    snap: &NodeSnap,
+    gyro: &[(&str, f32)],
+    ticks: usize,
+    dt: f32,
+) -> (PinSigs, Vec<Option<Signal>>) {
+    const GYRO_REF_DPS: f32 = 2000.0;
+    let uid = snap.node_uid;
+    let key = format!("collector:{uid}");
+    let mut dev: BusMap = BusMap::default();
+    for (pin, dps) in gyro {
+        dev.insert(
+            (PAD.to_string(), (*pin).to_string()),
+            Signal::Float(dps / GYRO_REF_DPS),
+        );
+    }
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut collector: BusMap = BusMap::default();
+    let mut out = Vec::new();
+    for _ in 0..ticks {
+        collector.clear();
+        out = super::eval::jsm_publish(snap, uid, &dev, &mut collector, &mut state, dt);
+    }
+    let bus = collector
+        .into_iter()
+        .filter(|((d, _), _)| *d == key)
+        .map(|((_, p), s)| (p, s))
+        .collect();
+    (bus, out)
+}
+
+fn sweeping(text: &str, axis: &str, output: &str) -> NodeSnap {
+    let mut snap = jsm_snap(7311, text, false);
+    snap.params
+        .insert("cal_measure".to_string(), serde_json::json!(axis));
+    snap.params
+        .insert("cal_output".to_string(), serde_json::json!(output));
+    snap
+}
+
+#[test]
+fn a_sweep_publishes_the_rotation_it_has_measured() {
+    let _guard = alone();
+    // Ten ticks of 10 ms at 90°/s of yaw is 9° of turn.
+    let snap = sweeping("REAL_WORLD_CALIBRATION = 40", "yaw", "mouse");
+    let (_, out) = run_sweep(&snap, &[("gyro_z", 90.0)], 10, 0.010);
+    let deg = match out.get(super::eval::cal_deg_out(1)).copied().flatten() {
+        Some(Signal::Float(f)) => f,
+        other => panic!("the measurement should be a float, got {other:?}"),
+    };
+    assert!((deg - 9.0).abs() < 0.01, "expected ~9°, got {deg}");
+    // Nothing runs when no sweep does.
+    let idle = jsm_snap(7311, "REAL_WORLD_CALIBRATION = 40", false);
+    let (_, out) = run_sweep(&idle, &[("gyro_z", 90.0)], 10, 0.010);
+    assert_eq!(
+        out.get(super::eval::cal_deg_out(1)).copied().flatten(),
+        Some(Signal::Float(0.0)),
+        "an idle node measures nothing"
+    );
+}
+
+#[test]
+fn the_sweep_drives_the_mouse_at_the_configs_calibration() {
+    let _guard = alone();
+    // 40 counts/° ÷ IN_GAME_SENS 2 = 20 counts/°, and 90°/s for 10 ms is 0.9° —
+    // so 18 counts this tick, on x alone.
+    let snap = sweeping(
+        "REAL_WORLD_CALIBRATION = 40\nIN_GAME_SENS = 2",
+        "yaw",
+        "mouse",
+    );
+    let (bus, _) = run_sweep(&snap, &[("gyro_z", 90.0)], 1, 0.010);
+    let m = match bus.get("mouse_move") {
+        Some(Signal::Vec2(v)) => *v,
+        other => panic!("the sweep must drive mouse_move, got {other:?}"),
+    };
+    assert!((m.x - 18.0).abs() < 0.01, "expected 18 counts, got {}", m.x);
+    assert_eq!(m.y, 0.0, "the off-axis is blocked during a yaw sweep");
+}
+
+#[test]
+fn a_sweep_ignores_the_configs_own_sensitivity() {
+    let _guard = alone();
+    // A config with a steep gyro sensitivity and heavy smoothing would fold both
+    // into the answer. The sweep drives from the raw rotation, so the same turn
+    // moves the mouse by the same amount either way.
+    let plain = sweeping("REAL_WORLD_CALIBRATION = 40", "yaw", "mouse");
+    let loud = sweeping(
+        "REAL_WORLD_CALIBRATION = 40\nGYRO_SENS = 8\nGYRO_SMOOTH_TIME = 0.5",
+        "yaw",
+        "mouse",
+    );
+    let (a, _) = run_sweep(&plain, &[("gyro_z", 90.0)], 1, 0.010);
+    let (b, _) = run_sweep(&loud, &[("gyro_z", 90.0)], 1, 0.010);
+    assert_eq!(a.get("mouse_move"), b.get("mouse_move"));
+}
+
+#[test]
+fn a_stick_sweep_drives_the_stick_and_holds_the_mouse_still() {
+    let _guard = alone();
+    // 180°/s against a 360 °/s calibration is half deflection.
+    let snap = sweeping(
+        "GYRO_OUTPUT = RIGHT_STICK\nVIRTUAL_STICK_CALIBRATION = 360",
+        "yaw",
+        "stick",
+    );
+    let (bus, out) = run_sweep(&snap, &[("gyro_z", 180.0)], 1, 0.010);
+    match bus.get("right_stick") {
+        Some(Signal::Vec2(v)) => assert!((v.x - 0.5).abs() < 0.01, "got {v:?}"),
+        other => panic!("the sweep must drive the stick, got {other:?}"),
+    }
+    assert_eq!(
+        bus.get("mouse_move"),
+        Some(&Signal::Vec2(glam::Vec2::ZERO)),
+        "the output not being calibrated must not move the camera"
+    );
+    // Half deflection is well inside the limit, so the result stands.
+    assert_eq!(
+        out.get(super::eval::cal_peak_out(1)).copied().flatten(),
+        Some(Signal::Float(0.5))
+    );
+}
+
+#[test]
+fn turning_past_full_stick_is_reported_as_the_peak() {
+    let _guard = alone();
+    // 720°/s against a 360 °/s calibration is twice what the stick can express:
+    // the stick pins at 1.0 and the widget is told the sweep saturated.
+    let snap = sweeping(
+        "GYRO_OUTPUT = RIGHT_STICK\nVIRTUAL_STICK_CALIBRATION = 360",
+        "yaw",
+        "stick",
+    );
+    let (bus, out) = run_sweep(&snap, &[("gyro_z", 720.0)], 1, 0.010);
+    match bus.get("right_stick") {
+        Some(Signal::Vec2(v)) => assert_eq!(v.x, 1.0, "the stick cannot go past full"),
+        other => panic!("got {other:?}"),
+    }
+    assert_eq!(
+        out.get(super::eval::cal_peak_out(1)).copied().flatten(),
+        Some(Signal::Float(2.0)),
+        "the UNCLAMPED deflection is what tells the widget to refuse the answer"
+    );
+}
+
+/// During the 360 sweep a stick circled round its edge turns the camera alongside
+/// the gyro, and the two add — with a config that has no flick stick at all,
+/// since the sweep sets the config's own aiming aside, and with the stick itself
+/// held still on the output.
+#[test]
+fn a_circled_stick_and_the_gyro_turn_the_360_together_without_a_flick_config() {
+    let _guard = alone();
+    for cfg in ["REAL_WORLD_CALIBRATION = 40", "REAL_WORLD_CALIBRATION = 40\nRIGHT_STICK_MODE = AIM"] {
+        let snap = sweeping(cfg, "yaw", "mouse");
+        let uid = snap.node_uid;
+        let key = format!("collector:{uid}");
+        let mut state: HashMap<usize, NodeState> = HashMap::new();
+        let mut out = Vec::new();
+        let mut total_x = 0.0;
+        let mut last_bus: PinSigs = PinSigs::default();
+        // 90° of clockwise sweep in 9° steps, read every fourth 1 ms tick the way a
+        // stick polling slower than the engine delivers it, then held while the
+        // payout drains.
+        for i in 0..400 {
+            let a = ((i / 4).min(10) as f32 * 9.0).to_radians();
+            let v = glam::Vec2::new(a.sin(), a.cos());
+            let mut dev: BusMap = BusMap::default();
+            dev.insert((PAD.to_string(), "right_stick".to_string()), Signal::Vec2(v));
+            dev.insert((PAD.to_string(), "right_stick_x".to_string()), Signal::Float(v.x));
+            dev.insert((PAD.to_string(), "right_stick_y".to_string()), Signal::Float(v.y));
+            // And the pad turning at 90°/s the whole time: 36° over the 400 ms.
+            dev.insert((PAD.to_string(), "gyro_z".to_string()), Signal::Float(90.0 / 2000.0));
+            let mut collector: BusMap = BusMap::default();
+            out = super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.001);
+            last_bus = collector
+                .into_iter()
+                .filter(|((d, _), _)| *d == key)
+                .map(|((_, p), s)| (p, s))
+                .collect();
+            if let Some(Signal::Vec2(m)) = last_bus.get("mouse_move") {
+                total_x += m.x;
+                // No tick carries the whole step: the mouse is only handed the
+                // latest tick's displacement, so a spike on one tick is lost.
+                assert!(m.x < 9.0 * 40.0 * 0.5, "{cfg}: tick {i} spiked {}", m.x);
+            }
+        }
+        // 90° swept + 36° turned = 126°, at 40 counts/° is 5040 counts, to the right.
+        assert!((total_x - 5040.0).abs() < 1.0, "{cfg}: expected 5040 counts, got {total_x}");
+        let deg = match out.get(super::eval::cal_deg_out(1)).copied().flatten() {
+            Some(Signal::Float(f)) => f,
+            other => panic!("got {other:?}"),
+        };
+        assert!((deg - 126.0).abs() < 0.1, "{cfg}: expected 126°, got {deg}");
+        assert_eq!(last_bus.get("right_stick"), Some(&Signal::Vec2(glam::Vec2::ZERO)), "{cfg}");
+    }
+}
+
+#[test]
+fn calibrating_the_mouse_holds_a_gyro_driven_stick_still() {
+    let _guard = alone();
+    // `GYRO_OUTPUT = RIGHT_STICK` with the mouse being calibrated: the stick
+    // would otherwise turn the camera too, and the measured rotation would be
+    // answering for both outputs at once.
+    let snap = sweeping(
+        "GYRO_OUTPUT = RIGHT_STICK\nREAL_WORLD_CALIBRATION = 40",
+        "yaw",
+        "mouse",
+    );
+    let (bus, _) = run_sweep(&snap, &[("gyro_z", 180.0)], 1, 0.010);
+    assert_eq!(bus.get("right_stick"), Some(&Signal::Vec2(glam::Vec2::ZERO)));
+    match bus.get("mouse_move") {
+        Some(Signal::Vec2(v)) => assert!(v.x > 0.0, "the mouse is what should move"),
+        other => panic!("got {other:?}"),
+    }
+}
+
+#[test]
+fn the_pitch_method_measures_the_vertical_and_blocks_the_horizontal() {
+    let _guard = alone();
+    // Turning mostly sideways during a 180° vertical sweep must neither move the
+    // camera sideways nor count toward the measurement.
+    let snap = sweeping("REAL_WORLD_CALIBRATION = 40", "pitch", "mouse");
+    let (bus, out) = run_sweep(&snap, &[("gyro_y", 45.0), ("gyro_z", 200.0)], 10, 0.010);
+    match bus.get("mouse_move") {
+        Some(Signal::Vec2(v)) => {
+            assert_eq!(v.x, 0.0, "the horizontal is blocked");
+            assert!(v.y > 0.0, "the vertical is what drives");
+        }
+        other => panic!("got {other:?}"),
+    }
+    let deg = match out.get(super::eval::cal_deg_out(1)).copied().flatten() {
+        Some(Signal::Float(f)) => f,
+        other => panic!("got {other:?}"),
+    };
+    assert!((deg - 4.5).abs() < 0.01, "only the pitch counts; got {deg}");
+}
+
+/// `STICK_SENS` gets a fader like every other single-number aiming setting, and
+/// tuning it hands the aiming stick to the game so the change can be felt.
+#[test]
+fn stick_and_touchpad_sens_get_faders() {
+    let k = super::knobs::knobs("RIGHT_STICK_MODE = AIM\nSTICK_SENS = 540");
+    let sens = k.iter().find(|k| k.name == "STICK_SENS").expect("STICK_SENS should get a fader");
+    assert_eq!(sens.value, 540.0);
+    assert!(sens.lo <= 360.0 && 360.0 <= sens.hi, "JSM's default sits inside the range");
+    // The pair form (separate vertical) is two faders, one per number.
+    assert_eq!(super::knobs::knobs("STICK_SENS = 360 180").len(), 2);
+
+    // TOUCHPAD_SENS had the same gap.
+    let t = super::knobs::knobs("TOUCHPAD_MODE = MOUSE\nTOUCHPAD_SENS = 2");
+    assert!(t.iter().any(|k| k.name == "TOUCHPAD_SENS" && k.value == 2.0), "{t:?}");
+
+    let cfg = compile("RIGHT_STICK_MODE = AIM\nSTICK_SENS = 540");
+    assert!(
+        matches!(super::knobs::feel_of(&cfg, "STICK_SENS"), super::knobs::Feel::Stick(_)),
+        "tuning it should pass the aiming stick through"
+    );
+}
+
+/// A trigger effect gets a fader per number its mode takes, each named for
+/// what it does and held to JSM's range for it, and each rewrites only its own
+/// number.
+#[test]
+fn a_trigger_effect_gets_a_named_fader_per_number() {
+    use super::knobs::{key_setting, knobs, set_knob_part};
+    let text = "RIGHT_TRIGGER_EFFECT = BOW 2 6 4 7 # draw";
+    let k = knobs(text);
+    let labels: Vec<String> = k.iter().map(|k| k.label()).collect();
+    assert_eq!(
+        labels,
+        ["start zone (R BOW)", "end zone (R BOW)", "force (R BOW)", "snap force (R BOW)"]
+    );
+    assert_eq!(k.iter().map(|k| k.value).collect::<Vec<_>>(), [2.0, 6.0, 4.0, 7.0]);
+    assert!(k.iter().all(|k| k.integral && k.lo == 0.0 && k.hi == 8.0));
+    // Every fader has its own key, and each names the setting it belongs to.
+    let keys: Vec<String> = k.iter().map(|k| k.key()).collect();
+    assert_eq!(keys.iter().collect::<std::collections::HashSet<_>>().len(), 4, "{keys:?}");
+    assert!(keys.iter().all(|key| key_setting(key) == "RIGHT_TRIGGER_EFFECT"), "{keys:?}");
+    // The snap force's fader moves the snap force, and nothing else.
+    assert_eq!(
+        set_knob_part(text, 0, k[3].part, 3.0, true),
+        "RIGHT_TRIGGER_EFFECT = BOW 2 6 4 3 # draw"
+    );
+
+    // Frequency and period reach 255; a mode with no numbers gets no faders.
+    let m = knobs("LEFT_TRIGGER_EFFECT = MACHINE 1 9 3 4 40 60");
+    assert_eq!(m[5].label(), "period (L MACHINE)");
+    assert_eq!(m[5].hi, 255.0);
+    assert!(knobs("LEFT_TRIGGER_EFFECT = OFF").is_empty());
+    // A number the line hasn't got yet gets no fader; the ones it has still do.
+    assert_eq!(knobs("LEFT_TRIGGER_EFFECT = AUTOMATIC 1 5").len(), 2);
+}
+
+/// Stepping a trigger effect's mode with Select gives the line exactly the new
+/// mode's numbers: what the two modes share by name carries over, what the new
+/// one adds gets a default, what it doesn't take goes — and the comment stays.
+#[test]
+fn stepping_a_trigger_mode_fills_and_trims_its_numbers() {
+    use super::catalogue::cycle_value;
+    use super::cursor::Cursor;
+    let mode = Cursor { line: 0, token: 2 };
+    let mut text = "LEFT_TRIGGER_EFFECT = RESISTANCE 3 7 # mine".to_string();
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        text = cycle_value(&text, mode, 1).expect("modes to step through");
+        seen.push(text.split_once("= ").unwrap().1.to_string());
+        let c = compile(&text);
+        assert!(errors(&c).is_empty(), "every step is a line JSM takes: {text} {:?}", errors(&c));
+    }
+    assert_eq!(
+        seen,
+        [
+            "BOW 3 6 7 7 # mine",
+            "GALLOPING 3 6 3 5 20 # mine",
+            "SEMI_AUTOMATIC 3 6 5 # mine",
+            "AUTOMATIC 3 5 20 # mine",
+            "MACHINE 3 8 3 6 20 10 # mine",
+            "ON # mine",
+            "OFF # mine",
+            "RESISTANCE 2 5 # mine",
+        ]
+    );
+}
+
+/// A carried number that doesn't suit the new mode is brought into its range,
+/// and one that has to come after another is moved after it.
+#[test]
+fn a_carried_trigger_number_is_brought_into_the_new_modes_range() {
+    use super::catalogue::cycle_value;
+    use super::cursor::Cursor;
+    let mode = Cursor { line: 0, token: 2 };
+    // RESISTANCE's start runs to 9; SEMI_AUTOMATIC's stops at 7 and wants an end
+    // past it — so start 7, and the end moved on to 8.
+    let text = cycle_value("LEFT_TRIGGER_EFFECT = AUTOMATIC 9 8 30", mode, -1).unwrap();
+    assert_eq!(text, "LEFT_TRIGGER_EFFECT = SEMI_AUTOMATIC 7 8 8");
+    assert!(errors(&compile(&text)).is_empty());
+}
+
+/// Typing a number over a number leaves it as typed — the line says when it
+/// is out of range; the editor doesn't quietly change what you chose.
+#[test]
+fn a_typed_trigger_number_is_left_as_typed() {
+    use super::cursor::Cursor;
+    use super::knobs::replace_word;
+    let text = "LEFT_TRIGGER_EFFECT = SEMI_AUTOMATIC 3 6 5";
+    let out = replace_word(text, Cursor { line: 0, token: 3 }, "12");
+    assert_eq!(out, "LEFT_TRIGGER_EFFECT = SEMI_AUTOMATIC 12 6 5");
+    // But typing the MODE settles its numbers, as Select does.
+    let out = replace_word(text, Cursor { line: 0, token: 2 }, "RESISTANCE");
+    assert_eq!(out, "LEFT_TRIGGER_EFFECT = RESISTANCE 3 5");
+}
+
+/// Scrubbing a trigger effect's number with the stick stays inside that
+/// number's own range — a SEMI_AUTOMATIC start stops at 7.
+#[test]
+fn scrubbing_a_trigger_number_keeps_to_its_range() {
+    use super::cursor::Cursor;
+    let text = "LEFT_TRIGGER_EFFECT = SEMI_AUTOMATIC 7 8 5";
+    let start = Cursor { line: 0, token: 3 };
+    let up = super::knobs::scrub(text, start, 1);
+    assert!(up.is_none() || up.as_deref() == Some(text), "already at the top: {up:?}");
+    assert_eq!(
+        super::knobs::scrub(text, start, -1).as_deref(),
+        Some("LEFT_TRIGGER_EFFECT = SEMI_AUTOMATIC 6 8 5")
+    );
+}
+
+// ── MIDI (plan phase 10) ─────────────────────────────────────────────────────
+
+/// A button plays a note on `MIDI_CHANNEL` — set BELOW the binding, since JSM
+/// reads settings wherever they sit — with `MIDI_VELOCITY` riding the velocity
+/// pin, and all of it marked produced so a MIDI Out sends it with Thru off.
+#[test]
+fn a_button_plays_a_note_on_the_configs_channel() {
+    let text = "S = MIDI_C4\nW = MIDI_CC7_CH10\nMIDI_CHANNEL = 3\nMIDI_VELOCITY = 127";
+    let bus = run_node(text, false, &["btn_south", "btn_west"], 2);
+    assert_eq!(bus.get("midi:note:3:60"), Some(&Signal::Bool(true)), "{bus:?}");
+    assert_eq!(bus.get("midi:vel:3:60"), Some(&Signal::Float(1.0)));
+    assert_eq!(bus.get("midi:cc:10:7"), Some(&Signal::Float(1.0)), "the name's own channel wins");
+    assert!(bus.contains_key("__midi_out__:midi:note:3:60"), "played MIDI is produced");
+    assert!(bus.contains_key("__midi_out__:midi:cc:10:7"));
+
+    let bus = run_node(text, false, &[], 2);
+    assert_eq!(bus.get("midi:note:3:60"), Some(&Signal::Bool(false)), "released, the note lifts");
+    assert_eq!(bus.get("midi:cc:10:7"), Some(&Signal::Float(0.0)));
+}
+
+/// A MIDI message is a button like any other. With nothing said it hears any
+/// channel; a name that says one hears only that one.
+#[test]
+fn a_midi_message_presses_a_key() {
+    let text = "MIDI_C4 = SPACE\nMIDI_D4_CH2 = ENTER";
+    let bus = run_node_with(text, false, &[("midi:note:*:60", Signal::Bool(true))], 2);
+    assert!(on(&bus, "key_space"), "{bus:?}");
+    let bus = run_node_with(text, false, &[("midi:note:1:62", Signal::Bool(true))], 2);
+    assert!(!on(&bus, "key_enter"), "channel 1 isn't the channel 2 the line names");
+    let bus = run_node_with(text, false, &[("midi:note:2:62", Signal::Bool(true))], 2);
+    assert!(on(&bus, "key_enter"));
+}
+
+/// `MIDI_IN_CHANNEL` narrows the inputs that don't name a channel.
+#[test]
+fn midi_in_channel_narrows_the_silent_inputs() {
+    let text = "MIDI_C4 = SPACE\nMIDI_IN_CHANNEL = 5";
+    let bus = run_node_with(text, false, &[("midi:note:*:60", Signal::Bool(true)), ("midi:note:4:60", Signal::Bool(true))], 2);
+    assert!(!on(&bus, "key_space"), "a note on channel 4 isn't channel 5");
+    let bus = run_node_with(text, false, &[("midi:note:5:60", Signal::Bool(true))], 2);
+    assert!(on(&bus, "key_space"));
+}
+
+/// A knob used as a button crosses at `MIDI_IN_THRESHOLD`.
+#[test]
+fn a_knob_presses_past_the_threshold() {
+    let text = "MIDI_CC64 = LSHIFT\nMIDI_IN_THRESHOLD = 0.7";
+    let bus = run_node_with(text, false, &[("midi:cc:*:64", Signal::Float(0.6))], 2);
+    assert!(!on(&bus, "key_lshift"));
+    let bus = run_node_with(text, false, &[("midi:cc:*:64", Signal::Float(0.8))], 2);
+    assert!(on(&bus, "key_lshift"));
+}
+
+/// Strict mode silences MIDI too. It used to zero only the pad's pins, so a MIDI
+/// pin was simply absent from this node's bus and a reader downstream fell back
+/// to the raw device — raw MIDI slipped straight past a strict config.
+#[test]
+fn strict_mode_silences_midi_as_well() {
+    let bus = run_node_with("S = SPACE", true, &[("midi:cc:1:7", Signal::Float(0.8))], 2);
+    assert_eq!(bus.get("midi:cc:1:7"), Some(&Signal::Float(0.0)), "{bus:?}");
+    let bus = run_node_with("S = SPACE", false, &[("midi:cc:1:7", Signal::Float(0.8))], 2);
+    assert_eq!(bus.get("midi:cc:1:7"), Some(&Signal::Float(0.8)), "pass-through carries it on");
+}
+
+/// What a MIDI name can't be, the line says.
+#[test]
+fn midi_lines_refuse_what_cannot_work() {
+    let err = |line: &str| matches!(one(line).status, LineStatus::Error(_));
+    assert!(err("S = MIDI_BPM"), "a tempo is not sent");
+    assert!(err("S = MIDI_C4_CHANY"), "an output picks a channel");
+    assert!(err("MIDI_BPM = SPACE"), "a tempo is not pressed");
+    assert!(err("S = MIDI_CC300"));
+    assert!(err("L,MIDI_CHANNEL = 2"), "a channel can't change under a held note");
+    assert!(!err("L,MIDI_VELOCITY = 20"), "velocity can");
+    assert!(!err("S = MIDI_PC5'"));
+    assert!(!err("MIDI_C4,MIDI_E4 = ^LCONTROL"), "MIDI chords like any button");
+}
+
+/// A stick in MIDI mode sends its position, centred at 64, and is the config's:
+/// the stick itself no longer passes through.
+#[test]
+fn a_stick_in_midi_mode_sends_its_position() {
+    let text = "LEFT_STICK_MODE = MIDI\nLEFT_MIDI_X = MIDI_CC1\nLEFT_MIDI_Y = MIDI_PB_CH2\n\
+                STICK_DEADZONE_INNER = 0\nSTICK_DEADZONE_OUTER = 0";
+    // A point on the stick's circle, so the stick side's length clamp leaves it be.
+    let bus = run_node_with(text, false, &[("left_stick", Signal::Vec2(glam::Vec2::new(0.6, -0.8)))], 2);
+    let Some(Signal::Float(x)) = bus.get("midi:cc:1:1") else { panic!("no cc: {bus:?}") };
+    assert!((x - 0.8).abs() < 1e-4, "0.6 right is 0.8 of the way up from 64-centred, got {x}");
+    let Some(Signal::Float(b)) = bus.get("midi:pb:2") else { panic!("no bend: {bus:?}") };
+    assert!((b + 0.8).abs() < 1e-4, "a bend takes the axis as it stands, got {b}");
+    assert!(bus.contains_key("__midi_out__:midi:cc:1:1"));
+    assert_eq!(bus.get("left_stick"), Some(&Signal::Vec2(glam::Vec2::ZERO)), "the stick is claimed");
+
+    let bus = run_node_with(text, false, &[("left_stick", Signal::Vec2(glam::Vec2::ZERO))], 2);
+    assert_eq!(bus.get("midi:cc:1:1"), Some(&Signal::Float(0.5)), "at rest it sits at 64");
+
+    // Without the mode the target is inert, and the stick passes through.
+    let bus = run_node_with("LEFT_MIDI_X = MIDI_CC1", false, &[("left_stick", Signal::Vec2(glam::Vec2::new(1.0, 0.0)))], 2);
+    assert!(!bus.contains_key("midi:cc:1:1"), "{bus:?}");
+}
+
+/// The accelerometer needs no mode: a target is enough.
+#[test]
+fn an_accel_axis_sends_with_just_a_target() {
+    // 1 g on a bus that carries fractions of 8 g, over a 2 g full scale.
+    let text = "ACCEL_MIDI_Z = MIDI_CC20";
+    let bus = run_node_with(text, false, &[("accel_z", Signal::Float(1.0 / 8.0))], 2);
+    let Some(Signal::Float(v)) = bus.get("midi:cc:1:20") else { panic!("{bus:?}") };
+    assert!((v - 0.75).abs() < 1e-4, "half scale up from centre, got {v}");
+}
+
+/// The touchpad in MIDI mode is an XY pad: the finger's place, from the bottom
+/// left, held where it was when the finger lifts.
+#[test]
+fn the_touchpad_in_midi_mode_is_an_xy_pad() {
+    let _guard = alone();
+    let uid = 7301;
+    let snap = jsm_snap(uid, "TOUCHPAD_MODE = MIDI\nTOUCH_MIDI_X = MIDI_CC70\nTOUCH_MIDI_Y = MIDI_CC71", false);
+    let key = format!("collector:{uid}");
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut run = |finger: Option<(f32, f32)>| -> PinSigs {
+        let mut dev: BusMap = BusMap::default();
+        if let Some((x, y)) = finger {
+            dev.insert((PAD.to_string(), "touch1_active".to_string()), Signal::Bool(true));
+            dev.insert((PAD.to_string(), "touch1_x".to_string()), Signal::Float(x));
+            dev.insert((PAD.to_string(), "touch1_y".to_string()), Signal::Float(y));
+        }
+        let mut collector: BusMap = BusMap::default();
+        super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+        collector.into_iter().filter(|((d, _), _)| *d == key).map(|((_, p), s)| (p, s)).collect()
+    };
+    // Right edge, top edge (the bus counts y from the top).
+    let bus = run(Some((1.0, -1.0)));
+    assert_eq!(bus.get("midi:cc:1:70"), Some(&Signal::Float(1.0)), "{bus:?}");
+    assert_eq!(bus.get("midi:cc:1:71"), Some(&Signal::Float(1.0)));
+    let bus = run(None);
+    assert_eq!(bus.get("midi:cc:1:70"), Some(&Signal::Float(1.0)), "lifted, it holds");
+}
+
+/// The gyro sends its rate once GYRO_OUTPUT says MIDI, over GYRO_MIDI_SCALE —
+/// and the gyro button still turns it off.
+#[test]
+fn the_gyro_sends_midi_and_its_button_still_stops_it() {
+    let text = "GYRO_OUTPUT = MIDI\nGYRO_MIDI_Z = MIDI_CC30\nGYRO_MIDI_SCALE = 100\nGYRO_OFF = S";
+    // 50 deg/s of roll on a bus that carries fractions of 2000 deg/s.
+    let roll = ("gyro_x", Signal::Float(50.0 / 2000.0));
+    let bus = run_node_with(text, false, &[roll], 2);
+    let Some(Signal::Float(v)) = bus.get("midi:cc:1:30") else { panic!("{bus:?}") };
+    assert!((v - 0.75).abs() < 1e-3, "half scale up from centre, got {v}");
+    assert_eq!(bus.get("gyro_x"), Some(&Signal::Float(0.0)), "the gyro is the config's now");
+
+    let bus = run_node_with(text, false, &[roll, ("btn_south", Signal::Bool(true))], 2);
+    assert_eq!(bus.get("midi:cc:1:30"), Some(&Signal::Float(0.5)), "GYRO_OFF held: back to centre");
+}
+
+/// The lines say what a target or a mode word can't be.
+#[test]
+fn midi_source_lines_refuse_what_cannot_work() {
+    let err = |line: &str| matches!(one(line).status, LineStatus::Error(_));
+    assert!(err("LEFT_MIDI_X = MIDI_C4"), "a note can't follow a stick");
+    assert!(err("FLICK_STICK_OUTPUT = MIDI"));
+    assert!(!err("GYRO_OUTPUT = MIDI"));
+    assert!(!err("MOTION_STICK_MODE = MIDI"));
+    assert!(!err("TOUCHPAD_MODE = MIDI"));
+    assert!(!err("L,LEFT_MIDI_X = MIDI_CC2"), "a target can change with a chord");
+}
+
+/// A trigger bound to a MIDI value hands it the pull — the pull IS the value.
+#[test]
+fn a_trigger_bound_to_a_controller_sends_its_pull() {
+    let bus = run_node_with("ZL = MIDI_CC7", false, &[("left_trigger", Signal::Float(0.3))], 2);
+    let Some(Signal::Float(v)) = bus.get("midi:cc:1:7") else { panic!("{bus:?}") };
+    assert!((v - 0.3).abs() < 1e-4, "got {v}");
+    // Bound to a half of the bend, the pull pushes that way from the centre.
+    let bus = run_node_with("ZL = MIDI_PB_UP", false, &[("left_trigger", Signal::Float(0.3))], 2);
+    let Some(Signal::Float(v)) = bus.get("midi:pb:1") else { panic!("{bus:?}") };
+    assert!((v - 0.3).abs() < 1e-4, "got {v}");
+    let bus = run_node_with("ZL = MIDI_PB_DOWN", false, &[("left_trigger", Signal::Float(0.3))], 2);
+    let Some(Signal::Float(v)) = bus.get("midi:pb:1") else { panic!("{bus:?}") };
+    assert!((v + 0.3).abs() < 1e-4, "got {v}");
+}
+
+/// Two triggers on one bend, each pushing its own way: they add up, as two
+/// hands on one wheel would.
+#[test]
+fn two_halves_of_a_bend_add_up() {
+    let text = "ZL = MIDI_PB_DOWN
+ZR = MIDI_PB_UP";
+    let both = [("left_trigger", Signal::Float(0.2)), ("right_trigger", Signal::Float(0.7))];
+    let bus = run_node_with(text, false, &both, 2);
+    let Some(Signal::Float(v)) = bus.get("midi:pb:1") else { panic!("{bus:?}") };
+    assert!((v - 0.5).abs() < 1e-4, "0.7 up and 0.2 down leave 0.5 up, got {v}");
+    // A button pushes all the way.
+    let bus = run_node("S = MIDI_PB_DOWN", false, &["btn_south"], 2);
+    assert_eq!(bus.get("midi:pb:1"), Some(&Signal::Float(-1.0)), "{bus:?}");
+}
+
+/// The whole wheel goes both ways, so only a bend can drive it; anything that
+/// pushes one way has to say which.
+#[test]
+fn the_whole_bend_wants_a_way_unless_a_bend_drives_it() {
+    let err = |line: &str| matches!(one(line).status, LineStatus::Error(_));
+    assert!(err("ZL = MIDI_PB"));
+    assert!(err("S = MIDI_PB_CH2"));
+    assert!(!err("ZL = MIDI_PB_UP"));
+    assert!(!err("MIDI_PB = MIDI_PB_CH2"), "a bend drives a bend, both ways");
+    // And a whole bend passes through signed.
+    let bus = run_node_with("MIDI_PB = MIDI_PB_CH2", false, &[("midi:pb:*", Signal::Float(-0.6))], 2);
+    let Some(Signal::Float(v)) = bus.get("midi:pb:2") else { panic!("{bus:?}") };
+    assert!((v + 0.6).abs() < 1e-4, "got {v}");
+}
+
+/// A half of the bend as an input presses only its own way, and as a value
+/// hands on only its own side.
+#[test]
+fn a_bend_half_presses_only_its_own_way() {
+    let text = "MIDI_PB_DOWN = SPACE
+MIDI_PB_UP = X_RT";
+    let bus = run_node_with(text, false, &[("midi:pb:*", Signal::Float(-0.8))], 2);
+    assert!(on(&bus, "key_space"), "{bus:?}");
+    assert_eq!(bus.get("right_trigger"), Some(&Signal::Float(0.0)), "the up half is at rest");
+    let bus = run_node_with(text, false, &[("midi:pb:*", Signal::Float(0.4))], 2);
+    assert!(!on(&bus, "key_space"));
+    let Some(Signal::Float(v)) = bus.get("right_trigger") else { panic!("{bus:?}") };
+    assert!((v - 0.4).abs() < 1e-4, "got {v}");
+}
+
+/// A note played from a trigger takes its velocity from how far it is pulled.
+#[test]
+fn a_note_played_from_a_trigger_takes_its_velocity_from_the_pull() {
+    let bus = run_node_with("ZR = MIDI_C4", false, &[("right_trigger", Signal::Float(0.6))], 2);
+    assert_eq!(bus.get("midi:note:1:60"), Some(&Signal::Bool(true)), "{bus:?}");
+    let Some(Signal::Float(v)) = bus.get("midi:vel:1:60") else { panic!("{bus:?}") };
+    assert!((v - 0.6).abs() < 1e-4, "got {v}");
+}
+
+/// A knob bound to a virtual trigger drives it by its value, from the first bit
+/// of movement — not from `MIDI_IN_THRESHOLD`, which is for a knob used as a
+/// button.
+#[test]
+fn a_knob_drives_a_virtual_trigger_by_its_value() {
+    let bus = run_node_with("MIDI_CC7 = X_LT", false, &[("midi:cc:*:7", Signal::Float(0.2))], 2);
+    let Some(Signal::Float(v)) = bus.get("left_trigger") else { panic!("{bus:?}") };
+    assert!((v - 0.2).abs() < 1e-4, "below the button threshold it still passes, got {v}");
+}
+
+/// A note bound to a value hands it the velocity the note arrived with.
+#[test]
+fn a_note_bound_to_a_trigger_gives_its_velocity() {
+    let sigs = [
+        ("midi:note:*:60", Signal::Bool(true)),
+        ("midi:vel:*:60", Signal::Float(0.5)),
+    ];
+    let bus = run_node_with("MIDI_C4 = X_RT", false, &sigs, 2);
+    let Some(Signal::Float(v)) = bus.get("right_trigger") else { panic!("{bus:?}") };
+    assert!((v - 0.5).abs() < 1e-4, "got {v}");
+}
+
+/// The pad's own trigger bound to a pad trigger stays JSM's full press:
+/// `ZL = X_LT` is a button in JSM, and `ZL_MODE = X_LT` is how it passes the
+/// pull through. Only MIDI, which is ours, carries a value through a binding.
+#[test]
+fn a_trigger_bound_to_a_pad_trigger_is_still_a_full_press() {
+    let bus = run_node_with("ZL = X_LT", false, &[("left_trigger", Signal::Float(0.3))], 2);
+    assert_eq!(bus.get("left_trigger"), Some(&Signal::Float(1.0)), "{bus:?}");
+}
+
+/// A SysEx has no word spelling, so it goes behind `@` as its pin id — and so
+/// can any MIDI pin. One a port reports but nothing can send is refused.
+#[test]
+fn a_sysex_goes_behind_at_as_its_pin_id() {
+    assert_eq!(steps("S = @\"midi:sx:F07E7F0601F7\"")[0].out, Out::Pin("midi:sx:F07E7F0601F7".into()));
+    assert!(matches!(one("S = @\"midi:rt:bpm\"").status, LineStatus::Error(_)));
+    let bus = run_node("S = @\"midi:sx:F07E7F0601F7\"", false, &["btn_south"], 2);
+    assert_eq!(bus.get("midi:sx:F07E7F0601F7"), Some(&Signal::Bool(true)), "{bus:?}");
+    assert!(bus.contains_key("__midi_out__:midi:sx:F07E7F0601F7"));
+}
+
+/// Right of a MIDI button's `=`, the editor offers bindings — a MIDI name is a
+/// button like any other, so the line binds one.
+#[test]
+fn a_midi_line_takes_bindings_on_its_right() {
+    let text = "MIDI_C4 = ";
+    let cur = super::cursor::Cursor { line: 0, token: 2 };
+    assert_eq!(
+        super::catalogue::kinds_at(&format!("{text}{}", super::cursor::SLOT), cur),
+        &[super::catalogue::Kind::Binding]
+    );
+}
+
+fn with_ports(mut snap: NodeSnap) -> NodeSnap {
+    snap.params.insert(
+        "_macro_ports".to_string(),
+        serde_json::json!([
+            { "name": "Jump", "pin": "macro:aa11bb22" },
+            { "name": "Menu — Show", "pin": "menu:feedf00d_show" },
+        ]),
+    );
+    snap
+}
+
+fn key_space_on(collector: &BusMap, uid: usize) -> bool {
+    collector
+        .get(&(format!("collector:{uid}"), "key_space".to_string()))
+        .is_some_and(|s| s.as_bool())
+}
+
+/// A Macro Output port read as a button bridges two JSM nodes: one presses
+/// `@Jump` from its pad, and the other — reading a different device — uses it
+/// as the chord button of `@Jump,E`. Nothing about the port is claimed off the
+/// second node's own bus.
+#[test]
+fn an_at_name_on_the_left_reads_a_port_another_node_drives() {
+    let _guard = alone();
+    let writer = with_ports(jsm_snap(921, "S = @Jump", false));
+    let reader = with_ports(jsm_snap(922, "@Jump,E = SPACE", false));
+    let c = compile_full_with_ports("@Jump,E = SPACE");
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let run = |state: &mut HashMap<usize, NodeState>, pins: &[&str]| {
+        let mut dev: BusMap = BusMap::default();
+        for p in pins {
+            dev.insert((PAD.to_string(), (*p).to_string()), Signal::Bool(true));
+        }
+        let mut collector: BusMap = BusMap::default();
+        super::eval::jsm_publish(&writer, writer.node_uid, &dev, &mut collector, state, 0.010);
+        super::eval::jsm_publish(&reader, reader.node_uid, &dev, &mut collector, state, 0.010);
+        collector
+    };
+    // East alone: no chord, so no SPACE.
+    assert!(!key_space_on(&run(&mut state, &["btn_east"]), 922));
+    // South holds @Jump on the writer; then East with it fires the chord.
+    run(&mut state, &["btn_south"]);
+    let both = run(&mut state, &["btn_south", "btn_east"]);
+    assert!(key_space_on(&both, 922), "the chord through the port fires: {both:?}");
+}
+
+/// Evaluated before the node that drives it, a port still reads — last tick's
+/// value, carried over — so the order the two run in doesn't matter.
+#[test]
+fn an_at_name_reads_last_ticks_value_when_its_driver_runs_later() {
+    let _guard = alone();
+    let reader = with_ports(jsm_snap(923, "@Jump = SPACE", false));
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    state
+        .entry(crate::eval::MACRO_CARRY_UID)
+        .or_default()
+        .macro_prev
+        .insert(("macro".to_string(), "macro:aa11bb22".to_string()), Signal::Bool(true));
+    let mut collector: BusMap = BusMap::default();
+    super::eval::jsm_publish(&reader, reader.node_uid, &BusMap::default(), &mut collector, &mut state, 0.010);
+    assert!(key_space_on(&collector, 923), "{collector:?}");
+}
+
+/// What the left of the `=` says about an `@Name` it can't read.
+#[test]
+fn an_at_name_on_the_left_says_why_it_cant_be_read() {
+    let ports = [
+        ("Jump".to_string(), "macro:aa11bb22".to_string()),
+        ("Menu — Show".to_string(), "menu:feedf00d_show".to_string()),
+    ];
+    let err = |line: &str| {
+        let c = super::parse::compile_full(line, &[], &ports);
+        match &c.lines[0].status {
+            LineStatus::Error(e) | LineStatus::Waiting(e) => e.clone(),
+            other => panic!("`{line}` should be an error, got {other:?}"),
+        }
+    };
+    assert!(err("@Crouch = SPACE").contains("once its name is finished"));
+    assert!(err("E,@Crouch = SPACE").contains("once its name is finished"));
+    assert!(err("@\"Menu — Show\" = SPACE").contains("Virtual Menu entry"));
+    // And a known port reads fine, as a chord, a modeshift chord, or alone.
+    for ok in ["@Jump = SPACE", "E,@Jump = SPACE", "@jump,GYRO_SENS = 2", "@\"Jump\" = A"] {
+        let c = super::parse::compile_full(ok, &[], &ports);
+        assert!(errors(&c).is_empty(), "{ok}: {:?}", errors(&c));
+    }
+}
+
+/// The `@Name`s a config uses, from both sides of the `=`, once each.
+#[test]
+fn at_names_finds_every_port_a_config_uses() {
+    let text = "S = @Jump @\"Dash left\" # @NotThis\n\
+                @jump,E = SPACE\n\
+                N = @Hold_\n\
+                W = @\"midi:sx:F07E7F0601F7\"\n\
+                \"say @nope\"";
+    assert_eq!(super::parse::at_names(text), ["Jump", "Dash left", "Hold"]);
+}
+
+fn compile_full_with_ports(text: &str) -> super::parse::Compiled {
+    let ports = [("Jump".to_string(), "macro:aa11bb22".to_string())];
+    super::parse::compile_full(text, &[], &ports)
+}
+
+/// Mouse travel over a few ticks of steady yaw, with the `Aim` port held or not.
+fn gyro_travel(text: &str, aim_held: bool) -> f32 {
+    let snap = with_ports(jsm_snap(931, text, false));
+    let key = format!("collector:{}", snap.node_uid);
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut dev: BusMap = BusMap::default();
+    dev.insert((PAD.to_string(), "gyro_z".to_string()), Signal::Float(90.0 / 2000.0));
+    let mut total = 0.0;
+    for _ in 0..20 {
+        let mut collector: BusMap = BusMap::default();
+        if aim_held {
+            collector.insert(("macro".to_string(), "macro:aa11bb22".to_string()), Signal::Bool(true));
+        }
+        super::eval::jsm_publish(&snap, snap.node_uid, &dev, &mut collector, &mut state, 0.010);
+        if let Some(Signal::Vec2(m)) = collector.get(&(key.clone(), "mouse_move".to_string())) {
+            total += m.length();
+        }
+    }
+    total
+}
+
+/// `GYRO_OFF = @Name` / `GYRO_ON = @Name` gate the gyro from a Macro Output
+/// port — so another device, through another JSM node, can hold the gyro off
+/// or on. As a modeshift too, which re-applies the value every tick it is held.
+#[test]
+fn gyro_off_and_on_take_a_macro_port() {
+    let _guard = alone();
+    // The port is named `Jump` in `with_ports`; read it as an aim switch.
+    let off = format!("{AIM_CFG}\nGYRO_OFF = @Jump");
+    assert!(gyro_travel(&off, false) > 0.1, "not held: the gyro aims");
+    assert_eq!(gyro_travel(&off, true), 0.0, "held: GYRO_OFF stops it");
+    let on = format!("{AIM_CFG}\nGYRO_ON = @Jump");
+    assert_eq!(gyro_travel(&on, false), 0.0, "GYRO_ON: off until the port is held");
+    assert!(gyro_travel(&on, true) > 0.1);
+
+    // The compiled source is the port, by its id.
+    let ports = [("Jump".to_string(), "macro:aa11bb22".to_string())];
+    let c = super::parse::compile_full("GYRO_OFF = @jump", &[], &ports);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    // As a modeshift, the held chord's copy carries the port, not the name.
+    let c = super::parse::compile_full("E,GYRO_ON = @Jump", &[], &ports);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    assert!(c.modeshifts[0].value.starts_with("@macro:aa11bb22"), "{:?}", c.modeshifts[0].value);
+    let held = super::parse::resolve(&c, &[Btn::E]);
+    assert!(
+        format!("{:?}", held.aim.gyro_button).contains("Macro"),
+        "resolved without the ports: {:?}",
+        held.aim.gyro_button
+    );
+    // A port this patch hasn't got says so the way a binding's does.
+    let c = super::parse::compile_full("GYRO_OFF = @Crouch", &[], &ports);
+    match &c.lines[0].status {
+        LineStatus::Waiting(e) => assert!(e.contains("once its name is finished"), "{e}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A tab pulled in by naming it compiles against this patch's ports too, so an
+/// `@Name` in it works there just as it does in the tab itself.
+#[test]
+fn an_included_tab_resolves_its_ports() {
+    let tabs = [("base".to_string(), "S = @Jump\n@Jump,E = SPACE".to_string())];
+    let ports = [("Jump".to_string(), "macro:aa11bb22".to_string())];
+    let c = super::parse::compile_full("base.txt\nN = B", &tabs, &ports);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    let notes = c.lines[0].notes.join(" ");
+    assert!(!notes.contains("errors of its own"), "the included tab compiled clean: {notes}");
+    assert_eq!(c.bindings.len(), 3, "both of the base tab's bindings, and this one");
+}
+
+/// Run a reader node once with the `Jump` port carrying `sig` in namespace `ns`.
+fn read_port(text: &str, ns: &str, sig: Signal) -> BusMap {
+    let snap = with_ports(jsm_snap(941, text, false));
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut collector: BusMap = BusMap::default();
+    collector.insert((ns.to_string(), "macro:aa11bb22".to_string()), sig);
+    super::eval::jsm_publish(&snap, snap.node_uid, &BusMap::default(), &mut collector, &mut state, 0.010);
+    collector
+}
+
+/// A port read as a button presses from halfway by default, from the line's
+/// own threshold when it names one, and reads a Vec2 by its length — so a
+/// stick or touch deflection written to a port works as a button too.
+#[test]
+fn a_port_presses_at_its_threshold() {
+    let _guard = alone();
+    let f = |v: f32| Signal::Float(v);
+    assert!(!key_space_on(&read_port("@Jump = SPACE", "macro", f(0.4)), 941), "below half");
+    assert!(key_space_on(&read_port("@Jump = SPACE", "macro", f(0.6)), 941), "past half");
+    assert!(key_space_on(&read_port("@Jump>30 = SPACE", "macro", f(0.4)), 941), "past its own 30%");
+    assert!(!key_space_on(&read_port("@Jump>30 = SPACE", "macro", f(0.2)), 941));
+    assert!(key_space_on(&read_port("@Jump>0 = SPACE", "macro", f(0.01)), 941), ">0 is any movement");
+    assert!(key_space_on(&read_port("@Jump = SPACE", "macro", Signal::Bool(true)), 941), "a bool is full");
+    let v = |x: f32, y: f32| Signal::Vec2(glam::Vec2::new(x, y));
+    assert!(key_space_on(&read_port("@Jump = SPACE", "macro#v2", v(0.6, 0.6)), 941), "length 0.85");
+    assert!(!key_space_on(&read_port("@Jump = SPACE", "macro#v2", v(0.2, 0.2)), 941));
+    // In a chord the threshold travels with the name.
+    let ports = [("Jump".to_string(), "macro:aa11bb22".to_string())];
+    let c = super::parse::compile_full("E,@\"Jump\">75 = A", &[], &ports);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+}
+
+/// A port feeding a value hands on its amount, pressing from any movement as a
+/// MIDI knob does — `@Throttle = X_LT` is a throttle, not a switch.
+#[test]
+fn a_port_feeds_its_amount_to_a_value() {
+    let _guard = alone();
+    let out = read_port("@Jump = X_LT", "macro", Signal::Float(0.3));
+    let pull = out
+        .get(&("collector:941".to_string(), "left_trigger".to_string()))
+        .map(|s| s.as_float());
+    assert!(pull.is_some_and(|p| (p - 0.3).abs() < 1e-4), "the pull, not full: {pull:?}");
+}
+
+/// Written from something with a reading — a trigger's pull — a port carries
+/// that amount, so another node can read it as one.
+#[test]
+fn a_trigger_writes_its_pull_into_a_port() {
+    let _guard = alone();
+    let snap = with_ports(jsm_snap(942, "ZL = @Jump\nS = @\"Menu — Show\"", false));
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut dev: BusMap = BusMap::default();
+    dev.insert((PAD.to_string(), "left_trigger".to_string()), Signal::Float(0.3));
+    dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(true));
+    let mut collector: BusMap = BusMap::default();
+    super::eval::jsm_publish(&snap, snap.node_uid, &dev, &mut collector, &mut state, 0.010);
+    let port = collector.get(&("macro".to_string(), "macro:aa11bb22".to_string())).copied();
+    assert!(
+        port.is_some_and(|s| (s.as_float() - 0.3).abs() < 1e-4),
+        "the trigger's pull: {port:?}"
+    );
+    // A Virtual Menu entry is a press either way.
+    let menu = collector.get(&("macro".to_string(), "menu:feedf00d_show".to_string())).copied();
+    assert_eq!(menu.map(|s| s.as_bool()), Some(true), "{collector:?}");
+}
+
+#[test]
+fn a_malformed_threshold_says_what_is_wrong() {
+    let ports = [("Jump".to_string(), "macro:aa11bb22".to_string())];
+    for (line, want) in [("@Jump> = A", "needs a percent"), ("@Jump>150 = A", "0 to 100")] {
+        let c = super::parse::compile_full(line, &[], &ports);
+        match &c.lines[0].status {
+            LineStatus::Error(e) => assert!(e.contains(want), "{line}: {e}"),
+            other => panic!("`{line}` should be an error, got {other:?}"),
+        }
+    }
+    // And the gyro switch takes one too.
+    let c = super::parse::compile_full("GYRO_OFF = @Jump>20", &[], &ports);
+    assert!(errors(&c).is_empty(), "{:?}", errors(&c));
+    assert!(format!("{:?}", c.aim.gyro_button).contains("Some(20)"), "{:?}", c.aim.gyro_button);
+}
+
+/// A macro the node owns and shows as a pin puts its value on that output, the
+/// way a Macro Output node would; the calibration readout moves past the pins.
+#[test]
+fn a_shown_macro_is_an_output_pin_of_the_node() {
+    let _guard = alone();
+    let mut snap = with_ports(jsm_snap(951, "S = @Jump", false));
+    snap.params.insert(
+        super::eval::JSM_MACROS_PARAM.to_string(),
+        serde_json::json!([{ "id": "aa11bb22", "name": "Jump", "icon": "", "type": "Any" }]),
+    );
+    snap.params.insert(super::eval::JSM_MACRO_OUTS_PARAM.to_string(), serde_json::json!(["macro:aa11bb22"]));
+    snap.n_outputs = 2;
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let run = |state: &mut HashMap<usize, NodeState>, held: bool| {
+        let mut dev: BusMap = BusMap::default();
+        dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(held));
+        let mut collector: BusMap = BusMap::default();
+        super::eval::jsm_publish(&snap, snap.node_uid, &dev, &mut collector, state, 0.010)
+    };
+    let out = run(&mut state, true);
+    assert_eq!(out.len(), 10, "bus, one pin, the three readouts, then the stick rotation's five");
+    assert_eq!(out[1].map(|s| s.as_bool()), Some(true), "held: the pin is on");
+    assert!(matches!(out[super::eval::cal_deg_out(2)], Some(Signal::Float(_))));
+    assert!(matches!(out[super::eval::curve_dps_out(2)], Some(Signal::Float(_))));
+    assert!(matches!(out[super::eval::rotation_out(2) + 3], Some(Signal::Bool(false))));
+    // Released, the Any pin carries nothing once last tick's value is gone.
+    run(&mut state, false);
+    let out = run(&mut state, false);
+    assert!(out[1].is_none_or(|s| !s.as_bool()), "released: {:?}", out[1]);
+}
+
+// ── GYRO_OUTPUT = *_STICK_ROTATION (FlexInput's own) ─────────────────────────
+
+const ROT_CFG: &str = "GYRO_SENS = 1\nGYRO_SMOOTH_TIME = 0\nGYRO_OUTPUT = RIGHT_STICK_ROTATION";
+
+/// The pad's pins for a stick held at `v` on `side` (all three forms) while the
+/// pad turns right at `yaw` deg/s.
+fn rot_pad(side: &str, v: glam::Vec2, yaw: f32) -> Vec<(String, Signal)> {
+    let mut sigs = Vec::new();
+    for s in ["left_stick", "right_stick"] {
+        let v = if s == side { v } else { glam::Vec2::ZERO };
+        sigs.push((s.to_string(), Signal::Vec2(v)));
+        sigs.push((format!("{s}_x"), Signal::Float(v.x)));
+        sigs.push((format!("{s}_y"), Signal::Float(v.y)));
+    }
+    sigs.push(("gyro_x".into(), Signal::Float(0.0)));
+    sigs.push(("gyro_y".into(), Signal::Float(0.0)));
+    sigs.push(("gyro_z".into(), Signal::Float(yaw / 2000.0)));
+    sigs
+}
+
+/// Run the node over `ticks` of 10 ms with a FRESH bus each tick, as the engine
+/// does, and return the last tick's bus and outputs.
+fn run_rotation(
+    text: &str,
+    strict: bool,
+    sigs: &[(String, Signal)],
+    ticks: usize,
+) -> (PinSigs, Vec<Option<Signal>>) {
+    let _guard = alone();
+    let uid = 4243;
+    let snap = jsm_snap(uid, text, strict);
+    let dev: BusMap =
+        sigs.iter().map(|(p, s)| ((PAD.to_string(), p.clone()), *s)).collect();
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut last = (PinSigs::default(), Vec::new());
+    for _ in 0..ticks {
+        let mut collector: BusMap = BusMap::default();
+        let out = super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+        let key = format!("collector:{uid}");
+        let bus = collector.into_iter().filter(|((d, _), _)| *d == key).map(|((_, p), s)| (p, s)).collect();
+        last = (bus, out);
+    }
+    last
+}
+
+fn bearing_of(bus: &PinSigs, stick: &str) -> (f32, glam::Vec2) {
+    let Some(Signal::Vec2(v)) = bus.get(stick) else { panic!("{stick} is published as a vector") };
+    (v.x.atan2(v.y).to_degrees(), *v)
+}
+
+#[test]
+fn rotation_turns_the_pushed_right_stick_with_the_pad() {
+    // 100°/s for a tenth of a second, at GYRO_SENS 1: ten degrees clockwise.
+    let (bus, out) = run_rotation(ROT_CFG, false, &rot_pad("right_stick", glam::Vec2::new(0.0, 0.9), 100.0), 10);
+    let (deg, v) = bearing_of(&bus, "right_stick");
+    assert!((deg - 10.0).abs() < 0.2, "turned clockwise by the turn: {deg} {v:?}");
+    assert!((v.length() - 0.9).abs() < 1e-4, "its length untouched: {v:?}");
+    assert_eq!(bus.get("right_stick_x").map(|s| s.as_float()), Some(v.x), "the axes agree");
+    assert_eq!(bus.get("right_stick_y").map(|s| s.as_float()), Some(v.y));
+    // The left stick is nobody's business here.
+    assert_eq!(bus.get("left_stick"), Some(&Signal::Vec2(glam::Vec2::ZERO)));
+    // The Tune panel's circle reads the same four values the module shows.
+    let at = super::eval::rotation_out(1);
+    assert_eq!(out[at], Some(Signal::Vec2(glam::Vec2::new(0.0, 0.9))), "the stick as it came");
+    assert_eq!(out[at + 1], Some(Signal::Vec2(v)), "the stick as it goes");
+    let Some(Signal::Float(off)) = out[at + 2] else { panic!("an offset") };
+    assert!((off - 10.0).abs() < 0.2, "{off}");
+    assert_eq!(out[at + 3], Some(Signal::Bool(true)));
+}
+
+#[test]
+fn rotation_is_scaled_by_gyro_sens_and_turns_left_too() {
+    let cfg = "GYRO_SENS = 0.5\nGYRO_SMOOTH_TIME = 0\nGYRO_OUTPUT = RIGHT_STICK_ROTATION";
+    let (bus, _) = run_rotation(cfg, false, &rot_pad("right_stick", glam::Vec2::new(1.0, 0.0), -100.0), 10);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    // Pointing right (90°), turned left by half of ten degrees.
+    assert!((deg - 85.0).abs() < 0.2, "{deg}");
+}
+
+#[test]
+fn rotation_leaves_a_stick_inside_its_deadzone_exactly_as_it_came() {
+    let cfg = format!("{ROT_CFG}\nGYRO_STICK_ROTATION_DEADZONE = 0.5");
+    let (bus, out) = run_rotation(&cfg, false, &rot_pad("right_stick", glam::Vec2::new(0.3, 0.3), 300.0), 10);
+    assert_eq!(bus.get("right_stick"), Some(&Signal::Vec2(glam::Vec2::new(0.3, 0.3))));
+    assert_eq!(bus.get("right_stick_x"), Some(&Signal::Float(0.3)));
+    assert_eq!(out[super::eval::rotation_out(1) + 3], Some(Signal::Bool(false)));
+    // At the default 0.2 the same stick is out, and turns.
+    let (bus, _) = run_rotation(ROT_CFG, false, &rot_pad("right_stick", glam::Vec2::new(0.3, 0.3), 300.0), 10);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 75.0).abs() < 0.5, "45° + 30°: {deg}");
+}
+
+#[test]
+fn rotation_turns_the_left_stick_when_told_to() {
+    let cfg = "GYRO_SENS = 1\nGYRO_SMOOTH_TIME = 0\nGYRO_OUTPUT = LEFT_STICK_ROTATION";
+    let (bus, _) = run_rotation(cfg, false, &rot_pad("left_stick", glam::Vec2::new(0.0, 1.0), 100.0), 10);
+    let (deg, _) = bearing_of(&bus, "left_stick");
+    assert!((deg - 10.0).abs() < 0.2, "{deg}");
+    // And a right stick pushed meanwhile is the pad's own, untouched.
+    let (bus, _) = run_rotation(cfg, false, &rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), 100.0), 10);
+    assert_eq!(bus.get("right_stick"), Some(&Signal::Vec2(glam::Vec2::new(0.0, 1.0))));
+}
+
+#[test]
+fn rotation_stops_while_the_gyro_is_switched_off() {
+    let cfg = format!("{ROT_CFG}\nGYRO_OFF = E");
+    let mut sigs = rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), 100.0);
+    sigs.push(("btn_east".into(), Signal::Bool(true)));
+    let (bus, _) = run_rotation(&cfg, false, &sigs, 10);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!(deg.abs() < 0.01, "GYRO_OFF holds the turn where it is: {deg}");
+}
+
+#[test]
+fn rotation_silences_the_gyro_mouse_as_any_stick_output_does() {
+    let (bus, _) = run_rotation(ROT_CFG, false, &rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), 100.0), 10);
+    if let Some(Signal::Vec2(m)) = bus.get("mouse_move") {
+        assert_eq!(*m, glam::Vec2::ZERO, "the gyro turns the stick, not the mouse");
+    }
+}
+
+#[test]
+fn rotation_turns_a_stick_this_config_drives_in_strict_mode() {
+    // Strict: nothing passes unless the config says so, so the stick has to be
+    // routed to the virtual pad — and the turn lands on what is routed.
+    let cfg = format!("{ROT_CFG}\nRIGHT_STICK_MODE = RIGHT_STICK");
+    let (bus, _) = run_rotation(&cfg, true, &rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), 100.0), 10);
+    let (deg, v) = bearing_of(&bus, "right_stick");
+    // Nine ticks' worth, not ten: a virtual stick takes the PREVIOUS tick's
+    // direction (JSM's own lag, kept on purpose — see `pad.rs`), so on the first
+    // tick it is still centred and has nothing to turn.
+    assert!((deg - 9.0).abs() < 0.2, "{deg} {v:?}");
+    assert!(v.length() > 0.9, "{v:?}");
+}
+
+#[test]
+fn rotation_lines_say_they_are_flexinputs_own() {
+    let c = compile("GYRO_OUTPUT = RIGHT_STICK_ROTATION");
+    assert_eq!(c.lines[0].status, LineStatus::Ok);
+    assert!(c.lines[0].notes.iter().any(|n| n.contains("FlexInput's own")), "{:?}", c.lines[0].notes);
+    assert!(
+        c.lines[0].notes.iter().all(|n| !n.contains("     ")),
+        "no broken line continuations: {:?}",
+        c.lines[0].notes
+    );
+    // A flick says where the stick points — there is nothing to turn.
+    let c = compile("FLICK_STICK_OUTPUT = RIGHT_STICK_ROTATION");
+    assert!(matches!(c.lines[0].status, LineStatus::Error(_)), "{:?}", c.lines[0].status);
+    // The two settings, alone, say they do nothing yet.
+    for line in ["GYRO_STICK_ROTATION_DEADZONE = 0.3", "GYRO_STICK_ROTATION_SMOOTH_TIME = 0.1"] {
+        let c = compile(line);
+        assert_eq!(c.lines[0].status, LineStatus::Ok, "{line}");
+        assert!(
+            c.lines[0].notes.iter().any(|n| n.contains("only does anything")),
+            "{line}: {:?}",
+            c.lines[0].notes
+        );
+        let c = compile(&format!("GYRO_OUTPUT = LEFT_STICK_ROTATION\n{line}"));
+        assert!(c.lines[1].notes.iter().all(|n| !n.contains("only does anything")), "{line}");
+    }
+    assert!(matches!(compile("GYRO_STICK_ROTATION_DEADZONE = 2").lines[0].status, LineStatus::Error(_)));
+    assert!(matches!(compile("GYRO_STICK_ROTATION_SMOOTH_TIME = -1").lines[0].status, LineStatus::Error(_)));
+    for name in ["GYRO_STICK_ROTATION_DEADZONE", "GYRO_STICK_ROTATION_SMOOTH_TIME"] {
+        assert!(super::help::help_for(name).is_some(), "{name} has help");
+    }
+}
+
+#[test]
+fn tuning_a_rotation_lets_the_gyro_and_its_stick_out() {
+    use super::knobs::{feel_of, Feel, Hand};
+    let c = compile(ROT_CFG);
+    assert_eq!(feel_of(&c, "GYRO_SENS"), Feel::GyroAndStick(Hand::Right));
+    assert_eq!(feel_of(&c, "GYRO_STICK_ROTATION_DEADZONE"), Feel::GyroAndStick(Hand::Right));
+    let c = compile("GYRO_OUTPUT = LEFT_STICK_ROTATION");
+    assert_eq!(feel_of(&c, "GYRO_STICK_ROTATION_SMOOTH_TIME"), Feel::GyroAndStick(Hand::Left));
+    // Aiming the mouse, the gyro is still just the gyro.
+    assert_eq!(feel_of(&compile("GYRO_SENS = 1"), "GYRO_SENS"), Feel::Gyro);
+}
+
+#[test]
+fn rotation_relative_holds_the_turn_rate_times_the_return_time() {
+    // 40°/s for two seconds against a 0.1 s return: 4°, where absolute would be 80°.
+    let cfg = format!("{ROT_CFG}\nGYRO_STICK_ROTATION_MODE = RELATIVE\nGYRO_STICK_ROTATION_RETURN_TIME = 0.1");
+    let (bus, _) = run_rotation(&cfg, false, &rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), 40.0), 200);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 4.0).abs() < 0.05, "{deg}");
+    // Left at its default return time (0.25 s): 10°.
+    let cfg = format!("{ROT_CFG}\nGYRO_STICK_ROTATION_MODE = RELATIVE");
+    let (bus, _) = run_rotation(&cfg, false, &rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), 40.0), 200);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 10.0).abs() < 0.1, "{deg}");
+    // Back to absolute, the same turn adds up.
+    let cfg = format!("{ROT_CFG}\nGYRO_STICK_ROTATION_MODE = ABSOLUTE");
+    let (bus, _) = run_rotation(&cfg, false, &rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), 40.0), 200);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 80.0).abs() < 0.2, "{deg}");
+}
+
+#[test]
+fn rotation_with_no_deadzone_keeps_its_turn_with_the_stick_centred() {
+    let cfg = format!("{ROT_CFG}\nGYRO_STICK_ROTATION_DEADZONE = 0");
+    let (bus, out) = run_rotation(&cfg, false, &rot_pad("right_stick", glam::Vec2::ZERO, 100.0), 10);
+    assert_eq!(bus.get("right_stick"), Some(&Signal::Vec2(glam::Vec2::ZERO)), "centred stays centred");
+    let at = super::eval::rotation_out(1);
+    assert_eq!(out[at + 3], Some(Signal::Bool(true)), "but the turn is on");
+    let Some(Signal::Float(off)) = out[at + 2] else { panic!("an offset") };
+    assert!((off - 10.0).abs() < 0.2, "{off}");
+    assert!(compile("GYRO_STICK_ROTATION_DEADZONE = 0").lines[0].notes.iter().any(|n| n.contains("never dropped")));
+}
+
+#[test]
+fn rotation_mode_and_return_time_parse_and_say_when_they_do_nothing() {
+    for (line, ok) in [
+        ("GYRO_STICK_ROTATION_MODE = RELATIVE", true),
+        ("GYRO_STICK_ROTATION_MODE = absolute", true),
+        ("GYRO_STICK_ROTATION_MODE = SIDEWAYS", false),
+        ("GYRO_STICK_ROTATION_RETURN_TIME = 0.3", true),
+        ("GYRO_STICK_ROTATION_RETURN_TIME = -1", false),
+    ] {
+        let c = compile(line);
+        assert_eq!(c.lines[0].status == LineStatus::Ok, ok, "{line}: {:?}", c.lines[0].status);
+    }
+    let c = compile("GYRO_STICK_ROTATION_RETURN_TIME = 0.3");
+    assert!(c.lines[0].notes.iter().any(|n| n.contains("RELATIVE")), "{:?}", c.lines[0].notes);
+    let c = compile("GYRO_OUTPUT = RIGHT_STICK_ROTATION\nGYRO_STICK_ROTATION_MODE = RELATIVE\nGYRO_STICK_ROTATION_RETURN_TIME = 0.3");
+    assert!(c.lines[2].notes.iter().all(|n| !n.contains("only does anything")), "{:?}", c.lines[2].notes);
+    for name in ["GYRO_STICK_ROTATION_MODE", "GYRO_STICK_ROTATION_RETURN_TIME"] {
+        assert!(super::help::help_for(name).is_some(), "{name} has help");
+    }
+}
+
+// ── gyro actions and setting commands as binding outputs ─────────────────────
+
+/// Run the node through `frames`, each a set of pad pins held for that many
+/// 10 ms ticks, a fresh bus every tick; the last tick's bus and outputs.
+fn run_seq(
+    text: &str,
+    frames: &[(Vec<(String, Signal)>, usize)],
+) -> (PinSigs, Vec<Option<Signal>>) {
+    let _guard = alone();
+    let uid = 4244;
+    let snap = jsm_snap(uid, text, false);
+    let key = format!("collector:{uid}");
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut last = (PinSigs::default(), Vec::new());
+    for (sigs, ticks) in frames {
+        let dev: BusMap = sigs.iter().map(|(p, s)| ((PAD.to_string(), p.clone()), *s)).collect();
+        for _ in 0..*ticks {
+            let mut collector: BusMap = BusMap::default();
+            let out = super::eval::jsm_publish(&snap, uid, &dev, &mut collector, &mut state, 0.010);
+            let bus = collector.into_iter().filter(|((d, _), _)| *d == key).map(|((_, p), s)| (p, s)).collect();
+            last = (bus, out);
+        }
+    }
+    last
+}
+
+/// The right stick pushed up while the pad turns at `yaw`, with `buttons` held.
+fn turning(yaw: f32, buttons: &[&str]) -> Vec<(String, Signal)> {
+    let mut sigs = rot_pad("right_stick", glam::Vec2::new(0.0, 1.0), yaw);
+    sigs.extend(buttons.iter().map(|b| (b.to_string(), Signal::Bool(true))));
+    sigs
+}
+
+#[test]
+fn a_gyro_off_binding_holds_the_gyro_off_while_its_button_is_held() {
+    // Before the fix this switched the gyro off for the press's first tick only,
+    // and the turn came through as 9° of the 10.
+    let cfg = format!("{ROT_CFG}\nS = GYRO_OFF");
+    let (bus, _) = run_seq(&cfg, &[(turning(100.0, &["btn_south"]), 10)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!(deg.abs() < 0.01, "off for the whole hold: {deg}");
+    // Let go and it turns again.
+    let (bus, _) = run_seq(&cfg, &[(turning(100.0, &["btn_south"]), 10), (turning(100.0, &[]), 10)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 10.0).abs() < 0.2, "on again once released: {deg}");
+}
+
+#[test]
+fn a_toggled_gyro_off_stays_off_until_toggled_back() {
+    let cfg = format!("{ROT_CFG}\nS = ^GYRO_OFF");
+    let tap = (turning(0.0, &["btn_south"]), 2);
+    let (bus, _) = run_seq(&cfg, &[tap.clone(), (turning(100.0, &[]), 10)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!(deg.abs() < 0.01, "toggled off, released, still off: {deg}");
+    let (bus, _) = run_seq(&cfg, &[tap.clone(), (turning(0.0, &[]), 2), tap, (turning(100.0, &[]), 10)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 10.0).abs() < 0.2, "toggled back on: {deg}");
+}
+
+#[test]
+fn a_tapped_gyro_action_lasts_jsms_long_tap() {
+    // A gyro action on a tap is held half a second, not a key tap's 40 ms.
+    let cfg = format!("{ROT_CFG}\nS = GYRO_OFF'");
+    let tap = (turning(0.0, &["btn_south"]), 2);
+    let (bus, _) = run_seq(&cfg, &[tap.clone(), (turning(100.0, &[]), 30)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!(deg.abs() < 0.01, "still off 0.3 s after the tap: {deg}");
+    let (bus, _) = run_seq(&cfg, &[tap, (turning(100.0, &[]), 80)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!(deg > 25.0 && deg < 35.0, "back on after half a second: {deg}");
+}
+
+#[test]
+fn a_gyro_off_on_hold_takes_over_once_the_hold_time_passes() {
+    // `S = SPACE GYRO_OFF`: tap for space, hold for the gyro off. The hold fires
+    // at HOLD_PRESS_TIME (150 ms), so 15° get through and no more.
+    let cfg = format!("{ROT_CFG}\nS = SPACE GYRO_OFF");
+    let (bus, _) = run_seq(&cfg, &[(turning(100.0, &["btn_south"]), 50)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((14.0..=16.5).contains(&deg), "the hold switched it off and kept it off: {deg}");
+}
+
+#[test]
+fn a_bound_setting_changes_it_from_then_on() {
+    // A tap sets the sensitivity to a half; from then the same turn goes half as far.
+    let cfg = format!("{ROT_CFG}\nS = \"GYRO_SENS = 0.5\"");
+    let tap = (turning(0.0, &["btn_south"]), 2);
+    let (bus, _) = run_seq(&cfg, &[tap.clone(), (turning(0.0, &[]), 2), (turning(100.0, &[]), 10)]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 5.0).abs() < 0.2, "half the turn: {deg}");
+    // RESET_MAPPINGS puts the config back.
+    let cfg = format!("{cfg}\nN = \"RESET_MAPPINGS\"");
+    let (bus, _) = run_seq(&cfg, &[
+        tap,
+        (turning(0.0, &[]), 2),
+        (turning(0.0, &["btn_north"]), 2),
+        (turning(0.0, &[]), 2),
+        (turning(100.0, &[]), 10),
+    ]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 10.0).abs() < 0.2, "back to the config as written: {deg}");
+}
+
+#[test]
+fn a_bound_setting_yields_to_a_held_chord_as_the_console_does() {
+    // The command changes the base; a modeshift held on top still wins.
+    let cfg = format!("{ROT_CFG}\nS = \"GYRO_SENS = 0.5\"\nW,GYRO_SENS = 2");
+    let (bus, _) = run_seq(&cfg, &[
+        (turning(0.0, &["btn_south"]), 2),
+        (turning(0.0, &["btn_west"]), 2),
+        (turning(100.0, &["btn_west"]), 10),
+    ]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 20.0).abs() < 0.3, "the chord's 2, not the command's 0.5: {deg}");
+}
+
+/// The right stick at `deg` (0 up, clockwise) and `len`, the pad turning at `yaw`.
+fn stick_at(deg: f32, len: f32, yaw: f32) -> Vec<(String, Signal)> {
+    let a = deg.to_radians();
+    rot_pad("right_stick", glam::Vec2::new(a.sin(), a.cos()) * len, yaw)
+}
+
+#[test]
+fn rotation_takeover_holds_the_thumbs_direction_until_the_outer_zone() {
+    let cfg = format!("{ROT_CFG}\nGYRO_STICK_ROTATION_TAKEOVER = ON");
+    let at = super::eval::rotation_out(1);
+    // Aim at 30°, turn 10° with the pad, let the thumb drift to 50°: still 40°.
+    let (bus, out) = run_seq(&cfg, &[
+        (stick_at(30.0, 0.6, 0.0), 5),
+        (stick_at(30.0, 0.6, 100.0), 10),
+        (stick_at(50.0, 0.6, 0.0), 5),
+    ]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 40.0).abs() < 0.2, "{deg}");
+    assert_eq!(out[at + 4], Some(Signal::Bool(true)), "the gyro has taken over");
+    // Out to the rim: the thumb's 50° again, with the 10° on top.
+    let (bus, out) = run_seq(&cfg, &[
+        (stick_at(30.0, 0.6, 0.0), 5),
+        (stick_at(30.0, 0.6, 100.0), 10),
+        (stick_at(50.0, 0.95, 0.0), 5),
+    ]);
+    let (deg, _) = bearing_of(&bus, "right_stick");
+    assert!((deg - 60.0).abs() < 0.2, "{deg}");
+    assert_eq!(out[at + 4], Some(Signal::Bool(false)));
+    // A lower outer zone gives it back sooner; without TAKEOVER nothing holds.
+    let low = format!("{cfg}\nGYRO_STICK_ROTATION_OUTER = 0.5");
+    let (bus, _) = run_seq(&low, &[(stick_at(30.0, 0.6, 100.0), 10), (stick_at(50.0, 0.6, 0.0), 5)]);
+    assert!((bearing_of(&bus, "right_stick").0 - 60.0).abs() < 0.2);
+    let (bus, _) = run_seq(ROT_CFG, &[(stick_at(30.0, 0.6, 100.0), 10), (stick_at(50.0, 0.6, 0.0), 5)]);
+    assert!((bearing_of(&bus, "right_stick").0 - 60.0).abs() < 0.2);
+    // A takeover speed above the turn: the thumb keeps aiming.
+    let fast = format!("{cfg}\nGYRO_STICK_ROTATION_TAKEOVER_SPEED = 150");
+    let (bus, _) = run_seq(&fast, &[(stick_at(30.0, 0.6, 100.0), 10), (stick_at(50.0, 0.6, 0.0), 5)]);
+    assert!((bearing_of(&bus, "right_stick").0 - 60.0).abs() < 0.2);
+}
+
+#[test]
+fn rotation_takeover_settings_parse_and_say_when_they_do_nothing() {
+    for (line, ok) in [
+        ("GYRO_STICK_ROTATION_TAKEOVER = ON", true),
+        ("GYRO_STICK_ROTATION_TAKEOVER = off", true),
+        ("GYRO_STICK_ROTATION_TAKEOVER = MAYBE", false),
+        ("GYRO_STICK_ROTATION_TAKEOVER_SPEED = 15", true),
+        ("GYRO_STICK_ROTATION_TAKEOVER_SPEED = -1", false),
+        ("GYRO_STICK_ROTATION_OUTER = 0.8", true),
+        ("GYRO_STICK_ROTATION_OUTER = 1.5", false),
+    ] {
+        let c = compile(line);
+        assert_eq!(c.lines[0].status == LineStatus::Ok, ok, "{line}: {:?}", c.lines[0].status);
+    }
+    for line in ["GYRO_STICK_ROTATION_TAKEOVER_SPEED = 15", "GYRO_STICK_ROTATION_OUTER = 0.8"] {
+        let c = compile(line);
+        assert!(c.lines[0].notes.iter().any(|n| n.contains("TAKEOVER = ON")), "{line}: {:?}", c.lines[0].notes);
+        let c = compile(&format!("GYRO_STICK_ROTATION_TAKEOVER = ON\n{line}"));
+        assert!(c.lines[1].notes.iter().all(|n| !n.contains("TAKEOVER = ON")), "{line}");
+    }
+    for name in ["GYRO_STICK_ROTATION_TAKEOVER", "GYRO_STICK_ROTATION_TAKEOVER_SPEED", "GYRO_STICK_ROTATION_OUTER"] {
+        assert!(super::help::help_for(name).is_some(), "{name} has help");
+    }
+}
+
+#[test]
+fn bound_settings_are_checked_and_say_how_long_they_last() {
+    let c = compile("S = \"GYRO_SENS = 2\"");
+    assert_eq!(c.lines[0].status, LineStatus::Ok, "{:?}", c.lines[0].status);
+    assert!(c.lines[0].notes.iter().any(|n| n.contains("from then on")), "{:?}", c.lines[0].notes);
+    assert!(c.lines[0].notes.iter().all(|n| !n.contains("does nothing")), "{:?}", c.lines[0].notes);
+    // A bad value is an error on the binding, not a button that does nothing.
+    let c = compile("S = \"STICK_DEADZONE_INNER = 2\"");
+    assert!(matches!(&c.lines[0].status, LineStatus::Error(e) if e.contains("STICK_DEADZONE_INNER")), "{:?}", c.lines[0].status);
+    // A channel can't change under held notes, from a button any more than a chord.
+    let c = compile("S = \"MIDI_CHANNEL = 3\"");
+    assert!(matches!(c.lines[0].status, LineStatus::Error(_)), "{:?}", c.lines[0].status);
+    // A setting that isn't live here says so, rather than "not a command".
+    let c = compile("S = \"SCREEN_RESOLUTION_X = 1920\"");
+    assert!(c.lines[0].notes.iter().any(|n| n.contains("isn't live here")), "{:?}", c.lines[0].notes);
+}
+
+
+// A double press is timed JSM's way: after a tap, the window counts from its
+// RELEASE. A user's `N = r e` / `N,N = Y` never doubled at a normal pace: the
+// window counted from the first press's start, leaving a 90 ms tap only 60 ms
+// for the gap — so the second press became a press of its own, `r` then a
+// held `e`, and `N,N` looked like it did nothing.
+#[test]
+fn a_double_press_counts_its_window_from_the_taps_release() {
+    let cfg = "N = r e
+N,N = Y";
+    let mut r = Rig::new(cfg);
+    let mut seen = std::collections::HashSet::new();
+    for (down, n) in [(true, 9), (false, 9), (true, 5), (false, 30)] {
+        r.set(Btn::N, down);
+        for _ in 0..n {
+            seen.extend(r.tick());
+        }
+    }
+    assert!(seen.contains("key_y"), "a 90 ms tap, a 90 ms gap: a double press: {seen:?}");
+    assert!(!seen.contains("key_r") && !seen.contains("key_e"), "and nothing of N's own: {seen:?}");
+
+    // Past the window from the release, it is two presses: the tap, then N again.
+    let mut r = Rig::new(cfg);
+    let mut seen = std::collections::HashSet::new();
+    for (down, n) in [(true, 9), (false, 17), (true, 30), (false, 5)] {
+        r.set(Btn::N, down);
+        for _ in 0..n {
+            seen.extend(r.tick());
+        }
+    }
+    assert!(!seen.contains("key_y"), "170 ms after the release is too late: {seen:?}");
+    assert!(seen.contains("key_r") && seen.contains("key_e"), "the tap, then the hold: {seen:?}");
+
+    // A first press held past the hold time has no double: JSM counts that
+    // window from the press's start, long gone by its release.
+    let mut r = Rig::new(cfg);
+    let mut seen = std::collections::HashSet::new();
+    for (down, n) in [(true, 30), (false, 3), (true, 5), (false, 30)] {
+        r.set(Btn::N, down);
+        for _ in 0..n {
+            seen.extend(r.tick());
+        }
+    }
+    assert!(!seen.contains("key_y"), "a held press doesn't lead to a double: {seen:?}");
+}
+
+// After a double press the next press starts afresh: a third press straight
+// after is N's own, not a second double.
+#[test]
+fn a_third_press_after_a_double_starts_afresh() {
+    let mut r = Rig::new("N = R
+N,N = Y");
+    let mut ys = 0;
+    let mut was = false;
+    let mut saw_r_after = false;
+    for (i, (down, n)) in [(true, 5), (false, 5), (true, 5), (false, 5), (true, 5), (false, 30)].into_iter().enumerate() {
+        r.set(Btn::N, down);
+        for _ in 0..n {
+            let pins = r.tick();
+            let y = pins.contains("key_y");
+            if y && !was { ys += 1; }
+            was = y;
+            saw_r_after |= i >= 4 && pins.contains("key_r");
+        }
+    }
+    assert_eq!(ys, 1, "one double press");
+    assert!(saw_r_after, "the third press is N's own");
+}
+
+// ── bound flicks ─────────────────────────────────────────────────────────────
+
+// FLICK_R / FLICK_L and an angle, and its own time if it names one.
+#[test]
+fn a_bound_flick_reads_its_angle_and_its_time() {
+    use super::names::{out_from_name, Out};
+    let out = |n: &str| out_from_name(n).map(|o| o.out);
+    assert_eq!(out("FLICK_R90"), Some(Out::Flick { deg: 90.0, secs: None }));
+    assert_eq!(out("flick_l45"), Some(Out::Flick { deg: -45.0, secs: None }));
+    assert_eq!(out("FLICK_R180_120MS"), Some(Out::Flick { deg: 180.0, secs: Some(0.12) }));
+    for bad in ["FLICK_R0", "FLICK_R361", "FLICK_90", "FLICK_R", "FLICK_R90_120", "FLICK_RX", "FLICK_TIME"] {
+        assert_eq!(out(bad), None, "{bad}");
+    }
+}
+
+// A malformed one says what it should look like; event modifiers work as on a key.
+#[test]
+fn a_bound_flick_on_a_line_compiles_like_any_binding() {
+    let c = compile("S = FLICK_R90\nE = !FLICK_L45/\nN = FLICK_R0");
+    assert_eq!(c.lines[0].status, LineStatus::Ok);
+    assert_eq!(c.lines[1].status, LineStatus::Ok);
+    let LineStatus::Error(why) = &c.lines[2].status else { panic!("{:?}", c.lines[2].status) };
+    assert!(why.contains("FLICK_R90"), "{why}");
+}
+
+// The total is the angle, in RWC counts per degree, and eased over FLICK_TIME.
+#[test]
+fn a_bound_flick_turns_its_angle_eased_over_flick_time() {
+    let mut a = Aiming::new("REAL_WORLD_CALIBRATION = 2\nFLICK_TIME = 0.1");
+    a.a.start_flick(-90.0, None);
+    let (mut total, mut biggest, mut smallest) = (0.0f32, 0.0f32, f32::MAX);
+    for _ in 0..200 {
+        let x = a.tick().x;
+        total += x;
+        if x != 0.0 {
+            biggest = biggest.max(x.abs());
+            smallest = smallest.min(x.abs());
+        }
+    }
+    assert!((total + 180.0).abs() < 0.5, "90° left at 2 counts per degree: {total}");
+    assert!(smallest < biggest, "eased, not an even stream");
+}
+
+// Its own time beats FLICK_TIME.
+#[test]
+fn a_bound_flick_with_its_own_time_ignores_flick_time() {
+    let run = |secs: Option<f32>| {
+        let mut a = Aiming::new("REAL_WORLD_CALIBRATION = 1\nFLICK_TIME = 1");
+        a.a.start_flick(90.0, secs);
+        (0..500).filter(|_| a.tick().x != 0.0).count()
+    };
+    let own = run(Some(0.05));
+    assert!(own < run(None) / 5, "far quicker than FLICK_TIME: {own}");
+}
+
+// Bound for a stick it's a camera rate, at the stick's calibration for as long
+// as the angle takes, FLICK_TIME having no say.
+#[test]
+fn a_bound_flick_to_a_stick_is_a_rate_and_lands_exactly() {
+    let cfg = "FLICK_STICK_OUTPUT = RIGHT_STICK\nVIRTUAL_STICK_CALIBRATION = 360\nFLICK_TIME = 5";
+    let mut a = Aiming::new(cfg);
+    a.a.start_flick(90.0, None);
+    let rates: Vec<f32> = (0..300).map(|_| a.aimed().flick_dps.x).collect();
+    assert!((rates[0] - 360.0).abs() < 1e-3, "right, at full rate: {}", rates[0]);
+    let turned: f32 = rates.iter().map(|r| r * DT).sum();
+    assert!((turned - 90.0).abs() < 1e-2, "{turned}");
+
+    // Its own time can slow it, never speed it past what a stick can do.
+    let mut slow = Aiming::new(cfg);
+    slow.a.start_flick(-90.0, Some(1.0));
+    assert!((slow.aimed().flick_dps.x + 90.0).abs() < 1e-3);
+    let mut fast = Aiming::new(cfg);
+    fast.a.start_flick(90.0, Some(0.01));
+    assert!((fast.aimed().flick_dps.x - 360.0).abs() < 1e-3);
+}
+
+// JSM silences a whole mouse move when the gyro is pointed at a stick. That quirk
+// is reproduced for its own aiming; a binding of ours shouldn't vanish to it.
+#[test]
+fn a_bound_flick_still_reaches_the_mouse_with_the_gyro_on_a_stick() {
+    let mut a = Aiming::new("GYRO_OUTPUT = RIGHT_STICK\nREAL_WORLD_CALIBRATION = 1\nFLICK_TIME = 0.05");
+    a.a.start_flick(90.0, None);
+    let total: f32 = (0..100).map(|_| a.tick().x).sum();
+    assert!((total - 90.0).abs() < 0.5, "{total}");
+}
+
+// The whole node: a press starts one turn, however long it's held, and a config
+// doing nothing else still gets a `mouse_move` to carry it.
+#[test]
+fn a_bound_flick_turns_once_per_press_through_the_node() {
+    let _guard = alone();
+    let uid = 4242;
+    let snap = jsm_snap(uid, "S = FLICK_R90\nREAL_WORLD_CALIBRATION = 1\nFLICK_TIME = 0.02", false);
+    let key = format!("collector:{uid}");
+    let mut state: HashMap<usize, NodeState> = HashMap::new();
+    let mut run = |down: bool, ticks: usize| {
+        let mut sum = 0.0f32;
+        for _ in 0..ticks {
+            let mut dev: BusMap = BusMap::default();
+            dev.insert((PAD.to_string(), "btn_south".to_string()), Signal::Bool(down));
+            let mut c = BusMap::default();
+            super::eval::jsm_publish(&snap, uid, &dev, &mut c, &mut state, 0.010);
+            if let Some(Signal::Vec2(v)) = c.get(&(key.clone(), "mouse_move".to_string())) {
+                sum += v.x;
+            }
+        }
+        sum
+    };
+    assert_eq!(run(false, 3), 0.0);
+    let held = run(true, 100);
+    assert!((held - 90.0).abs() < 0.5, "held a long time, one turn: {held}");
+    assert_eq!(run(false, 10), 0.0, "letting go does nothing");
+    assert!((run(true, 100) - 90.0).abs() < 0.5, "pressed again, it turns again");
+}

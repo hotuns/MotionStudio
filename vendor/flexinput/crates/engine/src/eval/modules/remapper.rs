@@ -1,0 +1,1249 @@
+//! The Remapper evaluator, and the pass-through + suppression pass that
+//! runs alongside it.
+//!
+//! Both the top-level loop and `eval_subgraph` call these, so the two can
+//! never diverge.
+
+use super::*;
+
+/// Evaluate a Remapper node — shared by the top-level loop and the sub-patch
+/// (`eval_subgraph`) loop so the two can never diverge. `uid` is the publishing
+/// id: `snap.node_uid` at top level, the namespaced uid inside a sub-patch. It
+/// keys `collector_sigs["remap:{uid}"]`, the per-node `state`, and `last_outputs`.
+pub(crate) fn eval_remapper_node(
+    snap: &NodeSnap,
+    uid: usize,
+    dev_sigs: &BusMap,
+    collector_sigs: &mut BusMap,
+    state: &mut HashMap<usize, NodeState>,
+    dt: f32,
+) {
+            let dev_id = snap.params.get("_automap_device_id").and_then(|v| v.as_str()).unwrap_or("");
+            let collector_id = snap.params.get("_automap_collector_id").and_then(|v| v.as_str()).unwrap_or("");
+            let mappings = snap.params.get("mappings").and_then(|v| v.as_array()).map(|a| a.as_slice()).unwrap_or(&[]);
+            let key = format!("remap:{}", uid);
+
+            // Snapshot upstream values for every canonical pin once, so we can
+            // freely mutate collector_sigs below without aliasing the read side.
+            let mut upstream: PinSigs = PinSigs::default();
+            upstream.fill_canonical(collector_sigs.view(collector_id), dev_sigs.view(dev_id));
+            // MIDI pins are dynamic (never in ALL_PINS), so take whatever the
+            // bus carries. Cheap: only a MIDI device or a bus downstream of one
+            // has any.
+            fill_upstream_midi(collector_id, dev_id, &*collector_sigs, dev_sigs, &mut upstream);
+            // Pins an upstream module added to the bus that aren't canonical
+            // either — an Area Mapper's keys, another Remapper's — likewise.
+            let mut extra_pins = fill_upstream_extra(collector_id, &*collector_sigs, &mut upstream);
+            // A raw pad's own ports, when the Remapper sits straight on the pad.
+            fill_upstream_raw_extra(dev_id, dev_sigs, &mut upstream, &mut extra_pins);
+            // A processed Vec2 on the collector is authoritative over raw axes.
+            vec2_authoritative_axis_fill(&mut upstream, collector_id, &*collector_sigs);
+            // Derive synthetic cardinal-direction Bool pins from each stick's
+            // (x, y) so they can participate in mapping triggers just like
+            // buttons. See `derive_stick_cardinals` for the dominant-axis rule.
+            derive_stick_cardinals(&mut upstream);
+            // Gyro / accel / tilt directions for the cards that read one. Like
+            // the cardinals they stay in this node: see `derive_imu_pins`.
+            if mappings_read_imu(&mappings) {
+                let ns = state.entry(uid).or_insert_with(NodeState::default);
+                derive_imu_pins(&mut upstream, ns.imu.get_or_insert_with(Default::default), dt);
+            }
+
+            // Derive touchpad zone pins. Two parallel variants:
+            //   touch_*       — fire whenever a finger is in that zone, click
+            //                   or not. Up to 2 zones at once (one per finger).
+            //                   No accumulation; transient, instantaneous.
+            //   touchpad_*    — fire only while btn_touchpad is held. While
+            //                   held, every zone any finger has visited stays
+            //                   asserted (swipe accumulation) so a drag
+            //                   across all three zones produces a 3-pin chord.
+            //                   Release of btn_touchpad clears the accumulator.
+            // Per-zone override: if touchpad_N (click variant) fires, touch_N
+            // (touch-only) is forced false so a click-mapped zone takes over
+            // from a touch-mapped one rather than firing both.
+            let touch_click = upstream.get("btn_touchpad")
+                .map(|s| s.as_bool()).unwrap_or(false);
+            let zone_of_x = |x: f32| -> usize {
+                if x < -1.0/3.0 { 0 } else if x > 1.0/3.0 { 2 } else { 1 }
+            };
+            // Touch-only zones — each active finger asserts exactly one zone
+            // (the one its X currently sits in). Moving a finger from zone A
+            // to zone B drops A and asserts B for that finger. With two
+            // fingers active, two zones can fire simultaneously. No swipe
+            // accumulation here — that's reserved for the click variant.
+            let mut touch_only = [false; 3];
+            for (xpin, apin) in [("touch1_x","touch1_active"),
+                                 ("touch2_x","touch2_active")] {
+                let active = upstream.get(apin).map(|s| s.as_bool()).unwrap_or(false);
+                if !active { continue; }
+                let x = upstream.get(xpin).map(|s| sig_scalar(*s)).unwrap_or(0.0);
+                touch_only[zone_of_x(x)] = true;
+            }
+            // Click-variant zones — accumulated in per-node aux_f32.
+            let ns = state.entry(uid).or_insert_with(NodeState::default);
+            if ns.aux_f32.len() < 3 { ns.aux_f32.resize(3, 0.0); }
+            if !touch_click {
+                ns.aux_f32[0] = 0.0;
+                ns.aux_f32[1] = 0.0;
+                ns.aux_f32[2] = 0.0;
+            } else {
+                for (xpin, apin) in [("touch1_x","touch1_active"),
+                                     ("touch2_x","touch2_active")] {
+                    let active = upstream.get(apin).map(|s| s.as_bool()).unwrap_or(false);
+                    if !active { continue; }
+                    let x = upstream.get(xpin).map(|s| sig_scalar(*s)).unwrap_or(0.0);
+                    ns.aux_f32[zone_of_x(x)] = 1.0;
+                }
+            }
+            let click_zone = [
+                ns.aux_f32[0] > 0.5,
+                ns.aux_f32[1] > 0.5,
+                ns.aux_f32[2] > 0.5,
+            ];
+            let any_zone = click_zone[0] || click_zone[1] || click_zone[2];
+            // Click suppresses all touch-only zones — once btn_touchpad
+            // fires, the click variants own the touchpad.
+            if touch_click {
+                touch_only[0] = false;
+                touch_only[1] = false;
+                touch_only[2] = false;
+            }
+            upstream.insert("touchpad_left",   Signal::Bool(click_zone[0]));
+            upstream.insert("touchpad_center", Signal::Bool(click_zone[1]));
+            upstream.insert("touchpad_right",  Signal::Bool(click_zone[2]));
+            // touchpad_any — "click anywhere on the pad". Available from the
+            // Choose picker only (not auto-captured) so users opt in.
+            // Fires together with the specific-zone pin additively.
+            upstream.insert("touchpad_any",    Signal::Bool(touch_click && any_zone));
+            upstream.insert("touch_left",      Signal::Bool(touch_only[0]));
+            upstream.insert("touch_center",    Signal::Bool(touch_only[1]));
+            upstream.insert("touch_right",     Signal::Bool(touch_only[2]));
+
+            // Cards that decide after the press ("in order", Sequence, Short /
+            // Long / Double) run first, against the RAW inputs. Their hold-back
+            // then decides what the rest of the node sees, so every read below
+            // goes through that view instead.
+            let ns = state.entry(uid).or_insert_with(NodeState::default);
+            let HoldBackPass { verdicts, view: upstream, hidden: held_back } =
+                remapper_hold_back_pass(&mappings, upstream, ns, dt);
+
+            let read_upstream = |pin_id: &str| -> Option<Signal> { upstream.get(pin_id).copied() };
+
+            // Per-mapping press mode is stored under `mode` + `window_ms` +
+            // `sustain` on each mapping. The state machine must run for every
+            // mapping every tick (not just claimed ones) so Short / Long /
+            // Double detect edges without dropouts. Compute `effective_held`
+            // for each in original index order, then run the sort + claim pass
+            // using those values instead of re-reading raw input state.
+            //
+            // Analog mode is gated differently from digital modes:
+            //   - Non-cardinal `in` pins must all be held (combo gate).
+            //   - If any cardinal `in` pin exists, its axis magnitude must
+            //     exceed GESTURE_ACTIVATE_MAG so we know the stick is being
+            //     pushed in (one of) the mapped direction(s).
+            //   - Pure cardinal `in`: just magnitude check, no gesture trace.
+            //   - Press-mode pipeline is bypassed; analog mode owns its own
+            //     "active" definition. Turbo on analog button-outputs is
+            //     applied during the publish pass below.
+            let ns = state.entry(uid).or_insert_with(NodeState::default);
+            let effective: Vec<bool> = mappings.iter().enumerate().map(|(i, m)| {
+                let in_pins: Vec<&str> = m.get("in").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                // Deciding cards were gated by `remapper_hold_back_pass`.
+                if let Some(v) = verdicts[i] { return v.effective; }
+                if in_pins.is_empty() { return false; }
+                let press = PressParams::from_card(m);
+                if press.is_analog() {
+                    // Buttons (non-cardinal) all held? Cardinals: any
+                    // non-zero magnitude is enough — analog mode passes the
+                    // live magnitude through, no activation threshold. A note
+                    // is the exception: its threshold picks the strikes that
+                    // count (by velocity), in this mode as in every other.
+                    let shape = MappingShape::from_card(m);
+                    return analog_chord_active(&in_pins, |p| {
+                        analog_pin_active(&shape, &upstream, p, &read_upstream)
+                    });
+                }
+                let raw_held = chord_raw_held(m, i, &in_pins, &upstream, ns);
+                press.gate(raw_held, press_state_get(ns, i), dt)
+            }).collect();
+
+            // Physical-hold state per mapping, INDEPENDENT of press mode — true
+            // whenever the mapping's input chord is currently held/deflected.
+            // Used for input SUPPRESSION: a consumed input must stay suppressed
+            // for as long as it is held, even when the press-mode gate (on-press
+            // pulse, double-tap window, etc.) is momentarily closed. Otherwise
+            // the raw input would leak through while the user keeps holding it.
+            let held_now: Vec<bool> = mappings.iter().enumerate().map(|(i, m)| {
+                let in_pins: Vec<&str> = m.get("in").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                if in_pins.is_empty() { return false; }
+                // A deciding card owns its inputs only once it has fired: B then
+                // A must not consume an A-then-B card's inputs, nor a long press
+                // a Short card's. (Its hold-back hides them while it decides.)
+                if let Some(v) = verdicts[i] { return v.held_now; }
+                // Touch-output combos can mix opposite cardinals of one axis
+                // (left+right), which can never be "simultaneously held"; use the
+                // touch-combo activation rule so their gate buttons + sticks get
+                // consumed whenever the combo is active (gate buttons held, analog
+                // deflection optional). Otherwise the generic all-held check below
+                // would never fire and the buttons would leak through.
+                if mapping_targets_touch(m) {
+                    return eval_touch_combo(&in_pins, &upstream).active;
+                }
+                // With a manual threshold, suppression tracks the same
+                // shaped-magnitude gate as activation so a below-threshold
+                // deflection doesn't consume the input it isn't firing on.
+                let shape = MappingShape::from_card(m);
+                let pin_held = |p: &str| {
+                    if let Some(passed) = shape.analog_gate(&upstream, p) {
+                        return passed;
+                    }
+                    if analog_axis_for_cardinal(p).is_some() {
+                        analog_cardinal_input_value(&upstream, p) > 0.0
+                    } else {
+                        read_upstream(p).map(|s| s.as_bool()).unwrap_or(false)
+                    }
+                };
+                // Analog cards consume their inputs by the same chord rule that
+                // activates them (ANY cardinal deflected), not all-held: a card
+                // over opposite cardinals (a full-stick swap) can never have
+                // them all deflected at once, so it would never suppress its
+                // source stick, which then leaks through raw alongside the
+                // mapped output whenever no other card overwrites that axis.
+                if PressParams::from_card(m).is_analog() {
+                    return analog_chord_active(&in_pins, |p| {
+                        if let Some(passed) = shape.analog_gate(&upstream, p) {
+                            return passed;
+                        }
+                        analog_pin_active(&shape, &upstream, p, &read_upstream)
+                    });
+                }
+                in_pins.iter().all(|p| pin_held(p))
+            }).collect();
+
+            // Determine which mappings are currently triggered. Sort indices
+            // by descending input-set size so longer combos win conflicts, and
+            // order-aware cards ahead of order-agnostic ones of the same size;
+            // original indices are preserved so we can look up `effective`
+            // and mapping fields afterwards.
+            let ordered = |i: usize| verdicts[i].is_some_and(|v| v.ordered);
+            let mut sorted_idx: Vec<usize> = (0..mappings.len()).collect();
+            sorted_idx.sort_by(|&a, &b| {
+                let la = mappings[a].get("in").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                let lb = mappings[b].get("in").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                lb.cmp(&la).then(ordered(b).cmp(&ordered(a)))
+            });
+
+            // Trigger pass 1: identify triggered mappings and the pins they consume.
+            //
+            // Suppression rule for overlapping mappings:
+            //   - A mapping is suppressed iff a STRICTLY LONGER triggered
+            //     mapping has already claimed all of its inputs (longer
+            //     chord wins over shorter sub-chord).
+            //   - Mappings with the SAME input set are allowed to coexist
+            //     so users can fan one button out to multiple outputs:
+            //     `Y → X` and `Y → Y` both fire when Y is pressed.
+            //   - EXCEPT that a triggered order-aware card (in order / Sequence)
+            //     suppresses an order-agnostic card over the same inputs: the
+            //     plain chord is the fallback for when no order matched.
+            //
+            // Analog mappings with IDENTICAL input chords have an extra
+            // last-wins override applied during the publish pass below
+            // (user-error guard for conflicting analog writes).
+            let mut triggered: Vec<(Vec<String>, Vec<String>, bool, usize)> = Vec::new(); // (in, out, is_analog, orig_idx)
+            let mut triggered_claims: Vec<(usize, bool, Vec<String>)> = Vec::new(); // (len, ordered, sorted in)
+            for &i in &sorted_idx {
+                let m = &mappings[i];
+                let in_pins: Vec<String> = m.get("in").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let mut out_pins: Vec<String> = m.get("out").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                if in_pins.is_empty() { continue; }
+                if !effective[i] { continue; }
+                // An "in order" chord kept on by Hold after its modifiers were let
+                // go: an output that is one of those modifiers follows it and drops
+                // (LB > X → LB + Y: lift LB and X keeps holding just Y).
+                let lifted = verdicts[i].map_or(0, |v| v.lifted_modifiers);
+                if lifted != 0 {
+                    out_pins.retain(|o| !in_pins.iter().enumerate()
+                        .any(|(k, p)| k < 32 && lifted & (1 << k) != 0 && p == o));
+                }
+                let my_len = in_pins.len();
+                let my_ordered = ordered(i);
+                let suppressed = triggered_claims.iter().any(|(claim_len, claim_ordered, claim_pins)| {
+                    let outranks = *claim_len > my_len
+                        || (*claim_len == my_len && *claim_ordered && !my_ordered);
+                    outranks && in_pins.iter().all(|p| claim_pins.contains(p))
+                });
+                if suppressed { continue; }
+                let is_analog = m.get("mode").and_then(|v| v.as_str()) == Some("analog");
+                let mut sorted_in = in_pins.clone();
+                sorted_in.sort();
+                triggered_claims.push((my_len, my_ordered, sorted_in));
+                triggered.push((in_pins, out_pins, is_analog, i));
+            }
+
+            // Claimed inputs split by mode so pass-through suppression for
+            // analog cardinal claims can use axis-side clamping rather than
+            // hard-zeroing the entire axis.
+            //
+            // Suppression follows PHYSICAL HOLD (`held_now`), not the press-mode
+            // gate (`effective`/`triggered`): once a mapping consumes an input,
+            // that input is suppressed for as long as it's held, regardless of
+            // press mode. EXCEPTION — an input a mapping routes back to ITSELF
+            // (e.g. `dpad_left → dpad_left`, a deliberate pass-through) is NOT
+            // suppressed, so the user can keep an input while also reacting to it.
+            let mut self_mapped: HashSet<String> = HashSet::new();
+            for m in mappings {
+                let ins: Vec<&str> = m.get("in").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+                let outs: Vec<&str> = m.get("out").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+                for p in &ins {
+                    if outs.contains(p) { self_mapped.insert((*p).to_string()); }
+                }
+            }
+            let mut claimed_inputs_digital: HashSet<String> = HashSet::new();
+            let mut claimed_inputs_analog: HashSet<String>  = HashSet::new();
+            for (i, m) in mappings.iter().enumerate() {
+                if !held_now[i] { continue; }
+                let is_analog = m.get("mode").and_then(|v| v.as_str()) == Some("analog");
+                let in_pins: Vec<String> = m.get("in").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+                    .unwrap_or_default();
+                let target = if is_analog { &mut claimed_inputs_analog } else { &mut claimed_inputs_digital };
+                // An "in order" chord with Hold leaves its modifiers held in the
+                // game and owns only the last input.
+                let in_pins: Vec<String> = if verdicts[i].is_some_and(|v| v.owns_trigger_only) {
+                    in_pins.into_iter().last().into_iter().collect()
+                } else {
+                    in_pins
+                };
+                for p in in_pins {
+                    if self_mapped.contains(&p) { continue; }
+                    // An IMU input is read, never consumed. It is derived in
+                    // this node, so there is no bus pin to take — the gyro it
+                    // comes from reaches a gyro-to-mouse further down this
+                    // wire either way — and a claim would only put consumed
+                    // markers on the bus for pins no device has.
+                    if flexinput_core::imu::is_imu_pin(&p) { continue; }
+                    // A whole stick takes all four of its directions, so its
+                    // axes are suppressed along with its Vec2.
+                    if let Some(dirs) = whole_stick_dirs(&p) {
+                        target.extend(dirs.iter().map(|d| d.to_string()));
+                    }
+                    target.insert(p);
+                }
+            }
+            // Pass-through + per-side suppression (sticks + D-pad) + consumed
+            // markers — shared with the sub-patch arm so they never diverge.
+            remapper_pass_through_and_suppress(
+                &key, &upstream,
+                &claimed_inputs_digital, &claimed_inputs_analog,
+                collector_sigs,
+            );
+            forward_extra_pins(
+                &key, &extra_pins, &upstream,
+                &claimed_inputs_digital, &claimed_inputs_analog,
+                collector_sigs,
+            );
+            // Held-back inputs are already hidden (or capped) in the view the
+            // pass-through read; mark them consumed too, so a downstream Combiner
+            // doesn't take them from a raw-device port. Not claimed above: that
+            // would zero a stick direction a timed card only caps.
+            publish_consumed_markers(&key, &held_back, &HashSet::new(), collector_sigs);
+
+            // ── Analog publish pass ──────────────────────────────────────
+            //
+            // Apply identical input+output-chord override (last wins). Build the
+            // set of analog mappings to actually emit, suppressing any earlier
+            // analog mapping that is a TRUE duplicate (same inputs AND same
+            // outputs) of a later one. Mappings sharing an input but targeting
+            // different outputs (e.g. left_stick_up→right_trigger alongside
+            // left_stick_up→left_stick_up to keep the stick) both fire.
+            let mut analog_emit_idx: Vec<usize> = Vec::new();
+            {
+                // Walk triggered in original mapping order so "later in the
+                // user's list wins". `triggered` was built in sorted_idx
+                // (longest-first) order; recover original order via the
+                // orig_idx we stored.
+                let mut analog_indices: Vec<usize> = (0..triggered.len())
+                    .filter(|&t| triggered[t].2)
+                    .collect();
+                analog_indices.sort_by_key(|&t| triggered[t].3);
+                let sorted_set = |v: &Vec<String>| -> Vec<String> {
+                    let mut s = v.clone(); s.sort(); s
+                };
+                let mut keep: Vec<bool> = vec![true; analog_indices.len()];
+                for a in 0..analog_indices.len() {
+                    if !keep[a] { continue; }
+                    let (ref ain, ref aout, _, _) = triggered[analog_indices[a]];
+                    let (a_in, a_out) = (sorted_set(ain), sorted_set(aout));
+                    for b in (a + 1)..analog_indices.len() {
+                        let (ref bin, ref bout, _, _) = triggered[analog_indices[b]];
+                        if a_in == sorted_set(bin) && a_out == sorted_set(bout) {
+                            // Later (higher index) wins → suppress earlier dup.
+                            keep[a] = false;
+                            break;
+                        }
+                    }
+                }
+                for (a, t_idx) in analog_indices.iter().enumerate() {
+                    if keep[a] { analog_emit_idx.push(*t_idx); }
+                }
+            }
+
+            // Accumulate cardinal-axis writes additively; track button-output
+            // emissions per output-pin for turbo / sustain handling.
+            let mut analog_axis_acc: HashMap<&'static str, f32> = HashMap::new();
+            // MIDI value pins an analog card drives, summed like the axes above
+            // so two cards can push one controller.
+            let mut midi_analog_acc: HashMap<String, f32> = HashMap::new();
+            // MIDI notes an analog card plays: (sounding, value) — the value is
+            // the velocity it strikes with and the aftertouch that follows.
+            let mut midi_note_acc: HashMap<String, (bool, f32, f32)> = HashMap::new();
+            let mut analog_button_out: HashSet<String> = HashSet::new();
+            let mut analog_out_pins: HashSet<String> = HashSet::new();
+            for &t_idx in &analog_emit_idx {
+                let (ref in_pins, ref out_pins, _, orig_i) = triggered[t_idx];
+                let m = &mappings[orig_i];
+                let press = PressParams::from_card(m);
+                let slots = press_state_get(ns, orig_i);
+                // Per-card response curve + manual threshold: the curve
+                // reshapes every magnitude this mapping emits (axis, trigger,
+                // macro, pulse rate); the threshold turns digital outs into a
+                // plain hold gate on the shaped value (see the button arm).
+                let shape = MappingShape::from_card(m);
+                // Zip in↔out by index; drop the excess from whichever side
+                // is longer.
+                let n = in_pins.len().min(out_pins.len());
+                for (in_p, out_p) in in_pins[..n].iter().zip(out_pins[..n].iter()) {
+                    // Touchpad zone/swipe outputs are handled by the touchpad
+                    // synthesis pass below, not as axis/trigger/button writes.
+                    if touchpad_out_kind(out_p).is_some() { continue; }
+                    // Macro-port target: publish the live input magnitude into
+                    // the macro namespace and skip the bus handling below
+                    // (macro pins never reach sinks or the release pass).
+                    if is_macro_style_target(out_p) {
+                        // Gate buttons read 1.0: effective[] already checked
+                        // they are all held.
+                        let mag = shape.in_value(&upstream, in_p).unwrap_or(1.0).abs();
+                        let mag = shape.shaped(mag);
+                        if mag > 0.0 {
+                            merge_macro_scalar(collector_sigs, out_p, Signal::Float(mag.min(1.0)));
+                        }
+                        continue;
+                    }
+                    analog_out_pins.insert(out_p.clone());
+                    // A whole stick onto a whole stick: the position itself,
+                    // its length through the card's curve. Anything else has no
+                    // direction to give a whole stick, so leaves it alone.
+                    if let Some((xa, ya)) = whole_stick_axes(out_p) {
+                        if let Some(v) = whole_stick_value(&upstream, in_p) {
+                            let mag = v.length().min(1.0);
+                            let s = if mag > 1e-4 { shape.shaped(mag) / mag } else { 0.0 };
+                            *analog_axis_acc.entry(xa).or_insert(0.0) += v.x * s;
+                            *analog_axis_acc.entry(ya).or_insert(0.0) += v.y * s;
+                        }
+                        continue;
+                    }
+                    let out_axis_opt    = analog_axis_for_cardinal(out_p);
+                    let out_trigger     = analog_trigger_out(out_p);
+                    // An analog input (stick direction, trigger, MIDI knob or
+                    // bend) passes its live magnitude; a button in this slot
+                    // drives full magnitude while the gate is open (effective[]
+                    // guaranteed every button is held). A bend is signed: its
+                    // lower half pushes the target the other way, so one card
+                    // maps the whole wheel onto a stick axis.
+                    let raw = shape.in_value(&upstream, in_p).unwrap_or(1.0);
+                    let mag_from_input = raw.signum() * shape.shaped(raw.abs());
+                    if let Some((axis_pin, sign)) = out_axis_opt {
+                        let contrib = sign * mag_from_input;
+                        // Sum across all (mapping × in/out pair) contributions.
+                        let entry = analog_axis_acc.entry(axis_pin).or_insert(0.0);
+                        *entry += contrib;
+                    } else if let Some(trigger_pin) = out_trigger {
+                        // One-sided 0..1 trigger axis — drive it with the input's
+                        // live magnitude (converts analog stick direction into
+                        // analog trigger travel, incl. on pads lacking analog
+                        // triggers like Switch Pro).
+                        let entry = analog_axis_acc.entry(trigger_pin).or_insert(0.0);
+                        *entry += mag_from_input.max(0.0);
+                    } else if flexinput_core::midi::parse_pin(out_p)
+                        .is_some_and(|p| p.note_companions().is_some())
+                    {
+                        // A note from a moving source: on once the value reaches
+                        // the card's threshold (any movement without one), its
+                        // value the strike's velocity and then its aftertouch.
+                        //
+                        // Played by a NOTE, it follows that note instead: on
+                        // while its key is down (the card already applied the
+                        // velocity threshold), struck with its velocity, and its
+                        // aftertouch the source's shaped live value.
+                        let v = mag_from_input.abs().min(1.0);
+                        let (on, vel) = match note_velocity(&upstream, in_p) {
+                            Some(src_vel) => (src_vel > 0.0, src_vel),
+                            None => (
+                                match shape.threshold {
+                                    Some(t) => v >= t && v > 0.0,
+                                    None => v > 0.0,
+                                },
+                                v,
+                            ),
+                        };
+                        let e = midi_note_acc.entry(out_p.clone()).or_insert((false, 0.0, 0.0));
+                        if on {
+                            e.0 = true;
+                            e.1 = e.1.max(vel);
+                            e.2 = e.2.max(v);
+                        }
+                    } else if let Some((_, bipolar)) = midi_analog_out(out_p) {
+                        // A MIDI value pin takes the input's live magnitude,
+                        // and an analog TRIGGER contributes its travel rather
+                        // than the full-magnitude stand-in a pad target gets:
+                        // a controller that jumps to 127 the moment the trigger
+                        // leaves zero would make "trigger → CC" pointless.
+                        let live = shape.in_value(&upstream, in_p)
+                            .map(|raw| shape.shaped(raw))
+                            .unwrap_or(mag_from_input);
+                        // A bend is two-sided, so a cardinal input keeps its
+                        // sign and the two directions of one stick axis bend
+                        // either way; everything else is one-sided, 0 at rest.
+                        let v = match (bipolar, analog_axis_for_cardinal(in_p)) {
+                            (true, Some((_, sign))) => sign * live,
+                            (true, None) => live,
+                            (false, _) => live.max(0.0),
+                        };
+                        *midi_analog_acc.entry(out_p.clone()).or_insert(0.0) += v;
+                    } else {
+                        // Non-cardinal out: button / key.
+                        // With a manual threshold, the output is a PLAIN HOLD:
+                        // pressed while the shaped magnitude sits on/above the
+                        // line, released the moment it dips below (Turbo still
+                        // taps while held). Without one, the legacy behaviour:
+                        // a freq-modulated tap train (or PWM under Hold) so the
+                        // digital destination reflects HOW FAR the stick is
+                        // pushed — matching the 3DOF-Lean analog→digital path.
+                        // A two-sided IMU axis presses its button either way.
+                        let mag = if flexinput_core::imu::is_imu_pin(in_p) {
+                            mag_from_input.abs()
+                        } else {
+                            mag_from_input
+                        };
+                        let active = if let Some(t) = shape.threshold {
+                            press.turbo_only(mag >= t, slots, dt)
+                        } else {
+                            press.analog_pulse(mag, slots, dt)
+                        };
+                        if active {
+                            analog_button_out.insert(out_p.clone());
+                        }
+                    }
+                }
+            }
+            // Commit the MIDI value accumulator. A one-sided pin rests at 0
+            // and a bend at centre, which is 0 on the bus either way, so an
+            // analog card that is doing nothing writes its pin at rest rather
+            // than leaving the last value standing.
+            for (pin, v) in &midi_analog_acc {
+                let bipolar = midi_analog_out(pin).map(|(_, b)| b).unwrap_or(false);
+                let clamped = if bipolar { v.clamp(-1.0, 1.0) } else { v.clamp(0.0, 1.0) };
+                collector_sigs.set_pin(&key, &pin, Signal::Float(clamped));
+                mark_produced(&key, pin, collector_sigs);
+            }
+            // An analog card that isn't firing writes its MIDI pin at rest, the
+            // way the digital pass writes an off level — so the value on the
+            // bus says "nothing is driving this" rather than going absent and
+            // leaving a downstream reader to infer it. A card the pass above
+            // already wrote keeps that value, and the digital pass, which runs
+            // later, still wins over both.
+            for m in mappings {
+                if m.get("mode").and_then(|v| v.as_str()) != Some("analog") { continue; }
+                let outs = m.get("out").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                for v in &outs {
+                    let Some(p) = v.as_str() else { continue };
+                    let is_note = flexinput_core::midi::parse_pin(p)
+                        .is_some_and(|mp| mp.note_companions().is_some());
+                    if is_note {
+                        midi_note_acc.entry(p.to_string()).or_insert((false, 0.0, 0.0));
+                        continue;
+                    }
+                    if midi_analog_acc.contains_key(p) || midi_analog_out(p).is_none() { continue; }
+                    collector_sigs.set_pin(&key, &p, Signal::Float(0.0));
+                    mark_produced(&key, p, collector_sigs);
+                }
+            }
+            // The notes analog cards play: the gate, the velocity riding it, and
+            // the aftertouch following the source for as long as it sounds.
+            for (pin, (on, vel_v, v)) in &midi_note_acc {
+                let Some(mp) = flexinput_core::midi::parse_pin(pin) else { continue };
+                let Some([pat, _, vel]) = mp.note_companions() else { continue };
+                let mut put = |id: String, sig: Signal| {
+                    collector_sigs.set_pin(&key, &id, sig);
+                    mark_produced(&key, &id, collector_sigs);
+                };
+                put(pin.clone(), Signal::Bool(*on));
+                // Never 0 while sounding: a note-on at velocity 0 is a note-off.
+                put(vel.to_id(), Signal::Float(if *on { vel_v.max(1.0 / 127.0) } else { 0.0 }));
+                put(pat.to_id(), Signal::Float(if *on { *v } else { 0.0 }));
+            }
+            // Each digital card's outputs on this tick: a triggered card's
+            // (after any lifted modifiers), or — for a card with timed outputs
+            // — what its timeline has on, triggered or not: a sequence plays
+            // out after the input lets go.
+            let mut digital_on: Vec<(usize, Vec<String>)> = Vec::new();
+            for (i, m) in mappings.iter().enumerate() {
+                if m.get("mode").and_then(|v| v.as_str()) == Some("analog") { continue; }
+                let trig = triggered.iter().find(|t| t.3 == i && !t.2);
+                let outs: Vec<String> = m.get("out").and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                if OutTiming::from_card(m, outs.len()).is_none() {
+                    ns.out_seq.remove(&(0, i));
+                    if let Some(t) = trig { digital_on.push((i, t.1.clone())); }
+                    continue;
+                }
+                let on: Vec<String> = card_outs_on(m, &outs, trig.is_some(), ns, 0, i, dt)
+                    .into_iter().cloned().collect();
+                if !on.is_empty() { digital_on.push((i, on)); }
+            }
+            // A stick direction a card in any other mode sends is a full push
+            // that way: sinks read a stick's axes, never its derived direction
+            // pins, so the Bool alone moved nothing.
+            for (_, out_pins) in &digital_on {
+                for p in out_pins {
+                    if let Some((axis, sign)) = analog_axis_for_cardinal(p) {
+                        *analog_axis_acc.entry(axis).or_insert(0.0) += sign;
+                    }
+                }
+            }
+            // Commit axis accumulator: clamp ±1 then write.
+            for (axis_pin, v) in &analog_axis_acc {
+                let clamped = v.clamp(-1.0, 1.0);
+                collector_sigs.set_pin(&key, &(*axis_pin), Signal::Float(clamped));
+            }
+            // Update bundled Vec2 pins so downstream sinks that read the
+            // Vec2 form (`left_stick`/`right_stick`) see the analog-driven
+            // values too. Without this, the sink's Vec2-vs-axis conflict
+            // resolver picks the Vec2 (which still carries the suppressed
+            // pass-through) and drops the analog axis writes.
+            for (vec2_pin, x_axis, y_axis) in [
+                ("left_stick", "left_stick_x", "left_stick_y"),
+                ("right_stick", "right_stick_x", "right_stick_y"),
+            ] {
+                let x_override = analog_axis_acc.get(&x_axis).copied();
+                let y_override = analog_axis_acc.get(&y_axis).copied();
+                if x_override.is_none() && y_override.is_none() { continue; }
+                let cur = collector_sigs.get_pin(&key, &vec2_pin)
+                    .and_then(|s| if let Signal::Vec2(v) = s { Some(*v) } else { None })
+                    .unwrap_or(Vec2::ZERO);
+                let x = x_override.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(cur.x);
+                let y = y_override.map(|v| v.clamp(-1.0, 1.0)).unwrap_or(cur.y);
+                collector_sigs.set_pin(&key, &vec2_pin, Signal::Vec2(Vec2::new(x, y)));
+            }
+
+            // ── Digital publish pass (existing semantics) ────────────────
+            //
+            // Collect every output pin mentioned in any DIGITAL mapping so
+            // released ones can publish false/0. Analog-only out pins are
+            // handled by the analog pass above.
+            let mut digital_all_out_pins: HashSet<String> = HashSet::new();
+            for (i, m) in mappings.iter().enumerate() {
+                let is_analog = m.get("mode").and_then(|v| v.as_str()) == Some("analog");
+                if is_analog { continue; }
+                let _ = i;
+                if let Some(arr) = m.get("out").and_then(|v| v.as_array()) {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            if !is_bus_out_pin(s) { continue; }
+                            // MIDI pins are typed and carry per-card levels
+                            // (velocity, on / off), so they are published by
+                            // the MIDI pass below rather than as plain bools.
+                            if flexinput_core::midi::is_midi_pin(s) { continue; }
+                            digital_all_out_pins.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+            let mut digital_asserted: HashSet<String> = HashSet::new();
+            for (_, out_pins) in &digital_on {
+                for p in out_pins {
+                    if touchpad_out_kind(p).is_some() { continue; } // synthesized below
+                    digital_asserted.insert(p.clone());
+                }
+            }
+            // Macro-port targets of triggered digital mappings: publish into
+            // the macro namespace (press-mode shaping already applied via
+            // `effective[]` → `triggered`). Bus pins continue below.
+            for p in &digital_asserted {
+                if is_macro_style_target(p) {
+                    merge_macro_scalar(collector_sigs, p, Signal::Bool(true));
+                }
+            }
+            // ── MIDI outputs ────────────────────────────────────────────
+            //
+            // A note is a gate on the bus and its velocity rides a twin pin the
+            // MIDI Out encoder reads; a value pin driven by a button sends the
+            // card's on / off level. Everything published here is MARKED
+            // produced, which is what lets a MIDI Out send it with its Thru
+            // toggle off — the setting that stops a shared In/Out port from
+            // feeding itself.
+            {
+                let mut midi_on_now: PinSigs = PinSigs::default();
+                for (idx, out_pins) in &digital_on {
+                    let (vel, on, _) = midi_card_levels(&mappings[*idx]);
+                    for p in out_pins {
+                        let Some(pin) = flexinput_core::midi::parse_pin(p) else { continue };
+                        if pin.is_continuous() {
+                            midi_on_now.insert(p.clone(), Signal::Float(on));
+                        } else {
+                            midi_on_now.insert(p.clone(), Signal::Bool(true));
+                            if let Some(twin) = midi_velocity_twin(&pin) {
+                                midi_on_now.insert(twin.to_id(), Signal::Float(vel));
+                            }
+                        }
+                    }
+                }
+                // Released cards write their off level, so a value pin returns
+                // to rest and a note lifts instead of hanging.
+                let mut midi_off_now: PinSigs = PinSigs::default();
+                for m in mappings {
+                    if m.get("mode").and_then(|v| v.as_str()) == Some("analog") { continue; }
+                    let (_, _, off) = midi_card_levels(m);
+                    let outs = m.get("out").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    for v in &outs {
+                        let Some(p) = v.as_str() else { continue };
+                        let Some(pin) = flexinput_core::midi::parse_pin(p) else { continue };
+                        if midi_on_now.contains_key(p) { continue; }
+                        if pin.is_continuous() {
+                            midi_off_now.insert(p.to_string(), Signal::Float(off));
+                        } else {
+                            midi_off_now.insert(p.to_string(), Signal::Bool(false));
+                            if let Some(twin) = midi_velocity_twin(&pin) {
+                                midi_off_now.insert(twin.to_id(), Signal::Float(0.0));
+                            }
+                        }
+                    }
+                }
+                for (pin, sig) in midi_on_now.into_iter().chain(midi_off_now) {
+                    collector_sigs.set_pin(&key, &pin, sig);
+                    mark_produced(&key, &pin, collector_sigs);
+                }
+            }
+
+            for out_pin in &digital_all_out_pins {
+                let sig_type = automap::ALL_PINS.iter()
+                    .find(|p| p.id == out_pin.as_str())
+                    .map(|p| p.signal_type)
+                    .unwrap_or(SignalType::Bool);
+                let on = digital_asserted.contains(out_pin);
+                if on {
+                    let sig = match sig_type {
+                        SignalType::Float => Signal::Float(1.0),
+                        SignalType::Vec2  => continue,
+                        SignalType::Int   => Signal::Int(1),
+                        _                 => Signal::Bool(true),
+                    };
+                    collector_sigs.set_pin(&key, &out_pin, sig);
+                } else {
+                    if upstream.contains_key(out_pin.as_str()) { continue; }
+                    // If an analog mapping has already written this same out
+                    // pin (e.g., the user fans a button to it from a different
+                    // mapping), don't overwrite with zero.
+                    if analog_button_out.contains(out_pin)
+                        || analog_axis_acc.iter().any(|(ap, _)| *ap == out_pin.as_str())
+                    {
+                        continue;
+                    }
+                    let sig = match sig_type {
+                        SignalType::Float => Signal::Float(0.0),
+                        SignalType::Vec2  => continue,
+                        SignalType::Int   => Signal::Int(0),
+                        _                 => Signal::Bool(false),
+                    };
+                    collector_sigs.set_pin(&key, &out_pin, sig);
+                }
+            }
+
+            // ── Analog button-out emissions + release pass ───────────────
+            //
+            // Bool/Int analog out pins: write true while active. For released
+            // analog out pins (mapping inactive this tick), write false/0
+            // only when upstream doesn't naturally emit it (mirrors digital
+            // release rule).
+            let mut analog_button_pins: HashSet<String> = HashSet::new();
+            for m in mappings {
+                let is_analog = m.get("mode").and_then(|v| v.as_str()) == Some("analog");
+                if !is_analog { continue; }
+                if let Some(arr) = m.get("out").and_then(|v| v.as_array()) {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            // Triggers are analog axes (handled by analog_axis_acc),
+                            // not buttons — exclude them from the binary on/off
+                            // release pass or it would clobber the analog value.
+                            // Macro pins are published via the macro namespace
+                            // in the emit loop above, never as bus buttons.
+                            // A MIDI VALUE pin (CC, bend, pressure…) is an
+                            // axis, not a button: the accumulator above owns
+                            // it, and letting the button release pass write it
+                            // too would stamp the live value back to off. A
+                            // MIDI note is a gate and does belong here.
+                            if analog_axis_for_cardinal(s).is_none()
+                                && analog_trigger_out(s).is_none()
+                                && midi_analog_out(s).is_none()
+                                // Nor a note: the note pass above plays it.
+                                && !flexinput_core::midi::is_midi_pin(s)
+                                && is_bus_out_pin(s)
+                            {
+                                analog_button_pins.insert(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            for out_pin in &analog_button_pins {
+                if digital_asserted.contains(out_pin) { continue; } // digital wins for this pin
+                let on = analog_button_out.contains(out_pin);
+                // An analog card on a MIDI note: the gate still comes from the
+                // button path above, so only the typed value, its velocity and
+                // the produced mark are MIDI's business here.
+                if let Some(pin) = flexinput_core::midi::parse_pin(out_pin) {
+                    let vel = mappings.iter()
+                        .find(|m| m.get("out").and_then(|v| v.as_array()).is_some_and(|a|
+                            a.iter().any(|v| v.as_str() == Some(out_pin.as_str()))))
+                        .map(|m| midi_card_levels(m).0)
+                        .unwrap_or(MIDI_CARD_VELOCITY / 127.0);
+                    collector_sigs.set_pin(&key, &out_pin, Signal::Bool(on));
+                    mark_produced(&key, out_pin, collector_sigs);
+                    if let Some(twin) = midi_velocity_twin(&pin) {
+                        let id = twin.to_id();
+                        collector_sigs.set_pin(&key, &id, Signal::Float(if on { vel } else { 0.0 }));
+                        mark_produced(&key, &id, collector_sigs);
+                    }
+                    continue;
+                }
+                let sig_type = automap::ALL_PINS.iter()
+                    .find(|p| p.id == out_pin.as_str())
+                    .map(|p| p.signal_type)
+                    .unwrap_or(SignalType::Bool);
+                if on {
+                    let sig = match sig_type {
+                        SignalType::Float => Signal::Float(1.0),
+                        SignalType::Vec2  => continue,
+                        SignalType::Int   => Signal::Int(1),
+                        _                 => Signal::Bool(true),
+                    };
+                    collector_sigs.set_pin(&key, &out_pin, sig);
+                } else {
+                    if upstream.contains_key(out_pin.as_str()) { continue; }
+                    let sig = match sig_type {
+                        SignalType::Float => Signal::Float(0.0),
+                        SignalType::Vec2  => continue,
+                        SignalType::Int   => Signal::Int(0),
+                        _                 => Signal::Bool(false),
+                    };
+                    collector_sigs.set_pin(&key, &out_pin, sig);
+                }
+            }
+
+            // ── D-pad analog synthesis ───────────────────────────────────
+            //
+            // The D-pad reaches sinks in three parallel forms: four direction
+            // Bools, `dpad_x`/`dpad_y` Floats, and the `dpad` Vec2. A mapping
+            // that outputs a direction Bool used to write ONLY the Bool,
+            // leaving the axis + Vec2 forms carrying the (unpressed)
+            // pass-through. Every sink derives all four hat bits from the Vec2
+            // when it has one — XInput's `"dpad"` arm sets UP/DOWN/LEFT/RIGHT
+            // from `v`, HIDMaestro's does the same — so the zeroed Vec2 landed
+            // after the Bool and silently cancelled it. Net effect: a
+            // `→ dpad_down` mapping lit up on the AutoMap splitter but never
+            // reached the virtual pad.
+            //
+            // `analog_axis_for_cardinal` deliberately excludes the D-pad (it's
+            // a quantized hat, not a continuous axis), so the stick Vec2 sync
+            // above never covers this case. Recompute the axis + Vec2 forms
+            // from the four Bools whenever this Remapper drives any of them,
+            // reading each direction's final published value so directions it
+            // doesn't own keep their pass-through state.
+            const DPAD_DIRS: [(&str, usize, f32); 4] = [
+                ("dpad_right", 0,  1.0),
+                ("dpad_left",  0, -1.0),
+                ("dpad_up",    1,  1.0),
+                ("dpad_down",  1, -1.0),
+            ];
+            let drives_dpad = DPAD_DIRS.iter().any(|(d, _, _)| {
+                digital_all_out_pins.contains(*d) || analog_button_out.contains(*d)
+            });
+            if drives_dpad {
+                let mut xy = [0.0f32; 2];
+                for (dir, axis, sign) in DPAD_DIRS {
+                    let on = collector_sigs
+                        .get_pin(&key, &dir)
+                        .or_else(|| upstream.get(dir))
+                        .copied()
+                        .map(|s| s.as_bool())
+                        .unwrap_or(false);
+                    if on { xy[axis] += sign; }
+                }
+                // Opposite directions cancel — an axis can't hold both.
+                let x = xy[0].clamp(-1.0, 1.0);
+                let y = xy[1].clamp(-1.0, 1.0);
+                collector_sigs.set_pin(&key, "dpad_x", Signal::Float(x));
+                collector_sigs.set_pin(&key, "dpad_y", Signal::Float(y));
+                collector_sigs.set_pin(&key, "dpad", Signal::Vec2(Vec2::new(x, y)));
+            }
+
+            // ── Touchpad output synthesis (zones + analog swipe) ──────────
+            //
+            // If ANY mapping targets a touchpad zone/swipe pin, the Remapper owns
+            // the virtual touchpad. Each touch mapping yields ONE finger; stack up
+            // to the 2 hardware touch points (original mapping order). Plain
+            // `btn_touchpad` (click) / `btn_mute` are canonical and handled above.
+            //
+            // Input roles within a touch mapping (this is NOT index-zip):
+            //   • BUTTONS gate the finger — all must be held for it to be active;
+            //     they never contribute a value (fixes the "stuck at full" bug).
+            //   • ANALOG inputs (stick cardinals / triggers) drive the swipe axes,
+            //     routed by orientation: horizontal cardinals → swipe_x, vertical
+            //     → swipe_y. Both directions of an axis cover both halves (e.g.
+            //     left_stick_left AND left_stick_right → full −1..+1 on X).
+            //   • A mapping with buttons + analog: the buttons gate (finger down
+            //     while held, even centered) and the analog drives the position.
+            //   • Analog-only: deflection both activates and positions.
+            let has_touch_mappings = mappings.iter().any(mapping_targets_touch);
+            if has_touch_mappings {
+                let mut fingers: Vec<(f32, f32)> = Vec::new();
+                for m in mappings {
+                    if fingers.len() >= 2 { break; }
+                    if !mapping_targets_touch(m) { continue; }
+                    let out_pins: Vec<&str> = m.get("out").and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+                    let in_pins: Vec<&str> = m.get("in").and_then(|v| v.as_array())
+                        .map(|a| a.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+
+                    // Evaluate inputs by role (buttons gate, analog drives axes).
+                    let ev = eval_touch_combo(&in_pins, &upstream);
+                    if !ev.active { continue; }
+
+                    let mut fx = 0.0f32;
+                    let mut fy = 0.0f32;
+                    for p in &out_pins {
+                        match touchpad_out_kind(p) {
+                            Some(TouchOutKind::Zone(zx)) => { fx = zx; }
+                            Some(TouchOutKind::SwipeX) => { fx += ev.axis_x; }
+                            Some(TouchOutKind::SwipeY) => { fy += ev.axis_y; }
+                            None => {}
+                        }
+                    }
+                    fingers.push((fx.clamp(-1.0, 1.0), fy.clamp(-1.0, 1.0)));
+                }
+                publish_touch_points(&key, &fingers, collector_sigs);
+            }
+    request_pad_actions(snap, &format!("remap:{uid}"), collector_sigs);
+    // Hand the per-tick pin snapshot's key Strings back for the next tick.
+}
+
+/// Whether an order-agnostic digital card's input counts as held this tick.
+/// Advances the stick-gesture state, so call it once per card per tick.
+///
+/// Stick-gesture path: when the chord has stick cardinals, it can never be
+/// "simultaneously held" (a single stick can't be Left AND Right at the same
+/// instant). Instead we track which cardinals have been visited during the
+/// active gesture and count the chord held once every required cardinal
+/// across both sticks has been visited, with its buttons held.
+///
+/// Manual activation threshold: an explicit "fire at this magnitude"
+/// instruction. It BYPASSES the stick-gesture accumulator (visit-all-cardinals
+/// semantics conflict with a hold-above-the-line gate) and replaces the
+/// built-in cardinal derivation / 0.5 trigger coercion: each analog in pin
+/// gates on the card's curve-shaped magnitude crossing the line, releasing the
+/// moment it dips back below.
+pub(crate) fn chord_raw_held(
+    m: &Value,
+    i: usize,
+    in_pins: &[&str],
+    upstream: &PinSigs,
+    ns: &mut NodeState,
+) -> bool {
+    let shape = MappingShape::from_card(m);
+    let pin_on = |p: &str| upstream.get(p).map(|s| s.as_bool()).unwrap_or(false);
+    if let (Some(required), None) = (gesture_required_bits(in_pins), shape.threshold) {
+        // An IMU input beside the stick gesture gates like a button, past its
+        // default line.
+        let buttons_held = in_pins.iter().all(|p| {
+            gesture_pin_to_bit(p).is_some() || shape.analog_gate(upstream, p).unwrap_or_else(|| pin_on(p))
+        });
+        buttons_held && gesture_tick(required, gesture_state_get(ns, i), upstream)
+    } else {
+        in_pins.iter().all(|p| shape.analog_gate(upstream, p).unwrap_or_else(|| pin_on(p)))
+    }
+}
+
+/// The analog-mode chord rule: every non-cardinal pin (gate button) must pass,
+/// and when the chord has stick cardinals, ANY one of them passing is enough —
+/// analog mode drives each output from its cardinal's live magnitude, so an
+/// undeflected cardinal just contributes zero. `pin_passes` supplies the
+/// per-pin verdict. Shared by activation (`effective`) and suppression
+/// (`held_now`) so the two can't disagree about when an analog card is live.
+/// Is one input of an Analog card active? A note while its key is down — past
+/// the card's velocity threshold, if it has one — whatever its aftertouch reads
+/// (eased right off is a value of 0, not a released key). Any other analog
+/// input while its value is off rest; a button while held.
+fn analog_pin_active(
+    shape: &MappingShape,
+    upstream: &PinSigs,
+    p: &str,
+    read_upstream: &dyn Fn(&str) -> Option<Signal>,
+) -> bool {
+    if let Some(vel) = note_velocity(upstream, p) {
+        return shape.analog_gate(upstream, p).unwrap_or(vel > 0.0);
+    }
+    match shape.in_value(upstream, p) {
+        Some(v) => v != 0.0,
+        None => read_upstream(p).map(|s| s.as_bool()).unwrap_or(false),
+    }
+}
+
+fn analog_chord_active(in_pins: &[&str], mut pin_passes: impl FnMut(&str) -> bool) -> bool {
+    // ANY stick direction deflected is enough — opposite directions of one
+    // stick can never all be held — while every other input must pass: a
+    // button held, a trigger, knob or note active. Two notes chorded in Analog
+    // mode need both keys down.
+    let mut has_cardinal = false;
+    let mut any_cardinal = false;
+    for p in in_pins {
+        let passes = pin_passes(p);
+        if analog_axis_for_cardinal(p).is_some() {
+            has_cardinal = true;
+            any_cardinal |= passes;
+        } else if !passes {
+            return false;
+        }
+    }
+    // Pure-button analog chords (no cardinal in) reduce to "all held" — same
+    // as Down mode.
+    !has_cardinal || any_cardinal
+}
+
+/// Shared Remapper pass-through + suppression pass, called identically by the
+/// top-level and sub-patch Remapper arms (so the two never diverge). For every
+/// canonical pin it writes `collector_sigs[(key, pin)]`:
+///   - consumed input pins → explicit off
+///   - claimed cardinals → per-side axis/Vec2 clamp + Bool off (sticks + D-pad)
+///   - unmapped pins → raw pass-through
+/// Then recomputes synthetic stick cardinals from the clamped axes and publishes
+/// the consumed-pin markers for downstream Combiner hierarchy suppression.
+/// Default NoteOn velocity for a card that hasn't set one, matching the
+/// device encoder's own default.
+pub(crate) const MIDI_CARD_VELOCITY: f32 = 100.0;
+
+/// What a card sends on a MIDI pin it drives as a BUTTON: the note velocity,
+/// and the on / off values for a value pin (CC and friends). All three are
+/// per card — `midi_vel`, `midi_on`, `midi_off`, in MIDI's own 0–127 — since a
+/// card is one gesture and its outputs want one answer.
+pub(crate) fn midi_card_levels(m: &serde_json::Value) -> (f32, f32, f32) {
+    let read = |k: &str, d: f32| m.get(k).and_then(|v| v.as_f64()).map(|v| v as f32).unwrap_or(d);
+    (
+        read("midi_vel", MIDI_CARD_VELOCITY).clamp(1.0, 127.0) / 127.0,
+        read("midi_on", 127.0).clamp(0.0, 127.0) / 127.0,
+        read("midi_off", 0.0).clamp(0.0, 127.0) / 127.0,
+    )
+}
+
+/// A MIDI pin an ANALOG card can drive with a live value, and whether it is
+/// two-sided. A note is not one: it is a gate, and keeps the button path.
+pub(crate) fn midi_analog_out(pin: &str) -> Option<(flexinput_core::midi::MidiPin, bool)> {
+    let p = flexinput_core::midi::parse_pin(pin)?;
+    p.is_continuous().then(|| {
+        let bipolar = matches!(p, flexinput_core::midi::MidiPin::PitchBend { .. });
+        (p, bipolar)
+    })
+}
+
+/// The velocity pin that rides along with a note gate.
+pub(crate) fn midi_velocity_twin(pin: &flexinput_core::midi::MidiPin) -> Option<flexinput_core::midi::MidiPin> {
+    match *pin {
+        flexinput_core::midi::MidiPin::Note { ch, note } => {
+            Some(flexinput_core::midi::MidiPin::Velocity { ch, note })
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn remapper_pass_through_and_suppress(
+    key: &str,
+    upstream: &PinSigs,
+    claimed_digital: &HashSet<String>,
+    claimed_analog: &HashSet<String>,
+    collector_sigs: &mut BusMap,
+) {
+    let mut all_claimed: HashSet<String> = claimed_digital.clone();
+    all_claimed.extend(claimed_analog.iter().cloned());
+    let suppression = cardinal_suppression(&all_claimed);
+
+    let bus = collector_sigs.bus_id(key);
+    for (ix, ap) in automap::ALL_PINS.iter().enumerate() {
+        let claimed = !all_claimed.is_empty() && all_claimed.contains(ap.id);
+        let raw = if claimed { None } else { upstream.canonical(ix).copied() };
+        let Some(raw) = raw else {
+            if claimed {
+                let off = match ap.signal_type {
+                    SignalType::Bool  => Signal::Bool(false),
+                    SignalType::Float => Signal::Float(0.0),
+                    SignalType::Vec2  => Signal::Vec2(Vec2::ZERO),
+                    SignalType::Int   => Signal::Int(0),
+                    _ => continue,
+                };
+                collector_sigs.set_at(bus, ix, off);
+            }
+            continue;
+        };
+        let sig = suppress_signal_for_pin(ap.id, raw, &suppression);
+        collector_sigs.set_at(bus, ix, sig);
+    }
+
+    // MIDI pins: dynamic, so driven by what the upstream snapshot holds rather
+    // than by a list. A claimed one publishes its rest value so a downstream
+    // reader sees it released instead of falling back to the raw device.
+    // Shared with the JSM module, which calls this same pass-through.
+    for (pin, raw) in upstream.iter() {
+        if !flexinput_core::midi::is_midi_pin(pin) {
+            continue;
+        }
+        let sig = if all_claimed.contains(pin) {
+            match midi_rest(pin) {
+                Some(off) => off,
+                None => continue,
+            }
+        } else {
+            *raw
+        };
+        collector_sigs.set_pin(&key, &pin, sig);
+    }
+
+    // Recompute synthetic stick cardinals from the (possibly clamped) axes so
+    // downstream consumers see consistent cardinal bools.
+    {
+        let mut local_up: PinSigs = PinSigs::default();
+        for axis in ["left_stick_x", "left_stick_y", "right_stick_x", "right_stick_y"] {
+            if let Some(&sig) = collector_sigs.get_pin(&key, &axis) {
+                local_up.insert(axis.to_string(), sig);
+            }
+        }
+        derive_stick_cardinals(&mut local_up);
+        for (k, v) in local_up.iter() {
+            if k.contains("_stick_") && (k.ends_with("_up") || k.ends_with("_down")
+                || k.ends_with("_left") || k.ends_with("_right"))
+            {
+                collector_sigs.set_pin(&key, k, *v);
+            }
+        }
+    }
+
+    publish_consumed_markers(key, claimed_digital, claimed_analog, collector_sigs);
+}
+
+/// Add to `upstream` the pins the upstream bus carries that are neither
+/// canonical (`ALL_PINS`) nor MIDI — what an upstream mapping module drives
+/// that no device has, like an Area Mapper's or another Remapper's `key_w` —
+/// and return their names. Bus bookkeeping (`__`-prefixed markers) stays out.
+/// Without this a Remapper dropped them, so an Area Mapper in front of one
+/// lost its keys.
+pub(crate) fn fill_upstream_extra(
+    collector_id: &str,
+    collector_sigs: &BusMap,
+    upstream: &mut PinSigs,
+) -> Vec<String> {
+    if collector_id.is_empty() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for (pin, &sig) in collector_sigs.extras_of(collector_id) {
+        if pin.starts_with("__") || flexinput_core::midi::is_midi_pin(pin) {
+            continue;
+        }
+        upstream.insert(pin, sig);
+        names.push(pin.to_string());
+    }
+    names
+}
+
+/// Carry the [`fill_upstream_extra`] pins on, as the canonical pass-through
+/// does: an input a card claims publishes its off value, a pin held back from
+/// `upstream` (a deciding card's hold-back) isn't published, and the rest pass
+/// unchanged. The Remapper's own outputs are written after this and win.
+pub(crate) fn forward_extra_pins(
+    key: &str,
+    extra_pins: &[String],
+    upstream: &PinSigs,
+    claimed_digital: &HashSet<String>,
+    claimed_analog: &HashSet<String>,
+    collector_sigs: &mut BusMap,
+) {
+    for pin in extra_pins {
+        let Some(&raw) = upstream.get(pin.as_str()) else { continue };
+        let sig = if claimed_digital.contains(pin) || claimed_analog.contains(pin) {
+            match raw {
+                Signal::Bool(_) => Signal::Bool(false),
+                Signal::Float(_) => Signal::Float(0.0),
+                Signal::Int(_) => Signal::Int(0),
+                Signal::Vec2(_) => Signal::Vec2(Vec2::ZERO),
+                _ => continue,
+            }
+        } else {
+            raw
+        };
+        collector_sigs.set_pin(&key, &pin, sig);
+    }
+}
+
+/// Apply per-side `CardinalSuppression` to one pin's raw pass-through value:
+///   - axis Float (`dpad_x`, `left_stick_y`, …): clamp the consumed side(s).
+///   - bundled Vec2 (`dpad`, `left_stick`, …): clamp each component's side(s).
+///   - claimed cardinal Bool: forced false.
+///   - everything else: unchanged.
+/// Only the directions the user mapped are affected; the rest pass through.
+pub(crate) fn suppress_signal_for_pin(
+    pin_id: &str,
+    raw: Signal,
+    sup: &CardinalSuppression,
+) -> Signal {
+    // Claimed cardinal Bool → off.
+    if sup.bool_pins.contains(pin_id) {
+        return Signal::Bool(false);
+    }
+    // Axis Float → side clamp.
+    if let Some(&(neg, pos)) = sup.axis_sides.get(pin_id) {
+        if let Signal::Float(v) = raw {
+            return Signal::Float(apply_axis_clamp(v, (neg, pos)));
+        }
+        return raw;
+    }
+    // Bundled Vec2 → per-component side clamp.
+    let axes: Option<(&str, &str)> = match pin_id {
+        "left_stick"  => Some(("left_stick_x",  "left_stick_y")),
+        "right_stick" => Some(("right_stick_x", "right_stick_y")),
+        "dpad"        => Some(("dpad_x",         "dpad_y")),
+        _ => None,
+    };
+    if let Some((xa, ya)) = axes {
+        let xs = sup.axis_sides.get(xa).copied().unwrap_or((false, false));
+        let ys = sup.axis_sides.get(ya).copied().unwrap_or((false, false));
+        if xs == (false, false) && ys == (false, false) {
+            return raw;
+        }
+        if let Signal::Vec2(v) = raw {
+            return Signal::Vec2(Vec2::new(
+                apply_axis_clamp(v.x, xs),
+                apply_axis_clamp(v.y, ys),
+            ));
+        }
+    }
+    raw
+}
+

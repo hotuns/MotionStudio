@@ -1,0 +1,805 @@
+use flexinput_core::{Module, ModuleDescriptor, ModuleRegistration, PinDescriptor, Signal, SignalType};
+use smallvec::SmallVec;
+
+pub fn registrations() -> Vec<ModuleRegistration> {
+    #[allow(unused_mut)]
+    let mut v = vec![
+        reg::<DelayModule>(),
+        reg::<AverageModule>(),
+        reg::<DcFilterModule>(),
+        reg::<SampleHoldModule>(),
+        reg::<ResponseCurveModule>(),
+        reg::<VecResponseCurveModule>(),
+        reg::<VecReshapeModule>(),
+        reg::<TwowayResponseCurveModule>(),
+        reg::<VecToAxisModule>(),
+        reg::<AxisToVecModule>(),
+        reg::<VecToDeflectionModule>(),
+        reg::<Gyro3DOFModule>(),
+        reg::<RwsModule>(),
+        reg::<AutoMapSplitModule>(),
+        reg::<AutoMapCollectModule>(),
+        reg::<AutoMapFork>(),
+        reg::<AutoMapSelector>(),
+        reg::<AutoMapCombiner>(),
+        reg::<AutoMapResponseCurveModule>(),
+        reg::<AutoMapTwowayResponseCurveModule>(),
+        reg::<StickRotationModule>(),
+        reg::<RemapperModule>(),
+        reg::<MapActionModule>(),
+        reg::<FeedbackControlModule>(),
+    ];
+    // Audio Stream Haptics is an optional module (Phase C pilot): the WASAPI
+    // loopback + audio→haptics path compiles out with the `asth` feature off.
+    #[cfg(feature = "asth")]
+    v.push(reg::<AudioStreamHapticsModule>());
+    v
+}
+
+#[cfg(test)]
+mod feature_tests {
+    #[test]
+    fn asth_descriptor_presence_tracks_feature() {
+        let has = super::registrations()
+            .iter()
+            .any(|r| r.descriptor.id == "module.audio_stream_haptics");
+        #[cfg(feature = "asth")]
+        assert!(has, "with the `asth` feature the module must be registered");
+        #[cfg(not(feature = "asth"))]
+        assert!(!has, "without the `asth` feature the module must be absent");
+    }
+}
+
+fn reg<M: Module + Default + 'static>() -> ModuleRegistration {
+    ModuleRegistration { descriptor: M::descriptor(), factory: || Box::new(M::default()) }
+}
+
+// ── Delay ─────────────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct DelayModule;
+
+impl Module for DelayModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.delay",
+            display_name: "Delay",
+            category: "Processing",
+            inputs: vec![PinDescriptor::new("In", SignalType::Float)],
+            outputs: vec![PinDescriptor::new("Out", SignalType::Float)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Moving Average ────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct AverageModule;
+
+impl Module for AverageModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.average",
+            display_name: "Average",
+            category: "Processing",
+            inputs: vec![PinDescriptor::new("In", SignalType::Any)],
+            outputs: vec![PinDescriptor::new("Out", SignalType::Any)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── DC Filter ─────────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct DcFilterModule;
+
+impl Module for DcFilterModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.dc_filter",
+            display_name: "DC Filter",
+            category: "Processing",
+            inputs: vec![PinDescriptor::new("In", SignalType::Float)],
+            outputs: vec![PinDescriptor::new("Out", SignalType::Float)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Sample and Hold ───────────────────────────────────────────────────────────
+
+/// Holds any signal, keeping its type.
+/// "sample" — each rising edge of the second input samples the first.
+/// "hold"   — the output follows the input, frozen while the second input is high.
+#[derive(Default)]
+pub struct SampleHoldModule;
+
+impl Module for SampleHoldModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.sample_hold",
+            display_name: "Sample and Hold",
+            category: "Processing",
+            inputs: vec![
+                PinDescriptor::new("In", SignalType::Any),
+                // Shown as "Gate" in Hold mode: see `sample_hold_gate_label`.
+                PinDescriptor::new("Trigger", SignalType::Bool),
+            ],
+            outputs: vec![PinDescriptor::new("Out", SignalType::Any)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Response Curve ────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct ResponseCurveModule;
+
+#[derive(Default)]
+pub struct VecResponseCurveModule;
+
+impl Module for ResponseCurveModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.response_curve",
+            display_name: "Response Curve",
+            category: "Processing",
+            inputs: vec![
+                PinDescriptor::new("In 1", SignalType::Float),
+                PinDescriptor::new("In 2", SignalType::Float),
+                PinDescriptor::new("In 3", SignalType::Float),
+            ],
+            outputs: vec![
+                PinDescriptor::new("Out 1", SignalType::Float),
+                PinDescriptor::new("Out 2", SignalType::Float),
+                PinDescriptor::new("Out 3", SignalType::Float),
+            ],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Vec Response Curve ────────────────────────────────────────────────────────
+
+impl Module for VecResponseCurveModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.vec_response_curve",
+            display_name: "Vec Response Curve",
+            category: "Processing",
+            inputs: vec![PinDescriptor::new("In", SignalType::Vec2)],
+            outputs: vec![PinDescriptor::new("Out", SignalType::Vec2)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Vec Reshaper ──────────────────────────────────────────────────────────────
+//
+// Directional (angle-dependent) reshaping of a Vec2 to fight games' broken
+// vector shaping — e.g. right sticks that need to deflect much farther on
+// diagonals than on cardinals to move the camera on both axes ("diagonal
+// stickiness"). Unlike `vec_response_curve` (which reshapes magnitude as a
+// function of magnitude, radially symmetric), this reshapes as a function of
+// DIRECTION:
+//   • a per-angle boundary radius that remaps the gate shape (circle↔square↔
+//     custom) and renormalises magnitude to it;
+//   • a per-angle gain curve that accelerates the vector on chosen directions
+//     (push diagonals faster than horizontal/vertical, or vice-versa).
+// The user edits one quadrant; the other three mirror it (4-way by default,
+// or X-mirror so top/bottom may differ). All math lives in eval.rs
+// (`vec_reshape_apply`, shared with the UI preview); params in `node.params`:
+//   boundary_pts: [[angle01, radius], ...]   angle 0=cardinal → 1=diagonal
+//   gain_pts:     [[angle01, gain],   ...]   directional multiplier curve
+//   gain_biases:  [f32]                       per-segment bias (curve smoothing)
+//   symmetry:     "quad4" | "xmirror"
+//   renorm:       bool                        remap magnitude to boundary
+//   in_max / out_max, grid_a, snap, trail_ms  (editor knobs)
+#[derive(Default)]
+pub struct VecReshapeModule;
+
+impl Module for VecReshapeModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.vec_reshape",
+            display_name: "Vec Reshaper",
+            category: "Processing",
+            inputs: vec![PinDescriptor::new("In", SignalType::Vec2)],
+            outputs: vec![PinDescriptor::new("Out", SignalType::Vec2)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Two-way Response Curve ────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct TwowayResponseCurveModule;
+
+impl Module for TwowayResponseCurveModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.twoway_response_curve",
+            display_name: "Two-way Response Curve",
+            category: "Processing",
+            inputs:  vec![PinDescriptor::new("In 1",  SignalType::Float)],
+            outputs: vec![PinDescriptor::new("Out 1", SignalType::Float)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Vec to Axis ───────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct VecToAxisModule;
+
+impl Module for VecToAxisModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.vec_to_axis",
+            display_name: "Vec to Axis",
+            category: "Converters",
+            inputs: vec![PinDescriptor::new("In", SignalType::Vec2)],
+            outputs: vec![
+                PinDescriptor::new("X", SignalType::Float),
+                PinDescriptor::new("Y", SignalType::Float),
+            ],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Axis to Vec ───────────────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct AxisToVecModule;
+
+impl Module for AxisToVecModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.axis_to_vec",
+            display_name: "Axis to Vec",
+            category: "Converters",
+            inputs: vec![
+                PinDescriptor::new("X", SignalType::Float),
+                PinDescriptor::new("Y", SignalType::Float),
+            ],
+            outputs: vec![PinDescriptor::new("Out", SignalType::Vec2)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Vec to Deflection ─────────────────────────────────────────────────────────
+
+/// Cartesian → polar: how far the vector is pushed, and which way it points.
+/// Angle 0 is straight up (+Y) and grows clockwise, so right is a quarter turn.
+#[derive(Default)]
+pub struct VecToDeflectionModule;
+
+impl Module for VecToDeflectionModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.vec_to_deflection",
+            display_name: "Vec to Deflection",
+            category: "Converters",
+            inputs: vec![PinDescriptor::new("In", SignalType::Vec2)],
+            outputs: vec![
+                PinDescriptor::new("Deflection", SignalType::Float),
+                PinDescriptor::new("Angle", SignalType::Float),
+            ],
+        }
+    }
+    // Like its Converters siblings, the evaluation lives in the engine
+    // (`eval_pure`) — this descriptor exists to publish the pins.
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── AutoMap Splitter ──────────────────────────────────────────────────────────
+
+/// Accepts an AutoMap input and exposes individual device signals as typed outputs,
+/// plus an AutoMap passthrough output for downstream routing.
+/// User adds outputs via the node body UI; `output_pin_ids[0]` = "automap_pass" (passthrough),
+/// `output_pin_ids[1..]` = selected device pin IDs.
+#[derive(Default)]
+pub struct AutoMapSplitModule;
+
+impl Module for AutoMapSplitModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.automap_split",
+            display_name: "AutoMap Splitter",
+            category: "AutoMap",
+            inputs: vec![PinDescriptor::new("Device", SignalType::AutoMap)],
+            outputs: vec![PinDescriptor::new("AutoMap", SignalType::AutoMap)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> {
+        // Signals injected by compute_node in eval.rs via dev_sigs lookup.
+        SmallVec::new()
+    }
+}
+
+// ── AutoMap Collector ─────────────────────────────────────────────────────────
+
+/// Accepts an AutoMap input and individual signal inlets (user-added from canonical list),
+/// then merges them into an AutoMap output. Individual inlets override specific signals;
+/// non-overridden signals pass through from the upstream source device.
+#[derive(Default)]
+pub struct AutoMapCollectModule;
+
+impl Module for AutoMapCollectModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.automap_collect",
+            display_name: "AutoMap Collector",
+            category: "AutoMap",
+            inputs: vec![PinDescriptor::new("Device", SignalType::AutoMap)],
+            outputs: vec![PinDescriptor::new("AutoMap", SignalType::AutoMap)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> {
+        // Signals injected into collector_sigs by eval_graph_tick in eval.rs.
+        SmallVec::new()
+    }
+}
+
+// ── Audio Stream Haptics ───────────────────────────────────────────────────────
+
+/// Derives rumble from an application's (or the system's) audio and injects it
+/// into the AutoMap bus passing through it, so a gamepad wired in→out feels the
+/// game's audio as haptics — no driver required (WASAPI loopback).
+///
+/// A gamepad routes THROUGH this node (AutoMap in → AutoMap out). The proc thread
+/// runs a WASAPI loopback capture for the configured target (a picked process,
+/// the focused app, or the system mix) and the eval block blends the resulting
+/// per-side (amp, freq) with any standard rumble already on the bus per the
+/// `asth_modulator` slider, then injects HD-rumble feedback into the outgoing bus.
+/// All real work is in eval.rs (`module.audio_stream_haptics`); params:
+///   `asth_mode` (process|focused|system), `asth_target_name`, `asth_include_tree`,
+///   `asth_modulator` (0=gate by std rumble, 0.5=boost, 1=replace).
+#[cfg(feature = "asth")]
+#[derive(Default)]
+pub struct AudioStreamHapticsModule;
+
+#[cfg(feature = "asth")]
+impl Module for AudioStreamHapticsModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.audio_stream_haptics",
+            display_name: "Audio Stream Haptics",
+            category: "AutoMap",
+            inputs: vec![PinDescriptor::new("Device", SignalType::AutoMap)],
+            // output[0] = AutoMap pass-through (unchanged). The remaining Float pins
+            // expose the RAW two-band decomposition BEFORE the carrier/modulator
+            // (AM/RM) blend: per-band envelope followers (one per side) and each
+            // band's collapsed carrier frequency in Hz. Wire them to scopes/readouts
+            // or drive other modules from the audio analysis. Computed in
+            // `eval::audio_stream_haptics_publish`.
+            outputs: vec![
+                PinDescriptor::new("AutoMap", SignalType::AutoMap),
+                PinDescriptor::new("LF EF L", SignalType::Float),
+                PinDescriptor::new("HF EF L", SignalType::Float),
+                PinDescriptor::new("LF EF R", SignalType::Float),
+                PinDescriptor::new("HF EF R", SignalType::Float),
+                PinDescriptor::new("LF Hz",   SignalType::Float),
+                PinDescriptor::new("HF Hz",   SignalType::Float),
+            ],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> {
+        // Haptics injected into the AutoMap bus by eval_graph_tick in eval.rs;
+        // the capture itself is owned by the processing thread's LoopbackManager.
+        SmallVec::new()
+    }
+}
+
+// ── AutoMap Fork ─────────────────────────────────────────────────────────────
+
+/// Routes one AutoMap bus to one of two AutoMap outputs based on a Bool/Float select pin.
+/// select = false/0.0 → out_0 receives the bus, out_1 is disconnected.
+/// select = true/1.0  → out_1 receives the bus, out_0 is disconnected.
+/// Named "Fork" to distinguish from the existing Split (scalar) module.
+#[derive(Default)]
+pub struct AutoMapFork;
+
+impl Module for AutoMapFork {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.automap_fork",
+            display_name: "AutoMap Fork",
+            category: "AutoMap",
+            inputs: vec![
+                PinDescriptor::new("in", SignalType::AutoMap),
+                PinDescriptor::new("select", SignalType::Float),
+            ],
+            outputs: vec![
+                PinDescriptor::new("out_0", SignalType::AutoMap),
+                PinDescriptor::new("out_1", SignalType::AutoMap),
+            ],
+        }
+    }
+    fn process(&mut self, inputs: &[Option<Signal>]) -> SmallVec<[Signal; 4]> {
+        // AutoMap bus routing: the eval graph follows wires to the upstream AutoMap source.
+        // The select pin controls which output wire is "active" at the UI level.
+        let bus = inputs.get(0).and_then(|s| *s).unwrap_or(Signal::Float(0.0));
+        let select = match inputs.get(1).and_then(|s| *s) {
+            Some(Signal::Float(f)) => f > 0.5,
+            Some(Signal::Bool(b)) => b,
+            _ => false,
+        };
+        let mut r = SmallVec::new();
+        r.push(if !select { bus } else { Signal::Float(0.0) });
+        r.push(if select { bus } else { Signal::Float(0.0) });
+        r
+    }
+}
+
+// ── AutoMap Selector ──────────────────────────────────────────────────────────
+
+/// Selects one of N AutoMap bus inputs and routes it to a single AutoMap output.
+/// select pin (Float 0..1) is quantized to N slots, same as the scalar Selector module.
+/// Default: 2 inputs (in_0, in_1); additional inputs added via params["n_inputs"].
+#[derive(Default)]
+pub struct AutoMapSelector;
+
+impl Module for AutoMapSelector {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.automap_selector",
+            display_name: "AutoMap Selector",
+            category: "AutoMap",
+            inputs: vec![
+                PinDescriptor::new("select", SignalType::Float),
+                PinDescriptor::new("in_0", SignalType::AutoMap),
+                PinDescriptor::new("in_1", SignalType::AutoMap),
+            ],
+            outputs: vec![
+                PinDescriptor::new("out", SignalType::AutoMap),
+            ],
+        }
+    }
+    fn process(&mut self, inputs: &[Option<Signal>]) -> SmallVec<[Signal; 4]> {
+        // inputs[0] = select (Float 0..1), inputs[1..] = AutoMap buses
+        let n = inputs.len().saturating_sub(1).max(1);
+        let select = match inputs.get(0).and_then(|s| *s) {
+            Some(Signal::Float(f)) => {
+                let slot = (f.clamp(0.0, 1.0) * (n as f32 - 1.0 + 0.5)).floor() as usize;
+                slot.min(n - 1)
+            }
+            Some(Signal::Bool(b)) => if b { 1 } else { 0 },
+            _ => 0,
+        };
+        let selected_bus = inputs.get(select + 1).and_then(|s| *s).unwrap_or(Signal::Float(0.0));
+        let mut r = SmallVec::new();
+        r.push(selected_bus);
+        r
+    }
+}
+
+// ── AutoMap Combiner ──────────────────────────────────────────────────────────
+
+/// Merges multiple AutoMap bus inputs into one. Priority by port order: the
+/// uppermost input that has a pin "asserted" (Bool true, non-zero Float) wins
+/// that pin for this tick. Other inputs contribute pins they alone assert.
+/// Default: 2 inputs (in_0, in_1); additional inputs added by extending the
+/// node's input vec from the canvas body.
+#[derive(Default)]
+pub struct AutoMapCombiner;
+
+impl Module for AutoMapCombiner {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.automap_combiner",
+            display_name: "AutoMap Combiner",
+            category: "AutoMap",
+            inputs: vec![
+                PinDescriptor::new("in_0", SignalType::AutoMap),
+                PinDescriptor::new("in_1", SignalType::AutoMap),
+            ],
+            outputs: vec![
+                PinDescriptor::new("out", SignalType::AutoMap),
+            ],
+        }
+    }
+    fn process(&mut self, _inputs: &[Option<Signal>]) -> SmallVec<[Signal; 4]> {
+        // Bus value is irrelevant — eval reads `combiner:{uid}` collector_sigs
+        // entries written by the dedicated branch in `eval::tick`.
+        let mut r = SmallVec::new();
+        r.push(Signal::Float(0.0));
+        r
+    }
+}
+
+// ── AutoMap Response Curves ───────────────────────────────────────────────────
+
+/// Response Curve on one signal of an AutoMap bus. The header picks the signal
+/// (`am_curve_pin`) from what the connected bus carries; a Float is shaped like
+/// the Response Curve, a Vec2 (stick) by its length like the Vec Response Curve.
+/// Every other signal passes through. Evaluated in the engine
+/// (`eval_automap_curve_node`), which republishes the bus under `collector:{uid}`.
+#[derive(Default)]
+pub struct AutoMapResponseCurveModule;
+
+impl Module for AutoMapResponseCurveModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.automap_response_curve",
+            display_name: "AutoMap Response Curve",
+            category: "AutoMap",
+            inputs: vec![PinDescriptor::new("Device", SignalType::AutoMap)],
+            outputs: vec![PinDescriptor::new("AutoMap", SignalType::AutoMap)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+/// Two-way Response Curve on one signal of an AutoMap bus — same pick and
+/// pass-through as the AutoMap Response Curve, with the two-way curve's
+/// separate rising / falling lanes. A Vec2 runs in the curve's Vec mode.
+#[derive(Default)]
+pub struct AutoMapTwowayResponseCurveModule;
+
+impl Module for AutoMapTwowayResponseCurveModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.automap_twoway_response_curve",
+            display_name: "AutoMap Two-way Curve",
+            category: "AutoMap",
+            inputs: vec![PinDescriptor::new("Device", SignalType::AutoMap)],
+            outputs: vec![PinDescriptor::new("AutoMap", SignalType::AutoMap)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Gyro to Stick Rotation ────────────────────────────────────────────────────
+
+/// Gyro to Stick Rotation: turning the pad turns one stick of an AutoMap bus
+/// that is already pushed, for finer aim in twin-stick games — the thumb picks
+/// the direction, the wrist fine-tunes it. The offset the gyro winds up resets
+/// whenever the stick comes back inside its inner deadzone.
+///
+/// Persisted params (all optional; ids are save-format):
+///   rot_stick      — "right_stick" (default) | "left_stick"
+///   rot_mode       — "yaw" (the pad's own vertical, default) | "world" (gravity)
+///   rot_sens       — degrees of stick turn per degree of pad turn (1.0)
+///   rot_invert     — turn the other way
+///   rot_deadzone   — inner deadzone, 0..1 of stick travel (0.2)
+///   rot_smooth_ms  — stabilising time on the stick's direction, ms (0 = off)
+///
+/// process() returns empty — the evaluator lives in the engine
+/// (`eval_stick_rotation_node`), republishing the bus under `collector:{uid}`.
+#[derive(Default)]
+pub struct StickRotationModule;
+
+impl Module for StickRotationModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.stick_rotation",
+            display_name: "Gyro to Stick Rotation",
+            category: "AutoMap",
+            inputs: vec![PinDescriptor::new("Device", SignalType::AutoMap)],
+            outputs: vec![PinDescriptor::new("AutoMap", SignalType::AutoMap)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Gyro 3DOF to 2D ───────────────────────────────────────────────────────────
+
+#[derive(Default)]
+pub struct Gyro3DOFModule;
+
+impl Module for Gyro3DOFModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "processing.gyro_3dof",
+            display_name: "3DOF to 2D",
+            category: "Processing",
+            inputs: vec![
+                PinDescriptor::new("Device",  SignalType::AutoMap),
+                PinDescriptor::new("Reset",   SignalType::Bool).optional(),
+                PinDescriptor::new("Gyro X",  SignalType::Float).optional(),
+                PinDescriptor::new("Gyro Y",  SignalType::Float).optional(),
+                PinDescriptor::new("Gyro Z",  SignalType::Float).optional(),
+                PinDescriptor::new("Accel X", SignalType::Float).optional(),
+                PinDescriptor::new("Accel Y", SignalType::Float).optional(),
+                PinDescriptor::new("Accel Z", SignalType::Float).optional(),
+            ],
+            outputs: vec![
+                PinDescriptor::new("Out",    SignalType::Vec2),
+                PinDescriptor::new("X",      SignalType::Float),
+                PinDescriptor::new("Y",      SignalType::Float),
+                PinDescriptor::new("Lean",   SignalType::Float),
+                PinDescriptor::new("Lean!",  SignalType::Bool),
+                // Quaternion orientation (x,y,z,w) — continuous 3DOF pose from gyro + gravity alignment.
+                PinDescriptor::new("Orientation", SignalType::Vec4),
+                // AutoMap-out carries downstream per-pin signals produced
+                // by the module's lean_left / lean_right mapping arrays.
+                // Same contract as Remapper: pin injection happens in
+                // eval.rs.
+                PinDescriptor::new("Map",    SignalType::AutoMap),
+            ],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── RWS Aim (Real-World Sensitivity) ─────────────────────────────────────────
+//
+// Scales a rotation-rate Vec2 (gyro axes or a stick) into per-tick MOUSE
+// DISPLACEMENT, so a physical rotation maps 1:1 to in-game camera rotation once
+// the `scale` (counts-per-degree) is calibrated; `rws` is the user multiplier on
+// that ground truth. A second Vec2 input drives flick-stick (stick angle → yaw).
+//
+// The "Mouse Move (XY)" output is meant to be wired to the KB/M `mouse_move` sink pin: that
+// pin is applied once per tick (displacement, not integrated) and is NOT scaled
+// by the device card's mouse_sensitivity — so a preset carrying this module feels
+// identical regardless of the user's KB/M sensitivity setting. The "Stick" output
+// is a right-stick DEFLECTION (unit range) for stick-aim games: the desired turn
+// rate normalized by the game's full-deflection turn rate (`stick_out_dps`); wire
+// it to a virtual Right Stick. Real evaluation is `compute_rws` in the engine
+// (eval/modules/rws.rs); process() stays empty.
+//
+// The "Flick" output carries the flick alone when `flick_output` is "mouse"
+// (mouse counts, the default) or "stick" (stick deflection); with "both" the
+// flick is merged into the Mouse and Stick outputs and this pin stays at zero.
+// The flick is on wherever it reaches something — merged, or through a wired
+// Flick pin — and the "Flick On" input (unwired = on) turns off the flick, Stick
+// aim and the stick's suppression for a mode shift.
+//
+// `flick_target` makes it the module that turns the flicks mapping cards send
+// (see `flexinput_core::flick`).
+//
+// Params (node.params): scale, rws, max_rate_dps, flick_deadzone,
+// flick_smooth_ms, flick_stabilise_ms, flick_fwd_dz_deg, flick_output,
+// stick_aim_enabled, stick_aim_rws, suppress_source, stick_out_dps.
+#[derive(Default)]
+pub struct RwsModule;
+
+/// Name of RWS Aim's output 0. Pin names persist with each node, so patches saved
+/// before the rename (as "Mouse") are migrated to this on load.
+pub const RWS_MOUSE_OUT_NAME: &str = "Mouse Move (XY)";
+
+/// Name of RWS Aim's output 2: the flick alone, when `flick_output` sends it
+/// there ("mouse" / "stick"). Nodes saved before it existed get it appended on
+/// load.
+pub const RWS_FLICK_OUT_NAME: &str = "Flick";
+
+/// Name of RWS Aim's input 2: a mode-shift control for everything the module
+/// does with the stick on its Flick input (the flick, Stick aim, and the
+/// suppression of that stick). Unwired = on. Nodes saved before it existed get
+/// it appended on load.
+pub const RWS_FLICK_ON_IN_NAME: &str = "Flick On";
+
+impl Module for RwsModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "processing.rws",
+            display_name: "RWS Aim",
+            category: "Processing",
+            inputs: vec![
+                PinDescriptor::new("Rotation", SignalType::Vec2),
+                PinDescriptor::new("Flick", SignalType::Vec2).optional(),
+                PinDescriptor::new(RWS_FLICK_ON_IN_NAME, SignalType::Bool).optional(),
+            ],
+            outputs: vec![
+                PinDescriptor::new(RWS_MOUSE_OUT_NAME, SignalType::Vec2),
+                PinDescriptor::new("Stick", SignalType::Vec2),
+                PinDescriptor::new(RWS_FLICK_OUT_NAME, SignalType::Vec2),
+            ],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Remapper ─────────────────────────────────────────────────────────────────
+//
+// Single AutoMap in, single AutoMap out. Captures button presses live from the
+// input wire, lets the user define mappings via a Learn UI, and (in a future
+// phase) injects per-pin overrides at eval time.
+//
+// All state lives in `node.params` so it persists with the patch:
+//   ui_phase:      "idle" | "capturing" | "ready_to_learn" | "learning"
+//   draft_input:   [pin_id, ...]
+//   draft_output:  [pin_id, ...]
+//   mappings:      [{in: [pin_id, ...], out: [pin_id, ...]}, ...]
+//   skin:          "auto" | "xbox" | "playstation" | "switchpro" | "kbm"
+//
+// The process() body returns empty — the engine will inject Remapper output
+// signals in eval.rs (future phase), matching the AutoMap Splitter/Collector
+// pattern.
+#[derive(Default)]
+pub struct RemapperModule;
+
+impl Module for RemapperModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.remapper",
+            display_name: "Remapper",
+            category: "AutoMap",
+            inputs:  vec![PinDescriptor::new("in",  SignalType::AutoMap)],
+            outputs: vec![PinDescriptor::new("out", SignalType::AutoMap)],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Feedback Control ──────────────────────────────────────────────────────────
+//
+// Surfaces the otherwise-hidden AutoMap feedback channel as real node pins so
+// rumble/light effects can be injected (or the game's feedback request tapped)
+// from inside a sub-patch, where device pins aren't reachable.
+//
+//   • input 0  "Device" (AutoMap) — sits inline on the bus; passes straight to
+//              output 0. Used to trace the upstream physical source pad (inject
+//              target) and the downstream virtual destination (tap source).
+//   • inputs 1..N  — universal haptic union (FEEDBACK_INLET_PINS). Wired effect
+//              signals here inject backward along the bus into the physical pad;
+//              ports the connected pad lacks are silently dropped.
+//   • output 0  "AutoMap" — bus pass-through.
+//   • outputs 1..M  — basic rumble/light taps (FEEDBACK_OUTLET_PINS) read from
+//              the downstream virtual destination's feedback source-pins.
+//
+// process() returns empty — eval.rs injects inlets into collector_sigs and reads
+// outlet taps from dev_sigs, matching the AutoMap Splitter/Collector pattern.
+#[derive(Default)]
+pub struct FeedbackControlModule;
+
+impl Module for FeedbackControlModule {
+    fn descriptor() -> ModuleDescriptor {
+        use flexinput_core::automap::{FEEDBACK_INLET_PINS, FEEDBACK_OUTLET_PINS};
+        let mut inputs = vec![PinDescriptor::new("Device", SignalType::AutoMap)];
+        inputs.extend(FEEDBACK_INLET_PINS.iter()
+            .map(|p| PinDescriptor::new(p.display_name, p.signal_type).optional()));
+        let mut outputs = vec![PinDescriptor::new("AutoMap", SignalType::AutoMap)];
+        outputs.extend(FEEDBACK_OUTLET_PINS.iter()
+            .map(|p| PinDescriptor::new(p.display_name, p.signal_type)));
+        ModuleDescriptor {
+            id: "module.feedback_control",
+            display_name: "Feedback Control",
+            category: "AutoMap",
+            inputs,
+            outputs,
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}
+
+// ── Map Action ────────────────────────────────────────────────────────────
+//
+// Simplified Remapper-derived module: accepts an AutoMap input and exposes a
+// single Bool output that is true when any configured mapping (an AND of
+// listed pins) is currently held on the upstream bus. Mappings are stored
+// in `node.params["mappings"]` as `Array<Array<String>>`.
+#[derive(Default)]
+pub struct MapActionModule;
+
+impl Module for MapActionModule {
+    fn descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            id: "module.map_action",
+            display_name: "Map Action",
+            category: "AutoMap",
+            inputs:  vec![PinDescriptor::new("in",  SignalType::AutoMap)],
+            // Two separate outputs:
+            //   out        — Bool: "any mapping active". In analog mode this
+            //                is a freq-modulated tap train (Hold → PWM,
+            //                Turbo → ×2 frequency) so a digital destination
+            //                reflects how far the analog input is pushed.
+            //   out_analog — Float 0..1: the pure max magnitude across active
+            //                mappings (digital-active contributes 1.0). Drives
+            //                continuous destinations (axes / triggers).
+            outputs: vec![
+                PinDescriptor::new("Gate",   SignalType::Bool),
+                PinDescriptor::new("Analog", SignalType::Float),
+            ],
+        }
+    }
+    fn process(&mut self, _: &[Option<Signal>]) -> SmallVec<[Signal; 4]> { SmallVec::new() }
+}

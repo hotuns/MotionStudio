@@ -1,0 +1,768 @@
+//! HIDMaestro-backed Virtual Keyboard & Mouse.
+//!
+//! Same device id / pin contract as the SendInput (`enigo`) implementation in
+//! `windows::VirtualKeyMouse`, but the output lands as **real HID input
+//! reports** from two root-enumerated HIDMaestro nodes (profiles
+//! `hm-keyboard` / `hm-mouse`) instead of `SendInput` injection. Why this
+//! exists: user-mode injected input can be silently swallowed system-wide —
+//! groundtruthed on a Win11 26H1 ASUS machine where every `SendInput`
+//! (keyboard, relative and absolute mouse) was "accepted" by the API and eaten
+//! before reaching the desktop, while physical input flowed normally (vendor
+//! low-level-hook stack filtering `LLKHF_INJECTED`-style events). A kernel-side
+//! HID device is upstream of all of that — and games additionally see a
+//! genuine raw-input mouse.
+//!
+//! Differences from the enigo backend, on purpose:
+//! * **No typematic re-send** — the report holds the key down and the HOST
+//!   (kbdhid) generates auto-repeat, like a physical keyboard.
+//! * **Motion is emitted from `flush()`** (the I/O thread rate, 500 Hz
+//!   default) rather than a dedicated 1 kHz thread. Sub-pixel carry works the
+//!   same; at 500 Hz the int16 mickey deltas are simply 2× the 1 kHz ones. If
+//!   slow-aim smoothness ever needs the finer quantization back, raise the
+//!   polling rate or move the mouse writer onto its own thread — the report
+//!   builder is already self-contained.
+//! * **Braiding IS consulted** (`braid_try_mouse` gates the motion emit in
+//!   `flush()`), same as the enigo backend — NOT because HID frames need the
+//!   anti-coincidence property (they don't), but because the I/O loop gates
+//!   the virtual GAMEPAD's flush on `braid_try_gamepad()` whenever mixed mode
+//!   is on and braiding is enabled. The token must keep alternating: an
+//!   earlier version of this backend skipped braiding entirely, the token
+//!   parked on "mouse" after the first gamepad flush, and the virtual pad's
+//!   flush starved FOREVER (SHM SeqNo frozen on the create seed, games saw an
+//!   eternal neutral pad) while keyboard/mouse kept working.
+
+use std::collections::HashMap;
+use std::time::Instant;
+
+use flexinput_core::Signal;
+
+// The three nodes: HIDMaestro on Windows, UHID on Linux, with the same
+// profiles and reports.
+#[cfg(windows)]
+use crate::hidmaestro_device::HidMaestroDevice;
+#[cfg(target_os = "linux")]
+use crate::linux::uhid::UhidDevice as HidMaestroDevice;
+use crate::{layouts, SinkPin, VirtualDevice};
+
+/// Modifier bits of report byte 0 (left-hand variants).
+mod kbd_mod {
+    // The HID keyboard's modifier byte has always carried both sides; only the
+    // left half was ever set. A game that reads raw scancodes can tell them
+    // apart, and JSM configs name them apart (LSHIFT / RSHIFT), so we set the
+    // half that was asked for. Nothing about the report DESCRIPTOR changes —
+    // these are bits in a byte that was already there.
+    pub const CTRL: u8 = 0x01;
+    pub const SHIFT: u8 = 0x02;
+    pub const ALT: u8 = 0x04;
+    pub const WIN: u8 = 0x08;
+    pub const RCTRL: u8 = 0x10;
+    pub const RSHIFT: u8 = 0x20;
+    pub const RALT: u8 = 0x40;
+    pub const RWIN: u8 = 0x80;
+}
+
+/// The modifier byte for what is held.
+///
+/// Left and right are different bits of a byte the report always carried, so a
+/// game reading scancodes can tell them apart — which is the whole point of
+/// naming them apart. Pulled out of the report builder so the bit each one
+/// lands on can be tested; it is the kind of thing that is silently wrong.
+fn mods_byte(k: &KeysHeld) -> u8 {
+    let mut mods = 0u8;
+    if k.shift  { mods |= kbd_mod::SHIFT; }
+    if k.ctrl   { mods |= kbd_mod::CTRL; }
+    if k.alt    { mods |= kbd_mod::ALT; }
+    if k.win    { mods |= kbd_mod::WIN; }
+    if k.rshift { mods |= kbd_mod::RSHIFT; }
+    if k.rctrl  { mods |= kbd_mod::RCTRL; }
+    if k.ralt   { mods |= kbd_mod::RALT; }
+    if k.rwin   { mods |= kbd_mod::RWIN; }
+    mods
+}
+
+/// Map a learned-key pin name (egui key name, with or without the `key_`
+/// prefix — the same universe `windows::egui_key_name_to_enigo` accepts) to a
+/// HID Keyboard/Keypad usage (page 0x07). `None` = unmappable, pin ignored
+/// (mirrors the enigo backend returning `None`).
+fn key_name_to_hid_usage(name: &str) -> Option<u8> {
+    let rest = name.strip_prefix("key_").unwrap_or(name);
+    let n = rest.to_ascii_lowercase();
+    // Single character: letter or top-row digit.
+    if n.len() == 1 {
+        let c = n.chars().next()?;
+        if c.is_ascii_alphabetic() {
+            return Some(0x04 + (c as u8 - b'a'));
+        }
+        if c.is_ascii_digit() {
+            // '1'..'9' → 0x1E..0x26, '0' → 0x27.
+            return Some(if c == '0' { 0x27 } else { 0x1E + (c as u8 - b'1') });
+        }
+        return None;
+    }
+    // egui names its top-row digits Num0..Num9 (it has no numpad variants), so
+    // "numN" is the digit row too — matching what the enigo backend sends.
+    if let Some(d) = n.strip_prefix("num") {
+        if d.len() == 1 {
+            let c = d.chars().next()?;
+            if c.is_ascii_digit() {
+                return Some(if c == '0' { 0x27 } else { 0x1E + (c as u8 - b'1') });
+            }
+        }
+    }
+    if let Some(f) = n.strip_prefix('f') {
+        if let Ok(num) = f.parse::<u8>() {
+            return match num {
+                1..=12 => Some(0x3A + (num - 1)),  // F1..F12
+                13..=20 => Some(0x68 + (num - 13)), // F13..F20
+                _ => None,
+            };
+        }
+    }
+    Some(match n.as_str() {
+        "enter" | "return" => 0x28,
+        "escape" => 0x29,
+        "backspace" => 0x2A,
+        "tab" => 0x2B,
+        "space" => 0x2C,
+        "minus" => 0x2D,
+        "plus" | "equals" => 0x2E,
+        "openbracket" => 0x2F,
+        "closebracket" => 0x30,
+        "backslash" => 0x31,
+        "semicolon" => 0x33,
+        "quote" => 0x34,
+        "backtick" => 0x35,
+        "comma" => 0x36,
+        "period" => 0x37,
+        "slash" => 0x38,
+        "capslock" => 0x39,
+        "printscreen" => 0x46,
+        "pause" => 0x48,
+        "insert" => 0x49,
+        "home" => 0x4A,
+        "pageup" => 0x4B,
+        "delete" => 0x4C,
+        "end" => 0x4D,
+        "pagedown" => 0x4E,
+        "arrowright" => 0x4F,
+        "arrowleft" => 0x50,
+        "arrowdown" => 0x51,
+        "arrowup" => 0x52,
+        _ => return None,
+    })
+}
+
+#[derive(Default, Clone, Copy, PartialEq)]
+struct MouseButtons {
+    lmb: bool,
+    rmb: bool,
+    mmb: bool,
+    mb4: bool,
+    mb5: bool,
+}
+
+impl MouseButtons {
+    fn bits(self) -> u8 {
+        (self.lmb as u8)
+            | (self.rmb as u8) << 1
+            | (self.mmb as u8) << 2
+            | (self.mb4 as u8) << 3
+            | (self.mb5 as u8) << 4
+    }
+}
+
+/// One of the eight modifiers the HID keyboard's first byte carries.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mod {
+    Shift,
+    Ctrl,
+    Alt,
+    Win,
+    RShift,
+    RCtrl,
+    RAlt,
+    RWin,
+}
+
+/// Which modifier a pin holds down, if it is one.
+///
+/// Unsided and left-sided are the same modifier: pressing "Shift" means the
+/// left one on every keyboard anyone has held. A modifier pin that fell through
+/// this would be treated as a learned key, looked up for a HID usage it hasn't
+/// got, and dropped in silence — so every pin here is checked against that
+/// lookup by a test.
+fn modifier_slot(pin: &str) -> Option<Mod> {
+    Some(match pin {
+        "key_shift" | "key_lshift" => Mod::Shift,
+        "key_ctrl" | "key_lctrl" => Mod::Ctrl,
+        "key_alt" | "key_lalt" => Mod::Alt,
+        "key_win" | "key_lwin" => Mod::Win,
+        "key_rshift" => Mod::RShift,
+        "key_rctrl" => Mod::RCtrl,
+        "key_ralt" => Mod::RAlt,
+        "key_rwin" => Mod::RWin,
+        _ => return None,
+    })
+}
+
+#[derive(Default, Clone, Copy)]
+struct KeysHeld {
+    escape: bool,
+    // The left half doubles as the generic one: an unsided `key_shift` is what
+    // a keyboard sends when you press the shift most people mean.
+    shift: bool,
+    ctrl: bool,
+    alt: bool,
+    win: bool,
+    rshift: bool,
+    rctrl: bool,
+    ralt: bool,
+    rwin: bool,
+}
+
+impl KeysHeld {
+    fn set(&mut self, m: Mod, held: bool) {
+        match m {
+            Mod::Shift => self.shift = held,
+            Mod::Ctrl => self.ctrl = held,
+            Mod::Alt => self.alt = held,
+            Mod::Win => self.win = held,
+            Mod::RShift => self.rshift = held,
+            Mod::RCtrl => self.rctrl = held,
+            Mod::RAlt => self.ralt = held,
+            Mod::RWin => self.rwin = held,
+        }
+    }
+}
+
+/// Floor of the clamp on the dt applied per flush, so a scheduler gap moves at
+/// most this much worth of distance in one report instead of lurching (see the
+/// enigo thread's max_dt rationale). The clamp is 4× the flush interval (see
+/// `flush`), never below this: 4× the default 500 Hz tick. Without the scaling
+/// a slow output rate would sit at the clamp — 125 Hz is one 8 ms tick — and
+/// every late flush would drop motion.
+const MAX_DT_FLOOR: f32 = 0.008;
+/// Velocity unit: pixels per 60 Hz reference frame (unchanged pin semantics).
+const REF: f32 = 60.0;
+/// Analog scroll rate unit: notches per second at |rate| = 1.0. A full-deflection
+/// stick / touch-zone maps to a firm-but-controllable continuous scroll.
+const SCROLL_REF: f32 = 18.0;
+/// Most wheel notches one report carries (the field is int8); more waits in
+/// the carry for the next report.
+const WHEEL_NOTCHES_MAX: f32 = 127.0;
+
+pub struct VirtualKeyMouseHm {
+    pub muted: bool,
+
+    // Desired state accumulated by send(), consumed by flush().
+    mouse_vel_x: f32,
+    mouse_vel_y: f32,
+    // Absolute-displacement pointer move (mouse_move*): a one-shot px displacement
+    // applied DIRECTLY to the carry each flush (NOT integrated over dt like the
+    // velocity), so trackpad motion is exact and can't fly off when flush timing
+    // drifts. Accumulated by send(), drained (once) by flush().
+    mouse_disp_x: f32,
+    mouse_disp_y: f32,
+    scroll_delta: i32,   // vertical digital scroll clicks (scroll_up/down)
+    hscroll_delta: i32,  // horizontal digital scroll clicks (scroll_left/right)
+    scroll_vel_v: f32,   // analog vertical scroll rate (scroll_y), +up
+    scroll_vel_h: f32,   // analog horizontal scroll rate (scroll_x), +right
+    smooth_vel_v: f32,   // smooth scroll rate (trackpad_scroll_y), +up
+    smooth_vel_h: f32,   // smooth scroll rate (trackpad_scroll_x), +right
+    scroll_move_v: f32,  // scroll displacement in notches (scroll_move_y), +up
+    scroll_move_h: f32,  // scroll displacement in notches (scroll_move_x), +right
+    buttons: MouseButtons,
+    keys: KeysHeld,
+    learned_keys: HashMap<String, bool>,
+
+    // The two HIDMaestro nodes. Held as plain structs (not dyn) — their
+    // gamepad-oriented trait methods are unused; we drive them via
+    // write_raw_input. Drop tears both nodes down through the helper;
+    // persist_on_drop() forwards for keep-alive.
+    kbd: HidMaestroDevice,
+    mouse: HidMaestroDevice,
+    /// The media keys' Consumer Control node (`hm-consumer`). Optional: if it
+    /// doesn't come up, keys and mouse still work and media keys go nowhere.
+    media: Option<HidMaestroDevice>,
+    /// Media pins held, by pin.
+    media_held: HashMap<String, bool>,
+    last_media_report: [u8; 4],
+
+    // Mouse emission state (port of the enigo thread's logic, at flush rate).
+    carry_x: f32,
+    carry_y: f32,
+    scroll_carry_v: f32, // sub-notch remainder for analog vertical scroll
+    scroll_carry_h: f32, // sub-notch remainder for analog horizontal scroll
+    wheel_carry_v: f32,  // vertical wheel notches not yet reported
+    wheel_carry_h: f32,  // horizontal wheel notches not yet reported
+    last_emit: Instant,
+    last_mouse_report: [u8; 7],
+    mouse_report_dirty: bool,
+
+    // Keyboard emission state.
+    last_kbd_report: [u8; 8],
+}
+
+impl VirtualKeyMouseHm {
+    /// Create both HIDMaestro nodes via the elevated helper. Returns `None`
+    /// when either node comes up without an input section (driver not
+    /// installed / helper refused) so the factory can fall back to the
+    /// SendInput backend instead of presenting a dead device.
+    pub fn create() -> Option<Self> {
+        let kbd = HidMaestroDevice::create(
+            "virtual.keymouse.kbd",
+            "FlexInput Virtual Keyboard",
+            flexinput_hidmaestro::profile::presets::KEYBOARD_JSON,
+            0,
+        )?;
+        let mouse = HidMaestroDevice::create(
+            "virtual.keymouse.mouse",
+            "FlexInput Virtual Mouse",
+            flexinput_hidmaestro::profile::presets::MOUSE_JSON,
+            0,
+        )?;
+        if !kbd.is_connected() || !mouse.is_connected() {
+            // Dropping tears down whichever node DID come up.
+            return None;
+        }
+        // Same index as the keyboard and mouse, so the three share a container
+        // and read as one device, like a keyboard with media keys.
+        let media = HidMaestroDevice::create(
+            "virtual.keymouse.media",
+            "FlexInput Virtual Media Keys",
+            flexinput_hidmaestro::profile::presets::CONSUMER_JSON,
+            0,
+        )
+        .filter(|m| m.is_connected());
+        if media.is_none() {
+            eprintln!("[keymouse_hm] media-key node didn't come up; media keys won't be sent");
+        }
+        Some(Self {
+            muted: false,
+            mouse_vel_x: 0.0,
+            mouse_vel_y: 0.0,
+            mouse_disp_x: 0.0,
+            mouse_disp_y: 0.0,
+            scroll_delta: 0,
+            hscroll_delta: 0,
+            scroll_vel_v: 0.0,
+            scroll_vel_h: 0.0,
+            smooth_vel_v: 0.0,
+            smooth_vel_h: 0.0,
+            scroll_move_v: 0.0,
+            scroll_move_h: 0.0,
+            buttons: MouseButtons::default(),
+            keys: KeysHeld::default(),
+            learned_keys: HashMap::new(),
+            kbd,
+            mouse,
+            media,
+            media_held: HashMap::new(),
+            last_media_report: [0; 4],
+            carry_x: 0.0,
+            carry_y: 0.0,
+            scroll_carry_v: 0.0,
+            scroll_carry_h: 0.0,
+            wheel_carry_v: 0.0,
+            wheel_carry_h: 0.0,
+            last_emit: Instant::now(),
+            last_mouse_report: [0; 7],
+            // One neutral frame after the node comes up, then the flag latches
+            // off for good. Covers a RECLAIMED node (the helper can hand back a
+            // node left alive from a previous run, whose last delivered report
+            // isn't necessarily neutral) without arming a repeat — see
+            // `reset_outputs`, which deliberately does NOT re-arm it.
+            mouse_report_dirty: true,
+            last_kbd_report: [0; 8],
+        })
+    }
+
+    /// Build the 8-byte keyboard report from held modifiers + learned keys.
+    fn build_kbd_report(&self) -> [u8; 8] {
+        let mut rep = [0u8; 8];
+        if !self.muted {
+            rep[0] = mods_byte(&self.keys);
+            let mut slot = 2;
+            if self.keys.escape && slot < 8 {
+                rep[slot] = 0x29;
+                slot += 1;
+            }
+            // 6KRO: keys beyond the 6 slots are dropped (a real keyboard would
+            // report ErrorRollOver; for graph-driven input, dropping the
+            // overflow is friendlier than blanking everything).
+            for (name, held) in &self.learned_keys {
+                if slot >= 8 { break; }
+                if !held { continue; }
+                if let Some(u) = key_name_to_hid_usage(name) {
+                    // The fixed escape pin and a learned "Escape" can coexist.
+                    if !rep[2..slot].contains(&u) {
+                        rep[slot] = u;
+                        slot += 1;
+                    }
+                }
+            }
+        }
+        rep
+    }
+
+    /// The media node's report: up to two held media keys' Consumer usages,
+    /// 16-bit little-endian, 0 for an empty slot.
+    fn build_media_report(&self) -> [u8; 4] {
+        if self.muted {
+            return [0; 4];
+        }
+        media_report(
+            self.media_held.iter().filter(|(_, held)| **held).map(|(pin, _)| pin.as_str()),
+        )
+    }
+}
+
+/// Two 16-bit Consumer-page usage slots from the held media pins, in table
+/// order so the same set always makes the same report.
+fn media_report<'a>(held: impl Iterator<Item = &'a str>) -> [u8; 4] {
+    let held: Vec<&str> = held.collect();
+    let mut rep = [0u8; 4];
+    let usages = flexinput_core::media::MEDIA_KEYS.iter()
+        .filter(|k| held.contains(&k.pin))
+        .map(|k| k.usage);
+    for (slot, u) in usages.take(2).enumerate() {
+        rep[slot * 2..slot * 2 + 2].copy_from_slice(&u.to_le_bytes());
+    }
+    rep
+}
+
+impl VirtualDevice for VirtualKeyMouseHm {
+    fn id(&self) -> &str { "virtual.keymouse" }
+    fn display_name(&self) -> &str { "Virtual Keyboard & Mouse" }
+    fn sink_pins(&self) -> &'static [SinkPin] { layouts::KEYMOUSE_DEFAULT_PINS }
+    fn is_connected(&self) -> bool { self.kbd.is_connected() && self.mouse.is_connected() }
+
+    fn send(&mut self, pin: &str, value: Signal) {
+        // Pin semantics identical to windows::VirtualKeyMouse::send.
+        match pin {
+            "mouse" => { if let Signal::Vec2(v) = value { self.mouse_vel_x += v.x; self.mouse_vel_y += -v.y; } }
+            "mouse_x"       => { if let Signal::Float(f) = value { self.mouse_vel_x += f; } }
+            "mouse_y"       => { if let Signal::Float(f) = value { self.mouse_vel_y += -f; } }
+            // Absolute pointer move (+Y up, so negate for screen y-down like "mouse").
+            "mouse_move"    => { if let Signal::Vec2(v) = value { self.mouse_disp_x += v.x; self.mouse_disp_y += -v.y; } }
+            "mouse_move_x"  => { if let Signal::Float(f) = value { self.mouse_disp_x += f; } }
+            "mouse_move_y"  => { if let Signal::Float(f) = value { self.mouse_disp_y += -f; } }
+            "scroll_up"     => { self.scroll_delta  += crate::scroll_notches(value); }
+            "scroll_down"   => { self.scroll_delta  -= crate::scroll_notches(value); }
+            "scroll_right"  => { self.hscroll_delta += crate::scroll_notches(value); }
+            "scroll_left"   => { self.hscroll_delta -= crate::scroll_notches(value); }
+            "scroll_y"      => { if let Signal::Float(f) = value { self.scroll_vel_v += f; } }
+            "scroll_x"      => { if let Signal::Float(f) = value { self.scroll_vel_h += f; } }
+            "trackpad_scroll_y" => { if let Signal::Float(f) = value { self.smooth_vel_v += f; } }
+            "trackpad_scroll_x" => { if let Signal::Float(f) = value { self.smooth_vel_h += f; } }
+            "scroll_move_y" => { if let Signal::Float(f) = value { self.scroll_move_v += f; } }
+            "scroll_move_x" => { if let Signal::Float(f) = value { self.scroll_move_h += f; } }
+            "mouse_left"    => { if let Signal::Bool(b) = value { self.buttons.lmb = b; } }
+            "mouse_right"   => { if let Signal::Bool(b) = value { self.buttons.rmb = b; } }
+            "mouse_middle"  => { if let Signal::Bool(b) = value { self.buttons.mmb = b; } }
+            "mouse_back"    => { if let Signal::Bool(b) = value { self.buttons.mb4 = b; } }
+            "mouse_forward" => { if let Signal::Bool(b) = value { self.buttons.mb5 = b; } }
+            "key_escape"    => { if let Signal::Bool(b) = value { self.keys.escape = b; } }
+            // Media keys go to their own Consumer Control node.
+            p if flexinput_core::media::is_media_pin(p) => {
+                self.media_held.insert(p.to_string(), value.as_bool());
+            }
+            // The modifiers go to the report's first byte rather than into the
+            // key array — see `modifier_slot`.
+            p if modifier_slot(p).is_some() => {
+                if let (Some(m), Signal::Bool(b)) = (modifier_slot(p), value) {
+                    self.keys.set(m, b);
+                }
+            }
+            _ => { if let Signal::Bool(b) = value { self.learned_keys.insert(pin.to_string(), b); } }
+        }
+    }
+
+    fn flush(&mut self) {
+        let now = Instant::now();
+
+        // ── Keyboard ─────────────────────────────────────────────────────────
+        // Level-triggered: write only when the report actually changes; the
+        // host does typematic repeat on its own.
+        let kbd_rep = self.build_kbd_report();
+        if kbd_rep != self.last_kbd_report {
+            self.kbd.write_raw_input(&kbd_rep);
+            self.last_kbd_report = kbd_rep;
+        }
+        // Media keys, the same way: on change only; the host repeats a held
+        // volume key itself.
+        let media_rep = self.build_media_report();
+        if media_rep != self.last_media_report {
+            if let Some(m) = self.media.as_mut() {
+                m.write_raw_input(&media_rep);
+            }
+            self.last_media_report = media_rep;
+        }
+
+        // ── Mouse ────────────────────────────────────────────────────────────
+        // dt-scaled velocity → sub-pixel carry → int16 mickeys (same math as
+        // the enigo thread, at flush cadence).
+        let max_dt = (4.0 / crate::slowest_output_hz()).max(MAX_DT_FLOOR);
+        let dt = (now - self.last_emit).as_secs_f32().min(max_dt);
+        self.last_emit = now;
+
+        // Physical-mouse suppression: pointer motion yields for the configured
+        // window after another mouse is used (see `physical_mouse`).
+        let suppressed = crate::physical_mouse::suppressing();
+
+        let vel_x = std::mem::take(&mut self.mouse_vel_x);
+        let vel_y = std::mem::take(&mut self.mouse_vel_y);
+        let disp_x = std::mem::take(&mut self.mouse_disp_x);
+        let disp_y = std::mem::take(&mut self.mouse_disp_y);
+        let scroll = std::mem::take(&mut self.scroll_delta);
+        let hscroll = std::mem::take(&mut self.hscroll_delta);
+        let scroll_vel_v = std::mem::take(&mut self.scroll_vel_v);
+        let scroll_vel_h = std::mem::take(&mut self.scroll_vel_h);
+        let smooth_vel_v = std::mem::take(&mut self.smooth_vel_v);
+        let smooth_vel_h = std::mem::take(&mut self.smooth_vel_h);
+        let scroll_move_v = std::mem::take(&mut self.scroll_move_v);
+        let scroll_move_h = std::mem::take(&mut self.scroll_move_h);
+
+        // Mixed-output braiding: keep the shared turn token alternating (see
+        // module docs — the gamepad flush is gated on the other side of this
+        // token). Between our turns the carry keeps accumulating, so no motion
+        // is lost; buttons/scroll are unaffected, mirroring the enigo backend.
+        let emit_move = if crate::MOUSE_MIXED_MODE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::braid_try_mouse()
+        } else {
+            true
+        };
+
+        let mut rep = [0u8; 7];
+        if !self.muted {
+            // Velocity → integrated over dt; displacement → applied once as-is.
+            // A physical mouse in use pauses only the MOTION, dropped rather
+            // than banked so it can't discharge as a jump: buttons and the
+            // wheel don't fight its cursor, and holding them back delayed every
+            // click made during a pause.
+            if suppressed {
+                self.carry_x = 0.0;
+                self.carry_y = 0.0;
+            } else {
+                self.carry_x += vel_x * REF * dt + disp_x;
+                self.carry_y += vel_y * REF * dt + disp_y;
+            }
+            let (mut dx, mut dy) = (0i32, 0i32);
+            if emit_move {
+                dx = (self.carry_x.trunc() as i32).clamp(-32767, 32767);
+                dy = (self.carry_y.trunc() as i32).clamp(-32767, 32767);
+                self.carry_x -= dx as f32;
+                self.carry_y -= dy as f32;
+            }
+            // Scroll, in whole notches (the wheel has no finer resolution):
+            // digital clicks, the analog rate through its own sub-notch carry,
+            // and the smooth rate / scroll_move pins through the wheel carry,
+            // which also holds a burst past one report's range for the next.
+            // Scroll isn't braid-gated (like the wheel already wasn't), so it
+            // emits every flush.
+            self.scroll_carry_v += scroll_vel_v * SCROLL_REF * dt;
+            self.scroll_carry_h += scroll_vel_h * SCROLL_REF * dt;
+            let vclicks = self.scroll_carry_v.trunc();
+            let hclicks = self.scroll_carry_h.trunc();
+            self.scroll_carry_v -= vclicks;
+            self.scroll_carry_h -= hclicks;
+            let smooth_v = smooth_vel_v * SCROLL_REF * dt + scroll_move_v;
+            let smooth_h = smooth_vel_h * SCROLL_REF * dt + scroll_move_h;
+            self.wheel_carry_v += scroll as f32 + vclicks + smooth_v;
+            self.wheel_carry_h += hscroll as f32 + hclicks + smooth_h;
+            let vcounts = self.wheel_carry_v.trunc().clamp(-WHEEL_NOTCHES_MAX, WHEEL_NOTCHES_MAX);
+            let hcounts = self.wheel_carry_h.trunc().clamp(-WHEEL_NOTCHES_MAX, WHEEL_NOTCHES_MAX);
+            self.wheel_carry_v -= vcounts;
+            self.wheel_carry_h -= hcounts;
+            rep[0] = self.buttons.bits();
+            rep[1..3].copy_from_slice(&(dx as i16).to_le_bytes());
+            rep[3..5].copy_from_slice(&(dy as i16).to_le_bytes());
+            rep[5] = vcounts as i8 as u8;  // vertical wheel
+            rep[6] = hcounts as i8 as u8;  // horizontal (AC Pan)
+        } else {
+            // Muted: zero deltas, all buttons released, and the banked carry
+            // (motion + scroll) is discarded so it can't discharge as a jump
+            // later.
+            self.carry_x = 0.0;
+            self.carry_y = 0.0;
+            self.scroll_carry_v = 0.0;
+            self.scroll_carry_h = 0.0;
+            self.wheel_carry_v = 0.0;
+            self.wheel_carry_h = 0.0;
+        }
+
+        // Relative device: identical all-zero frames carry no information, so
+        // only write when something moved/changed vs the last frame (buttons
+        // level, motion, or wheel). A button release IS a change and gets its
+        // report.
+        let has_motion = rep[1..7] != [0; 6];
+        if has_motion || rep != self.last_mouse_report || self.mouse_report_dirty {
+            self.mouse.write_raw_input(&rep);
+            if rep[1..5] != [0; 4] {
+                crate::count_mouse_report();
+            }
+            self.mouse_report_dirty = false;
+            self.last_mouse_report = rep;
+        }
+    }
+
+    fn reset_outputs(&mut self) {
+        self.mouse_vel_x = 0.0;
+        self.mouse_vel_y = 0.0;
+        self.mouse_disp_x = 0.0;
+        self.mouse_disp_y = 0.0;
+        self.scroll_delta = 0;
+        self.hscroll_delta = 0;
+        self.scroll_vel_v = 0.0;
+        self.scroll_vel_h = 0.0;
+        self.smooth_vel_v = 0.0;
+        self.smooth_vel_h = 0.0;
+        self.scroll_move_v = 0.0;
+        self.scroll_move_h = 0.0;
+        self.buttons = MouseButtons::default();
+        self.keys = KeysHeld::default();
+        for v in self.learned_keys.values_mut() { *v = false; }
+        for v in self.media_held.values_mut() { *v = false; }
+        self.carry_x = 0.0;
+        self.carry_y = 0.0;
+        self.scroll_carry_v = 0.0;
+        self.scroll_carry_h = 0.0;
+        self.wheel_carry_v = 0.0;
+        self.wheel_carry_h = 0.0;
+        // Do NOT force a report here. The I/O thread calls reset_outputs() on
+        // this device EVERY TICK whenever it's bypassed or not referenced by the
+        // active tab, so arming `mouse_report_dirty` on each call made an idle
+        // virtual mouse write a zero-delta HID report at the full polling rate
+        // (up to 1 kHz). Games that pick their glyph set from "which device
+        // reported last" then see a permanently-active mouse racing the virtual
+        // pad — keyboard/gamepad glyph flicker, and a cursor re-lock (warp to
+        // screen centre) on every flip. `flush()` already emits the release
+        // frame on the neutral TRANSITION via `rep != last_mouse_report`; once
+        // neutral, silence is correct for a relative device.
+        self.flush();
+    }
+
+    fn persist_on_drop(&mut self) {
+        self.kbd.persist_on_drop();
+        self.mouse.persist_on_drop();
+        if let Some(m) = self.media.as_mut() {
+            m.persist_on_drop();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The media report carries the held keys' Consumer usages, two at most,
+    /// little-endian, the same set always in the same order.
+    #[test]
+    fn media_keys_land_as_consumer_usages() {
+        assert_eq!(media_report(std::iter::empty()), [0, 0, 0, 0]);
+        assert_eq!(media_report(["media_volume_up"].into_iter()), [0xE9, 0x00, 0, 0]);
+        let both = media_report(["media_volume_up", "media_mute"].into_iter());
+        assert_eq!(both, media_report(["media_mute", "media_volume_up"].into_iter()));
+        assert_eq!(both, [0xE2, 0x00, 0xE9, 0x00], "mute is before volume up on the row");
+        let three = media_report(["media_stop", "media_mute", "media_play_pause"].into_iter());
+        assert_eq!(three, [0xCD, 0x00, 0xB7, 0x00], "a third is dropped");
+    }
+
+
+    /// Every modifier pin reaches the modifier byte, and none of them is a
+    /// learned key. One that fell through would be looked up for a HID usage it
+    /// hasn't got and dropped without a word — which is how a Shift mapping
+    /// that used to work stops working and says nothing.
+    #[test]
+    fn every_modifier_pin_reaches_a_modifier() {
+        for (pin, want) in [
+            ("key_shift", Mod::Shift), ("key_lshift", Mod::Shift), ("key_rshift", Mod::RShift),
+            ("key_ctrl", Mod::Ctrl), ("key_lctrl", Mod::Ctrl), ("key_rctrl", Mod::RCtrl),
+            ("key_alt", Mod::Alt), ("key_lalt", Mod::Alt), ("key_ralt", Mod::RAlt),
+            ("key_win", Mod::Win), ("key_lwin", Mod::Win), ("key_rwin", Mod::RWin),
+        ] {
+            assert_eq!(modifier_slot(pin), Some(want), "{pin}");
+            assert_eq!(
+                key_name_to_hid_usage(pin), None,
+                "{pin} is a modifier AND a key usage, so which one wins is luck"
+            );
+            // And setting it shows up in the byte.
+            let mut k = KeysHeld::default();
+            k.set(want, true);
+            assert_ne!(mods_byte(&k), 0, "{pin} sets nothing");
+        }
+        assert_eq!(modifier_slot("key_a"), None, "an ordinary key is not a modifier");
+        assert_eq!(modifier_slot("key_capslock"), None, "nor is caps lock");
+    }
+
+    /// Each modifier is its own bit of the byte, in the order the HID keyboard
+    /// spec lays them out. A game that reads scancodes sees these directly, so
+    /// getting a bit wrong is a wrong key with no error anywhere.
+    #[test]
+    fn the_modifier_byte_carries_both_sides() {
+        let mut k = KeysHeld::default();
+        assert_eq!(mods_byte(&k), 0x00);
+        // Unsided means left — the shift most people mean.
+        k.shift = true;
+        assert_eq!(mods_byte(&k), 0x02);
+        k.rshift = true;
+        assert_eq!(mods_byte(&k), 0x22, "and the right one is a bit of its own");
+
+        // The spec's order: LCTRL, LSHIFT, LALT, LGUI, then the same on the right.
+        for (set, want) in [
+            ((|k: &mut KeysHeld| k.ctrl = true) as fn(&mut KeysHeld), 0x01u8),
+            (|k| k.shift = true, 0x02),
+            (|k| k.alt = true, 0x04),
+            (|k| k.win = true, 0x08),
+            (|k| k.rctrl = true, 0x10),
+            (|k| k.rshift = true, 0x20),
+            (|k| k.ralt = true, 0x40),
+            (|k| k.rwin = true, 0x80),
+        ] {
+            let mut one = KeysHeld::default();
+            set(&mut one);
+            assert_eq!(mods_byte(&one), want, "one modifier, one bit");
+        }
+    }
+
+    /// The learned-key universe must map to the correct HID usages — same
+    /// names `windows::egui_key_name_to_enigo` accepts, both bare ("A") and
+    /// Remapper-prefixed ("key_a") forms.
+    #[test]
+    fn key_names_map_to_hid_usages() {
+        // Letters (bare + prefixed + case).
+        assert_eq!(key_name_to_hid_usage("A"), Some(0x04));
+        assert_eq!(key_name_to_hid_usage("key_a"), Some(0x04));
+        assert_eq!(key_name_to_hid_usage("z"), Some(0x1D));
+        // Top-row digits, both bare and egui's NumN spelling.
+        assert_eq!(key_name_to_hid_usage("1"), Some(0x1E));
+        assert_eq!(key_name_to_hid_usage("9"), Some(0x26));
+        assert_eq!(key_name_to_hid_usage("0"), Some(0x27));
+        assert_eq!(key_name_to_hid_usage("num0"), Some(0x27));
+        assert_eq!(key_name_to_hid_usage("key_num5"), Some(0x22));
+        // F-keys: contiguous F1..F12 block, then the F13.. block.
+        assert_eq!(key_name_to_hid_usage("f1"), Some(0x3A));
+        assert_eq!(key_name_to_hid_usage("F12"), Some(0x45));
+        assert_eq!(key_name_to_hid_usage("f13"), Some(0x68));
+        assert_eq!(key_name_to_hid_usage("f20"), Some(0x6F));
+        assert_eq!(key_name_to_hid_usage("f21"), None);
+        // Named keys.
+        assert_eq!(key_name_to_hid_usage("Enter"), Some(0x28));
+        assert_eq!(key_name_to_hid_usage("Return"), Some(0x28));
+        assert_eq!(key_name_to_hid_usage("Space"), Some(0x2C));
+        assert_eq!(key_name_to_hid_usage("key_arrowleft"), Some(0x50));
+        assert_eq!(key_name_to_hid_usage("ArrowUp"), Some(0x52));
+        assert_eq!(key_name_to_hid_usage("PageDown"), Some(0x4E));
+        assert_eq!(key_name_to_hid_usage("PrintScreen"), Some(0x46));
+        // Unmappable stays unmapped (pin silently ignored, like enigo path).
+        assert_eq!(key_name_to_hid_usage("mediaplay"), None);
+        assert_eq!(key_name_to_hid_usage("?"), None);
+    }
+
+    #[test]
+    fn mouse_button_bits_pack_in_descriptor_order() {
+        let b = MouseButtons { lmb: true, rmb: false, mmb: true, mb4: false, mb5: true };
+        assert_eq!(b.bits(), 0b10101);
+        assert_eq!(MouseButtons::default().bits(), 0);
+    }
+}

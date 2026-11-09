@@ -1,0 +1,27 @@
+schema_version = 1
+name = "光标操作"
+virtual_gamepad = "none"
+stick_deadzone = 0.12
+
+[stick_mouse]
+enabled = true
+stick = "left"
+speed = 1000.0
+deadzone = 0.15
+exponent = 1.6
+
+[gyro]
+enabled = false
+
+[[actions]]
+name = "确认"
+input = "south"
+output = "mouse:left"
+[[actions]]
+name = "右键"
+input = "east"
+output = "mouse:right"
+[[actions]]
+name = "返回"
+input = "back"
+output = "key:ESC"

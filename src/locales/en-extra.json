@@ -1,0 +1,10 @@
+{
+  "配置层不能改变虚拟输出设备": "An action layer cannot change the virtual output device",
+  "配置层触发阈值或释放回差无效": "Invalid layer activation threshold or release hysteresis",
+  "层触发阈值": "Layer activation threshold",
+  "层释放回差": "Layer release hysteresis",
+  "防回弹": "Rebound filtering",
+  "请先结束映射录入，再保存配置": "Finish recording bindings before saving the profile",
+  "配置层组合 {0} 无效": "Invalid action layer combination: {0}",
+  "该设备实例不支持自动隐藏，请选择可定位的实体 HID/XInput 接口": "This device instance cannot be hidden automatically. Select an identifiable physical HID/XInput interface"
+}

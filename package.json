@@ -1,0 +1,37 @@
+{
+  "name": "motion-studio",
+  "version": "0.15.2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "dev:web": "vite --host 127.0.0.1 --port 1435 --strictPort",
+    "build:web": "node scripts/verify-native-input.mjs && node scripts/verify-i18n.mjs && tsc --noEmit && vite build",
+    "build": "tauri build",
+    "package:portable": "node scripts/package-portable.mjs",
+    "engine:dev": "node scripts/build-engine.mjs",
+    "engine:build": "node scripts/build-engine.mjs --release",
+    "test": "cargo test --locked -p motion-core -p motion-engine -p motion-studio -p motion-filters -p flexinput-engine -p flexinput-devices -p flexinput-modules -p flexinput-virtual",
+    "pretest:ipc": "cargo build --locked -p motion-engine",
+    "test:ipc": "node --test tests/ipc.test.mjs",
+    "verify:resources": "node scripts/verify-resources.mjs",
+    "verify:i18n": "node scripts/verify-i18n.mjs",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "@types/react": "^18.2.64",
+    "@types/react-dom": "^18.2.21",
+    "@types/three": "0.187.0",
+    "@vitejs/plugin-react": "^4.2.1",
+    "typescript": "^5.2.2",
+    "vite": "^7.2.2"
+  }
+}

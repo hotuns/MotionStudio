@@ -1,0 +1,60 @@
+# LB holds right mouse in both layers; only gyro sensitivity changes while held.
+# These are ordinary configurable actions and a sparse hold layer.
+schema_version = 1
+name = "按住配置层示例"
+virtual_gamepad = "none"
+stick_deadzone = 0.12
+stick_rebound_ms = 40
+
+[[actions]]
+name = "开镜"
+input = "left_shoulder"
+output = "mouse:right"
+threshold = 0.5
+
+[[actions]]
+name = "外圈奔跑"
+input = "left_stick_outer"
+output = "key:SHIFT"
+threshold = 0.5
+
+[[actions]]
+name = "短按换弹"
+input = "west"
+output = "key:R"
+threshold = 0.5
+trigger = "short"
+trigger_ms = 300
+
+[[actions]]
+name = "长按交互"
+input = "west"
+output = "key:E"
+threshold = 0.5
+trigger = "long"
+trigger_ms = 300
+sustain = true
+
+[gyro]
+enabled = true
+activation = "always"
+output = "mouse"
+counts_per_degree = 12.0
+sensitivity = 2.0
+
+[stick_zones]
+left_outer = 0.85
+right_outer = 0.85
+hysteresis = 0.05
+
+[[layers]]
+id = "precision"
+name = "精确瞄准"
+input = "left_shoulder"
+activation_threshold = 0.5
+activation_hysteresis = 0.1
+actions = []
+disabled_inputs = []
+
+[layers.settings.gyro]
+sensitivity = 0.55

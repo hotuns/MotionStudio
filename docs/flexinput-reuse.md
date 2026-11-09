@@ -1,0 +1,159 @@
+# Studio interaction over FlexInput
+
+The product is a Studio-style configuration and interaction layer over FlexInput. Users work with games, actions, gyro settings and profiles; internal processing graphs remain an implementation detail. Reuse existing FlexInput behavior before writing an alternative. The source stays pinned to `c69f53ad3bca4ed34ef5f2d63509addaa7c767be` (0.16.9) so upgrades are reviewable.
+
+For the complete upstream crate inventory, the current 0.8.0 integration and remaining optional scope, see [FlexInput 模块与接入范围](flexinput-module-plan.md).
+
+## Current boundaries
+
+| Responsibility | Implementation | Necessary Studio adaptation |
+|---|---|---|
+| Mapping evaluation, standard gamepad mapping, RWS | FlexInput core and engine graph/evaluator modules | Translate game/action settings into the graph; feed timestamped samples and expose telemetry |
+| Node definitions | Selected original `flexinput-modules` descriptors for processing, logic, math and generators | Build Studio graphs using upstream output metadata; preserve additional dynamic outlets and Studio source/sink nodes |
+| Coordinate spaces, orientation, IMU estimation | FlexInput 3DOF/IMU implementations | Activation, device calibration, profile lifecycle and Studio settings |
+| Curves, One Euro, decay, brake, angle snapping | Original `eval/modules/jsm/cc.rs` through the headless API | `motion_curves.rs` is a compatibility re-export for Studio profiles |
+| High-resolution output timing | FlexInput `HrWaiter`, used directly | Studio owns the sender thread and its cancellation boundaries; no global timer-resolution change |
+| Continuous HID mouse | FlexInput `keymouse_hm.rs::flush` behavior: accumulated displacement, default 500 Hz cadence, raw publication, signed count carry and one neutral transition | Consume Studio's already integrated displacement exactly once; preserve discrete chord/scroll ordering; cancel queued output on stop/switch |
+| HID transport, keyboard/mouse descriptors, gamepad encoding, GIP, feature answers, driver deployment | Pinned FlexInput HIDMaestro client and payloads | Studio-owned fixed-profile helper, device ownership, consent entry, error reporting and crash protection |
+| SendInput / ViGEm compatibility mode | Existing Studio Windows adapter remains during migration | This is a retained compatibility implementation, not claimed as fully migrated to FlexInput's enigo wrapper; its guardian and bindings must remain compatible before replacement |
+| Device input | From 0.7.0, the original FlexInput `SdlBackend`, with an event-oriented headless seam before poll aggregation | Preserve original event host/sensor timestamps and FIFO edges; select the exact device; expose existing Studio DTOs and physical/virtual classification. Native HID parsers are compiled but their providers are not the live input path |
+| Output device contract | Original FlexInput `VirtualDevice`, `SinkPin` and pin layouts | Fallible Studio bridge preserves chord/scroll ordering, asynchronous failures, displacement units and cancellation; transport remains the existing native HIDMaestro subset / explicit legacy adapter |
+| UI, configuration, profile switching, JSM conversion, process supervision | Studio | These translate the Studio product model and are not a competing mapping/gyro engine |
+
+## 0.6.1 mouse correction
+
+0.6.0 reused the native driver/client but added an inline ACK wait to every mouse report in the SDL processing thread. A slow confirmation could block sample processing, create a backlog, and trigger the existing 50 ms stale-input reset. This was a Studio adaptation error, not evidence that FlexInput itself had the same problem.
+
+The corrected path keeps input processing independent of key/mouse I/O. Continuous mouse output follows the upstream raw-stream path, with its default 500 Hz cadence, the original high-resolution timer, an absolute deadline and no repeated catch-up burst. Displacement is accumulated between output ticks; fractional input residuals stay intact. Like upstream, a transition to zero is emitted once and then an idle relative device stays silent.
+
+Extra confirmation is limited to discrete key/button/scroll and release boundaries on the I/O thread, where Studio must preserve short transitions and modifier ordering from its action model. It no longer blocks gyro sampling or paces every continuous mouse report. A bounded ordered queue, generation cancellation and a release/join boundary prevent a stopped profile from replaying old movement into the next one. The output thread never renews the main runtime's safety lease.
+
+`vendor/flexinput/crates/virtual/src/keymouse_hm.rs` and `crates/ui/src/app/threads.rs` retain the original reference source and hashes for comparing the adapted scheduling code; these references do not pull the FlexInput UI into the application. The original `hr_timer.rs` and pure curve file are compiled directly. 0.6.1 checked 111 vendor files; 0.7.0 checks 141.
+
+## 0.7.0 provider and contract integration
+
+`flexinput-devices` compiles the original SDL provider, identification, layouts, native parser and supporting pure modules through a headless entry. Audio, MIDI, networking, dedicated-radio and USB/IP startup dependencies are excluded. The runtime uses the upstream all-SDL option, not the native HID polling providers. Their timestamped interfaces remain future work; merely compiling a parser does not claim that its reader is active.
+
+The event seam captures SDL gamepad events before the upstream sensor pairing/filtering/average. It keeps identical samples, sensor and host clocks, button down/up and axis order. Its bounded queue faults on overflow. It lets SDL's internal watcher translate joystick events, then flushes the unused joystick queue without pumping window messages. Selection/switch resets the capture queue; enumeration only probes capabilities and releases unselected pads. Sensor enablement and the upstream frozen-stream watchdog belong to the selected provider; UI navigation disables sensors.
+
+Studio's former SDL event parser/reader is removed. `crates/engine/src/sdl.rs` is now a device DTO, discovery-settling and lifecycle bridge plus the synthetic verification fixture. Coordinate permutations call the original upstream functions. The verified patched SDL 3.4.18 remains the sole SDL runtime; sdl3-rs 0.20.0 and sdl3-sys 0.7.1 are bindings only. The x64 import library is pinned to SHA-256 `06f305d73771f0212fc409d8b487e7a0aa72ae9af98a62faa6f3e6db02ab0978`. MSVC delayed imports let the engine preload the absolute DLL path; the module remains pinned across stop/reconnect so cached import thunks cannot reference an unloaded DLL. Builds inspect the PE imports and reject static/source SDL features.
+
+The release engine is built in a separate explicit x64 target directory with `crt-static` applied to every target dependency, including hidapi's C build. Applying it only to the final executable mixes C runtimes and fails to link. The desktop build retains its own cache/CRT choice; only the verified resulting engine is copied into resources and the conventional release location.
+
+`flexinput-modules` supplies the original selected node descriptors. `flexinput-virtual` supplies the original output-device contract and layouts through a headless entry. `FlexVirtualSink` translates existing Studio atomic outputs into those pins and reports failures back to the dispatcher. Studio uses the HIDMaestro transport and retains the SendInput/ViGEm compatibility path. The headless entry keeps ownership of devices and outputs in the Studio worker.
+
+The new source set verifies 24 original files against the pinned Git tree blob IDs, preserves their original SHA-256 values, and records 6 added headless/build/event API files separately. Original root `lib.rs` entries retained for reference are not the build entry. Modifications to the SDL provider expose raw events and lifecycle options; other source changes isolate dependencies and disable upstream tests that enumerate physical devices. Automated tests never enable those hardware paths.
+
+## 0.8.0 mapping visibility lifecycle
+
+The native control surface is the original `crates/hidmaestro/src/hidhide.rs` at the same pinned commit. Its original Git blob and SHA-256 are retained; the port adds checked opening, checked list/flag reads and inverse-mode inspection. Failed reads never become empty policy. The headless HIDMaestro entry exports it. The devices headless entry exposes the existing `devnode` helpers and includes the XInput instance ID, enabling topology selection without another enumeration implementation. Current integrity coverage is 142 vendor files.
+
+Studio owns a write-ahead session journal, physical target selection and an ordinary-user recovery companion. The pinned upstream helper has broader responsibilities and is not imported wholesale. Official HidHide documentation permits ordinary-user control and describes physical XInput/USB masking; historical upstream elevation/HID-only comments are explicitly annotated. Automatic hiding is separate from persisted manual rules and never targets virtual output roots. HIDMaestro's existing device creation returns exact roots to verify output visibility before dispatch. See [HidHide lifecycle](hidhide-lifecycle.md) for ownership, recovery and compatibility limits.
+
+## 0.8.0 practical feature review
+
+The 0.8.2 visibility correction remains in Studio's topology adapter. A complete physical USB ancestry reaches `ROOT\ACPI_HAL\...`, so that computer node is neutral ancestry while still forbidden as a hide target. HID roles combine hardware IDs and compatible IDs through the existing `devnode::strings_property`; ordinary HID collections can have an empty compatible-ID list. The original `xinput_devnodes` reports the actual XUSB interface instance. On composite controllers the adapter masks that independent USB function and its gaming HID children, keeping keyboard/mouse/unknown sibling functions outside the affected branch. If XUSB is the common USB parent, the original shared-function rejection remains. No vendor algorithms or driver payloads change. Regression fixtures reproduce the APEX 6 layout without a device-model whitelist or live driver writes.
+
+After the input/output integration, the pinned implementation was reviewed for practical functions that fit Studio's action-based UI. The following additions now execute the original implementation, rather than an independent timing or geometry algorithm:
+
+| Feature | Pinned implementation | Headless adaptation and Studio ownership |
+|---|---|---|
+| Hold, short, long, double, press-edge, release-edge | `engine/src/eval/activation.rs::apply_press_mode` | A public opaque `PressGate` retains its five state slots; Studio supplies action configuration, elapsed time, chord priority, snapshot suppression and lifecycle resets |
+| Turbo | `activation.rs::apply_turbo` | The gate runs first, then turbo with a separate action period; existing wheel repeat remains a separate Studio option |
+| Radial inner/outer stick areas | `core/src/area.rs::{AreaLayout,Border,Shape}` and `band_of` | Existing geometry is configured as a circular ring; Studio adds bounded per-stick thresholds, hysteresis, a neutral exclusion and ordinary named action inputs |
+| Stick rebound suppression | `engine/src/eval/device_cal.rs::StickRebound::step` | Only type and method visibility changes; Studio exposes a bounded optional duration and advances expiry when no further axis event arrives |
+| Physical controller hiding | `hidmaestro/src/hidhide.rs`; `devices/src/devnode.rs` | Original native control and topology queries; Studio owns checked policy, exact output-node protection, write-ahead journal and recovery lease |
+
+The activator port includes one behavior correction: once the second double press has been recognized, its held state is no longer cancelled by the recognition window expiring. Recognition still expires before the second press. The original SHA-256 for `activation.rs` is `df3820738330d9e85339b0e5e4a032dd9b296fa5b73102dd6263df0e4118aa85`; for `device_cal.rs` it is `0a7f3810f3150c47012dc0ddaed26324b83af28015baf46272022727973e53fe`. Both original hashes and Git blobs, current hashes and narrowly scoped patch notes are retained in the 142-file vendor manifest.
+
+General hold layers are a Studio configuration adapter over the existing engine. Their sparse patches inherit unmodified fields, replace actions by canonical input and stack in explicit order. All nonempty combinations of the bounded eight layers are validated before accepting a configuration. Runtime reconfiguration preserves the sample clock, input bus, unchanged activator state, shared held outputs and current virtual device. No dedicated ADS branch was added. Hold modifiers use physical inputs and base geometry so a layer cannot invalidate its own trigger by changing a ring or filter. This follows the user-facing inheritance principle in [Steam Input action set layers](https://partner.steamgames.com/doc/features/steam_controller/action_set_layers?l=english), not its API or a claim of complete Steam Input behavior parity.
+
+Recording now uses an output-only pause lease. It retains the input, output device and visibility session, suppresses all automatic profile switching, and resumes only after neutral physical controls. The Windows profile-switch overlay and UI localization belong to the Studio shell; neither is a competing input or motion implementation.
+
+Reviewed further candidates remain explicit:
+
+- **Basic rumble return:** useful next integration. It spans `VirtualDevice::poll_outputs`, feedback routing and `DeviceBackend::send`. The current sink handles inputs but does not route game feedback to the physical device; preserving selected-device identity, output ownership and disconnect release requires a separate bounded integration and real-device acceptance.
+- **Additional touch zones / gestures:** upstream area and touch helpers are relevant, but touch coordinates and contacts must first be exposed by the live timestamped input path. Current SDL event seam carries gamepad buttons, axes and sensors; compiled parsing code is not equivalent to live contact support.
+- **Native HID providers:** potentially useful for device-specific reports; still deferred until they expose the same raw clocks, FIFO transitions and overflow contract as the active SDL provider. Replacing a working event path with a sampled poll would violate the existing contract.
+- **DualSense adaptive triggers, audio/haptics, dedicated radio, Joy-Con 2, USB/IP and networking:** retain as optional device/product scopes. They need additional device, feedback or transport contracts and are not prerequisites for the current mapping features.
+- **Multiple-device motion fusion:** excluded as requested. Single-device gyro, accelerometer, orientation and gravity-relative processing remain enabled.
+
+These candidates were inspected, not silently enabled. The user guide explains the shipped features and their limits in [action-layers-and-triggers.md](action-layers-and-triggers.md).
+
+## 0.9.1 keyboard output coverage
+
+Keyboard coverage is now driven by a shared Studio key catalogue used for the picker, physical-key recording, profile validation, modifier ordering and Windows virtual-key conversion. The headless `flexinput-virtual` entry exposes the original pure `key_name_to_hid_usage` lookup extracted verbatim from `crates/virtual/src/keymouse_hm.rs` at c69f53ad3bca4ed34ef5f2d63509addaa7c767be. Only the lookup's visibility changes; it does not compile the upstream GUI/device owner or alter transport. The source file and derived API retain their hashes and provenance in the vendor manifest.
+
+Studio adapts its existing key identifiers (ESC, UP, etc.) to the original lookup. Standard number-pad keys, Num Lock, Scroll Lock, the application key and F21–F24 are absent from that upstream lookup; their catalogue entries explicitly use the USB keyboard-page usages verified against the already pinned SDL scancode definitions. Left/right modifier bits follow the original HIDMaestro modifier byte. F12 remains excluded because the input engine owns emergency stop. Media/consumer-page keys are not offered by the boot-keyboard sink. No driver or descriptor change is required.
+
+The existing Caps Lock gap was in Studio's selected subset, rather than upstream support: the original lookup already maps it to usage 0x39. Esc was already supported by the sinks but was intercepted by recording cancellation. The editor exposes an explicit assignment while preserving Escape-to-cancel.
+
+## 0.10.0 custom processing seam
+
+The pinned `crates/engine/src/eval/registry.rs` has internal, static module hooks; it does not expose a user-script runtime or external registration interface. Studio therefore adds the optional `motion-filters` crate and three per-sample processing seams around the existing motion adapter. The original FlexInput coordinate projection, built-in filtering, curves, input provider and output transports remain the execution path around those seams. No second built-in filter implementation replaces them.
+
+Rhai 1.27.0 implements the first `SampleProcessor` backend. It compiles source off the sample path, binds private state through the documented `this` contract, and accepts timed numeric values only. Ordered instances share a sample operation budget and report faults as sticky bypasses. The profile and UI adapt configuration, parameters, layers, diagnostics and synthetic preview. These are missing application contracts rather than a rewrite of an upstream algorithm. Timestamp FIFO, measurement bypass and session ownership stay in the existing engine. The headless preview CLI links only the pure filter crate.
+
+The time-based EMA and median scripts are authoring examples of the extension interface, selected explicitly by users; existing default algorithms continue to use FlexInput. Rhai license texts are retained under `licenses/`, with its exact version in Cargo.lock.
+
+## 0.10.0 complete physical-source integration
+
+Studio publishes real left_stick/right_stick pins into the original eval_graph_tick physical-source pipeline. device_cal.rs performs center/radial/trigger calibration, per-side deadzones, rebound filtering and digital trigger hysteresis/debounce before controls, rings, Flick, ordinary mouse and virtual gamepads consume the shared result. Scalar stick axes are expanded from the original calibrated Vec2 so every reader sees the same radial correction. Base-profile input remains separate for stable hold-layer activation. Raw recording, navigation and the timestamped sensor FIFO retain their existing contracts.
+
+The original RWS file is restored byte-for-byte: SHA-256 fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96. There is no stick_aim_deadzone algorithm patch. Flick thresholds use processed travel, as on an original physical-source graph. Legacy mouse exponents are converted once to 129-point native vec_response_curve configuration; original RWS integrates the result. The headless input entry contains no second calibration/deadzone implementation. Web builds check default metadata against pinned public constants.
+
+See [native-input-output.md](native-input-output.md) for the current audit and remaining contracts, and [stick-aim-deadzones.md](stick-aim-deadzones.md) for settings and legacy-file behavior.
+
+## 0.10.0 native output integration
+
+The original `virtual/src/hidmaestro_device.rs` is compiled directly through the headless entry, with `sony_feedback.rs` and the original HIDMaestro helper client modules. The helper client is linked for the original type's API; Studio opens sections created by its existing constrained lifecycle owner and does not call the original global helper creation entry. The original `apply_pin` function is exposed from a derived source file with only its visibility changed. Native HID/GIP encoding and device flush/reset remain original code. Native device tests that open shared sections are opt-in, so automatic checks cannot attach to another application's output section.
+
+The ViGEm Xbox/DS4 classes are derived from the gamepad section of `virtual/src/windows.rs`; keyboard/Enigo and optional composite USB startup stay outside this entry. The headless derivation adds fallible `flush_checked` methods and an Xbox player-index accessor: the original report construction, target creation, feedback and reset bodies are retained, while errors previously discarded by `flush` are returned to Studio's release-on-fault lifecycle. Original `flush` delegates to the checked method. Source files, derived ranges, original hashes and current hashes are recorded before vendor checks are updated. This exposes existing implementations rather than adding new report algorithms.
+
+Studio selects keyboard/mouse and gamepad backends independently. Standard Xbox/DS4 output defaults to native ViGEm, while native HIDMaestro gamepad output remains an explicit choice. HIDMaestro readiness requires the owned companion's original `orchestrator::node_diag` to confirm a started, problem-free XUSB interface; a global interface count or shared-memory handshake alone is insufficient. ViGEm uses its original target readiness and Xbox player index. Studio forwards actual target metadata through all sink wrappers. HidHide protection includes the virtual nodes enumerated during native ViGEm creation, using the existing read-only topology inventory; no devices are disabled or reordered.
+
+For each capability, identify the upstream module, the callable interface and the missing Studio contract. Expose a small headless API when the implementation exists but is coupled to the upstream app. Keep configuration conversion and runtime ownership in Studio; move reusable processing and transport behavior into the pinned FlexInput layer. Preserve behavior with contract tests before removing an adapter. A module is not considered migrated merely because it uses the same driver or imitates its name.
+
+## 0.11.0 feedback and touch integration
+
+This integration exposes the existing `DeviceBackend::send` path on the same selected SDL `OpenPad`, and the existing `LedOut::due` flush for event-mode sessions. It does not open another controller, run sampled `poll()`, change the native rumble encoder or replace native LED coalescing. Native virtual devices expose a monotonic feedback-command sequence so capture, configuration switches and reconnect can suppress old latched feedback until a fresh game command arrives; their report decoding and notification contents remain original.
+
+The timestamped SDL seam also retains touch down/motion/up events, using the original provider's single-pad/two-finger and split-pad coordinate convention. Native `eval_graph_tick` with `route_touchpad` runs the original `eval/trackpad.rs` state machine for pointer, two-finger scroll, tap and physical-click gestures. Studio supplies profile controls, contact previews and lifecycle baselines only. Recording and observing keep physical output disabled; entering mapping with fingers already held waits for a neutral baseline. Vendor API additions and event DTO changes are documented before their manifest hashes are updated.
+
+The real-DLL synthetic check caught the upstream initializer disabling all gamepad events before the event seam re-enables its chosen types. `devices/src/sdl_backend.rs` therefore also re-enables the three native touch event types in raw mode, alongside its existing axis/button/disconnect set. The sampled provider remains unchanged. This is event subscription wiring, not replacement touch processing; the integration check requires all three injected transitions, their timestamps and coordinates before evaluating native pointer output.
+
+## 0.12.0 shortcut inputs
+
+The shortcut path reads the existing base-profile physical source from FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Stick calibration and deadzones come from `crates/engine/src/eval/device_cal.rs`. The same `crates/core/src/area.rs` `AreaLayout::band_of` call classifies rings for actions, hold layers, and shortcuts. Touch contacts use the existing SDL event and field mapping. Studio supplies the base-profile ring bounds, hysteresis state, capture telemetry and profile toggle policy. Vendor files and hashes are unchanged.
+
+## 0.13.1 JSM conversion and two-stage triggers
+
+FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be` supplies the JSM parser in `eval/modules/jsm/parse.rs` and the trigger state machine in `eval/modules/jsm/analog.rs`. Studio asks the parser for supported trigger parameters during offline conversion. The converter translates actions and settings to Studio fields, resolves one level of explicitly selected static includes, and reports approximations with their source file and line.
+
+The headless port adds a trigger-only entry point that calls the same `Analog::trigger` implementation as JSM Config. `eval/modules/jsm/mod.rs` and `eval/modules/mod.rs` expose the entry point. `eval/device_cal.rs` exposes its existing range function so Studio can feed calibrated analog travel even when digital snap is enabled for the virtual pad. Studio supplies sample time, gates triggers held across reconnect or reload, and publishes the resulting stages as normal binding inputs. The state machine and calibration formulas are unchanged.
+
+The host runs Studio profiles. Legacy TOML files with embedded JSM source can be opened by the importer and converted to a new profile. Vendor provenance retains the upstream hashes and records the added entry points.
+
+## 0.14.0 device monitor
+
+The five bundled 3D models come from `app/assets/models` at FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`, with the original 3D Controller Overlay MIT notice. `node scripts/import-controller-models.mjs <extracted-upstream-root>` packs the original OBJ parts, `info.txt` transforms and color palettes into local GLB files. The asset manifest records the source and output hashes.
+
+The WebView follows the transforms in `crates/ui/src/model/obj.rs`, the input part mapping in `crates/ui/src/canvas/viewer/controller3d.rs` and the hinge and button travel in `crates/ui/src/model/callback.rs`. Studio publishes the canonical XYZW quaternion from the same `processing.gyro_3dof` orientation output and adapts its basis according to `crates/core/src/frames.rs`. The device page reads existing engine status events and animates the model locally. Preview recentering sets a page-local orientation reference.
+
+## 0.15.0 output preview
+
+Studio's HIDMaestro adapter records relative counts after the report writer succeeds, using the report layout and stream path from `crates/virtual/src/keymouse_hm.rs::flush` at FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. The synchronous SendInput path records quantized deltas after dispatch succeeds, and ObserveSink applies the same quantization for the simulated preview. Virtual sticks and triggers use the last successfully submitted pad state at the Studio adapter boundary, before transport-specific packing by the native virtual-device modules.
+
+Studio samples a bounded trajectory and reuses the engine status channel. The preview leaves the mapping and report delivery cadence unchanged.
+
+## 0.15.1 stabilization curves
+
+The draft previews in `crates/engine/src/motion/stability_preview.rs` call the same Studio stabilization stages as `MotionRuntime`. These stages use `crates/engine/src/eval/modules/jsm/cc.rs` for Decay, One Euro, angle snapping and braking and `crates/engine/src/eval/device_cal.rs::gyro_dz_ease` for the measured noise gate. The tilt example samples the existing `processing.gyro_3dof` graph node from `crates/engine/src/eval/modules/gyro3dof.rs`. All three upstream sources come from FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`.
+
+Studio supplies fixed synthetic inputs and isolates the response of each stage. The steady speed sweep uses the selected device's measured gyro noise floor when available and marks the example floor otherwise. The desktop preview command runs independently of the active engine and sends the curves to the editor.
+
+## 0.15.2 input continuity across mapping sessions
+
+Studio keeps the selected FlexInput SDL `OpenPad` across ordinary stops and starts on the same connected interface. The pinned implementation is `crates/devices/src/sdl_backend.rs` at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. The existing event seam in `sdl_raw.rs` supplies the connection check, sensor enablement and input snapshots. An idle session tracks raw buttons and axes as baseline data. Starting a new session resets the mapping state and reads a fresh snapshot from the retained handle.
+
+Studio owns the output and HidHide lifecycles. It releases output before restoring its hiding rules, and verifies visibility before sending new output. A real disconnect, a change of interface or an explicit rescan still takes the full discovery path.

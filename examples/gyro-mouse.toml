@@ -1,0 +1,18 @@
+# 仅体感鼠标。按住左扳机启用；适合先在桌面验证轴向和响应。
+schema_version = 1
+name = "体感鼠标"
+virtual_gamepad = "none"
+
+[gyro]
+enabled = true
+output = "mouse"
+activation = "left_trigger"
+activation_threshold = 0.2
+# 每转动手柄 1 度输出多少鼠标计数；不是游戏镜头度数。
+counts_per_degree = 12.0
+sensitivity = 1.0
+vertical_ratio = 1.0
+invert_y = false
+# host 使用 SDL 事件的单调时钟；sensor 仅用于已验证时钟的设备。
+timestamp_source = "host"
+

@@ -1,0 +1,27 @@
+[package]
+name = "motion-core"
+version = "0.15.2"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+motion-filters = { path = "../filters" }
+flexinput-core.workspace = true
+flexinput-engine = { path = "../../vendor/flexinput/crates/engine" }
+flexinput-devices.workspace = true
+flexinput-modules.workspace = true
+flexinput-virtual.workspace = true
+glam.workspace = true
+libloading = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+toml = "0.8"
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+flexinput-hidmaestro = { path = "../../vendor/flexinput/crates/hidmaestro" }
+vigem-client = { version = "0.1", features = ["unstable_ds4"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Registry", "Win32_Security_Authorization", "Win32_System_Pipes", "Win32_System_IO", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Foundation", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Threading", "Win32_Security", "Win32_Storage_FileSystem", "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties"] }

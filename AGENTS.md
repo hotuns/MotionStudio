@@ -1,0 +1,9 @@
+# Motion Studio development
+
+- Product direction: Motion Studio is the Studio-style interaction/configuration layer over FlexInput. Keep the simple game/action UI; do not expose the node graph as a required user workflow.
+- Reuse FlexInput first. Before adding mapping, filtering, motion, input or output behavior, inspect the pinned upstream implementation. Prefer exposing an existing headless API or a thin configuration/lifecycle adapter. Do not maintain a second implementation of an existing upstream algorithm without a documented interface or behavior gap.
+- Record the exact upstream module, commit and remaining adaptation in `docs/flexinput-reuse.md`. Keep original hashes and license notices; explain vendor changes before updating their current hashes. Do not format or rewrite unrelated vendor sources.
+- Preserve timestamped per-sample gyro processing. The FlexInput SDL provider now exposes a raw event seam before its sampled/averaged poll interface. Future native providers must preserve the same clocks and FIFO edges before activation. Do not replace this with latest-value polling or average batches silently. Use the one verified SDL DLL through delayed shared imports; never add a second/static SDL runtime.
+- Preserve game configurations, JSM import, chords, wheels/side buttons, UI controller navigation, reconnect, F12 and release-on-fault behavior when changing the underlying implementation.
+- Automated checks use mocks, headless browsers and SDL synthetic input with physical backends disabled. Do not occupy actual controllers, emit desktop input, install drivers, change HidHide rules or launch games for validation. The user performs real-device/game testing.
+- Treat sibling JSM Studio checkouts as read-only references. Leave their application and upstream source in their own repositories.

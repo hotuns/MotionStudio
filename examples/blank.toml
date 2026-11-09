@@ -1,0 +1,6 @@
+schema_version = 1
+name = "空白配置"
+virtual_gamepad = "none"
+stick_deadzone = 0.12
+[gyro]
+enabled = false
