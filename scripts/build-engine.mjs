@@ -1,5 +1,5 @@
 import './verify-resources.mjs';
-import { readFileSync, copyFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
@@ -32,7 +32,11 @@ const exe=resolve(root,'src-tauri/resources/motion-engine.exe');
 const builtEngine=release?resolve(staticTarget,'x86_64-pc-windows-msvc/release/motion-engine.exe'):resolve(root,'target/debug/motion-engine.exe');
 const sdlLinkage=verifySdlLinkage(builtEngine);
 copyFileSync(builtEngine,exe);
-if(release)copyFileSync(builtEngine,resolve(root,'target/release/motion-engine.exe'));
+if (release) {
+  const releaseEngine = resolve(root, 'target/release/motion-engine.exe');
+  mkdirSync(dirname(releaseEngine), { recursive: true });
+  copyFileSync(builtEngine, releaseEngine);
+}
 writeFileSync(resolve(root,'src-tauri/resources/runtime-manifest.json'),JSON.stringify({
   version,engine:'motion-engine',flexinputCommit:'c69f53ad3bca4ed34ef5f2d63509addaa7c767be',
   inputProvider:{crate:'flexinput-devices',backend:'SDL3',timestampedEvents:true,touchEvents:true,sdlRuntime:'shared verified DLL',...sdlLinkage},
