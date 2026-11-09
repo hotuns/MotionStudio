@@ -10,6 +10,9 @@ tauri-build = { version = "2.6.2", features = [] }
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+clipboard-win = "5"
+flate2 = "1"
 motion-core = { path = "../crates/engine" }
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2"

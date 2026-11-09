@@ -1,0 +1,21 @@
+schema_version = 1
+name = "触摸开启体感"
+virtual_gamepad = "none"
+
+[gyro]
+enabled = true
+output = "mouse"
+activation = "touch1"
+counts_per_degree = 12.0
+sensitivity = 1.0
+
+[touchpad]
+enabled = false
+
+[[layers]]
+id = "ads"
+name = "肩键瞄准"
+input = "touch1+left_shoulder"
+
+[layers.settings.gyro]
+sensitivity = 0.55
