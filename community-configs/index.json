@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "code": "MS-1B086C79",
+      "sha256": "1b086c79019b69ba45d2e4462b3992875da9d1b845a129ba642b850889e27766",
+      "name": "三角洲行动 · 键鼠起步示例",
+      "game": "三角洲行动 / Delta Force",
+      "author": "JSM Studio",
+      "controller": "体感手柄 / Gyro controller",
+      "output": "none",
+      "description": "左摇杆移动，右摇杆转向，按住 LT 启用鼠标体感。包含开火、瞄准和常用游戏动作。",
+      "notes": "从 JSM Studio 社区示例转换。部分摇杆参数为近似，复合短按／长按需要自行补配。尚未实战验证，请按游戏键位核对。",
+      "verified": false
+    },
+    {
+      "name": "键鼠与体感",
+      "output": "none",
+      "controller": "体感手柄 / Gyro controller",
+      "description": "左摇杆移动，右扳机开火，按住左扳机时用手柄控制鼠标视角。",
+      "notes": "通用起点。请按游戏实际键位调整动作。",
+      "game": "通用 / General",
+      "author": "Motion Studio",
+      "verified": false,
+      "code": "MS-79E53D83",
+      "sha256": "79e53d839bf462fae0038682683a2fd57449e3c025fbc501c76faa522ab75a2d"
+    },
+    {
+      "name": "手柄与体感",
+      "output": "xbox_360",
+      "controller": "体感手柄 / Gyro controller",
+      "description": "保留标准 Xbox 按键。按住左扳机时，体感与右摇杆一起控制视角。",
+      "notes": "适合优先使用游戏手柄输入的场景。",
+      "game": "通用 / General",
+      "author": "Motion Studio",
+      "verified": false,
+      "code": "MS-C2176BE3",
+      "sha256": "c2176be34c071a06bf0ae9ce61ee8d7229ec558bac68dd5080a035974af95b33"
+    },
+    {
+      "name": "触摸开启体感",
+      "output": "none",
+      "controller": "带触摸板的体感手柄 / Gyro controller with touchpad",
+      "description": "接触触摸板时启用体感鼠标，移开手指后停止。可将触发方式改为其他按键。",
+      "notes": "手柄接口需要同时报告触摸和体感。",
+      "game": "通用 / General",
+      "author": "Motion Studio",
+      "verified": false,
+      "code": "MS-FFA9DD12",
+      "sha256": "ffa9dd129ae100d33fec23732fcaffca940fd11aba14d4f482e1bfc654eaf3cc"
+    }
+  ]
+}

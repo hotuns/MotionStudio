@@ -9,6 +9,8 @@ import type { GameTab } from './studio/game-tabs';
 import { MotionSettings } from './studio/MotionSettings';
 import { DeviceCalibration } from './studio/DeviceCalibration';
 import { ProfileLibrary } from './studio/ProfileLibrary';
+import { ProfileShareDialog } from './studio/ProfileShareDialog';
+import type { CommunityProfile, SharedSource } from './profile-sharing';
 import { SystemPage, type ComponentAction } from './studio/SystemPage';
 import { SwitchSettings } from './studio/SwitchSettings';
 import {shortcutLabel} from './shortcuts';
@@ -72,6 +74,8 @@ export default function App() {
   const [help, setHelp] = useState(false);
   const [failedApplyId, setFailedApplyId] = useState<string | null>(null);
   const [importingJsm,setImportingJsm]=useState(false),[importingToml,setImportingToml]=useState(false);
+  const [libraryView, setLibraryView] = useState<'local' | 'community'>('local');
+  const [sharedImport, setSharedImport] = useState<{community?: CommunityProfile} | null>(null);
   const [gamepadPreference,setGamepadPreference]=useState(()=>localStorage.getItem('motion-studio-gamepad-ui')!=='off');
   const [windowFocused,setWindowFocused]=useState(document.hasFocus());
   const autoNavigation=useRef(false),gestureSerial=useRef(0),snapshotEpoch=useRef(0);
@@ -579,6 +583,13 @@ export default function App() {
     const path = await save({ title: t('导出配置'), defaultPath, filters: [{ name: t('Motion Studio 配置'), extensions: ['toml'] }] });
     if (path) await invoke('export_profile', { id: entry.id, path });
   }
+  async function importSharedProfile(source: SharedSource) {
+    const entry = await invoke<Entry>('import_shared_profile', {source});
+    setWorkspace(current => current && {...current, profiles: [...current.profiles, entry]});
+    if (!dirtyRef.current && !measuringRef.current) setDraft(structuredClone(entry));
+    setLibraryView('local');
+    notify('已添加到本地配置');
+  }
 
   async function exportDiagnostics() {
     const path = await save({ title: t('导出诊断'), defaultPath: 'motion-studio-diagnostics.json', filters: [{ name: 'JSON', extensions: ['json'] }] });
@@ -645,7 +656,7 @@ export default function App() {
               deviceNoise={workspace.settings.motion_calibrations[devicePath]?.gyro_noise_dps}
               recording={gyroRecording} canRecord={canRecordGyro}
               onRecord={gyroField=>beginCapture({kind:'pad',index:null,gyroField})} onCancelRecording={cancelCapture}
-              onOpenDevice={()=>navigate('controllerStatus','actions',true)} status={status}
+              onOpenDevice={()=>navigate('controllerStatus','actions',true)} onPreviewOutput={()=>navigate('controllerStatus')} status={status}
               canMeasure={!!status?.emitting&&!pending&&!captureActive&&runningProfile===draft.id}
               onMotionAction={motionAction}/>}
             onExport={() => void run(() => exportProfile(draft))} onOpenFolder={() => openLocation('profiles')} onNavigate={navigate} />
@@ -666,7 +677,11 @@ export default function App() {
         onStop={stop} onScan={() => void run(() => invoke('engine_action', { action: 'scan' }))} onSettings={() => navigate('settings')} />
       </Suspense>}
       {page === 'profiles' && workspace && <ProfileLibrary entries={entries} selected={draft} activeId={active ? runningProfile : null}
-        blocked={locked} dirty={dirty} onSelect={selectProfile} onRename={name => update(profile => { profile.name = name; })}
+        blocked={locked} dirty={dirty} view={libraryView} onView={setLibraryView}
+        onChooseCommunity={community => setSharedImport({community})} onImportCode={() => setSharedImport({})}
+        onContribute={() => openLocation('community')}
+        onCopyCode={entry => void run(() => invoke('copy_profile_code', {profile: entry.profile}), '配置码已复制')}
+        onSelect={selectProfile} onRename={name => update(profile => { profile.name = name; })}
         onCreate={() => openCreate()} onImport={() => {
           if (dirty) notify('请先保存或撤销当前配置的修改。', true);
           else setImportingToml(true);
@@ -710,6 +725,8 @@ export default function App() {
       notify('已导入为新的游戏配置，请核验转换结果后启用输出');
     }}/>}
     {importingToml&&<ImportFiles kind="toml" onClose={()=>setImportingToml(false)} onSelect={content=>{setImportingToml(false);void run(async()=>{const entry=await invoke<Entry>('import_profile',{content});await refresh(entry.id);},'已导入为一份新配置');}}/>}
+    {sharedImport && <ProfileShareDialog community={sharedImport.community} onClose={() => setSharedImport(null)}
+      onImport={importSharedProfile}/>}
     {creating && <Dialog title="新建配置" description="选择一个起点，为游戏建立独立配置。" onClose={() => setCreating(false)} error={dialogError}
       onSubmit={() => void run(async () => {
         const entry = await invoke<Entry>('create_profile', { name: newName.trim(), template });

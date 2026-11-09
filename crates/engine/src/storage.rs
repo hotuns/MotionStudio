@@ -255,19 +255,27 @@ impl Settings {
         Ok(())
     }
 }
-pub fn parse_profile(text: &str) -> Result<Profile> {
-    if text.len() > 512 * 1024 {
+pub const MAX_PROFILE_BYTES: usize = 512 * 1024;
+
+/// Decode the stored format before initializing an engine. Sharing uses this
+/// boundary to disable custom scripts in profiles received from other users.
+pub fn decode_profile(text: &str) -> Result<Profile> {
+    if text.len() > MAX_PROFILE_BYTES {
         bail!("配置文件超过 512 KB");
     }
-    let profile: Profile = match toml::from_str(text) {
-        Ok(profile) => profile,
+    match toml::from_str(text) {
+        Ok(profile) => Ok(profile),
         Err(error) => {
             if toml::from_str::<toml::Table>(text).is_ok_and(|table| table.contains_key("jsm")) {
                 bail!("旧版 JSM 配置需要转换。请在「导入 JSM 配置」中选择此 TOML 文件");
             }
-            return Err(error).context("配置格式错误");
+            Err(error).context("配置格式错误")
         }
-    };
+    }
+}
+
+pub fn parse_profile(text: &str) -> Result<Profile> {
+    let profile = decode_profile(text)?;
     Engine::new(profile.clone())?;
     Ok(profile)
 }
@@ -275,9 +283,9 @@ pub fn read_small(path: &Path) -> Result<String> {
     use std::io::Read;
     let mut text = String::new();
     std::fs::File::open(path)?
-        .take(512 * 1024 + 1)
+        .take(MAX_PROFILE_BYTES as u64 + 1)
         .read_to_string(&mut text)?;
-    if text.len() > 512 * 1024 {
+    if text.len() > MAX_PROFILE_BYTES {
         bail!("File exceeds 512 KB");
     }
     Ok(text)

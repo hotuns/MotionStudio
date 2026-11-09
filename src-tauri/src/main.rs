@@ -6,6 +6,7 @@ mod import_files;
 mod installers;
 mod overlay;
 mod policy;
+mod profile_share;
 mod runtime;
 
 use client::Client;
@@ -667,6 +668,10 @@ async fn open_location(state: State<'_, AppState>, kind: String) -> Result<(), S
     background(move || match kind.as_str() {
         "profiles" => open::that(state.store.root.join("profiles")).map_err(text),
         "data" => open::that(state.store.root).map_err(text),
+        "community" => {
+            open::that("https://github.com/hotuns/MotionStudio/tree/main/community-configs")
+                .map_err(text)
+        }
         "hidhide" | "gamepads" => components::open_tool(&kind),
         _ => Err("未知位置".into()),
     })
@@ -743,6 +748,11 @@ fn main() {
             save_profile,
             create_profile,
             import_profile,
+            profile_share::copy_profile_code,
+            profile_share::copy_community_code,
+            profile_share::read_profile_code,
+            profile_share::preview_shared_profile,
+            profile_share::import_shared_profile,
             preview_jsm,
             import_jsm,
             set_ui_navigation,

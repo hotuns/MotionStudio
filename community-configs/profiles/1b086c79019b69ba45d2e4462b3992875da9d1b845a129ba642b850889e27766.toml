@@ -1,0 +1,472 @@
+# Adapted from the JSM Studio delta-force-basic community profile.
+# https://github.com/hotuns/JSM_Studio/blob/gh-pages/community-configs/profiles/delta-force-basic.txt
+# MIT License
+# Copyright 2018-2021 Julian "Jibb" Smart; Copyright 2021- Nicolas Lessard.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+schema_version = 1
+name = "三角洲行动 · 键鼠起步示例"
+virtual_gamepad = "none"
+stick_deadzone = 0.15000000596046448
+
+[input]
+lstick_center = [
+    0.0,
+    0.0,
+]
+rstick_center = [
+    0.0,
+    0.0,
+]
+lstick_radial = [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+]
+rstick_radial = [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+]
+ltrig_min = 0.0
+ltrig_max = 1.0
+rtrig_min = 0.0
+rtrig_max = 1.0
+digital_triggers = false
+ltrig_digital_threshold = 0.10000000149011612
+rtrig_digital_threshold = 0.10000000149011612
+trig_hysteresis = 0.019999999552965164
+trig_debounce_ms = 4.0
+
+[feedback]
+rumble_enabled = true
+rumble_gain = 1.0
+lightbar_enabled = true
+
+[touchpad]
+enabled = false
+pointer_speed = 1.0
+scroll_speed = 1.0
+natural_scroll = true
+
+[stick_mouse]
+enabled = false
+stick = "right"
+speed = 1200.0
+deadzone = 0.15000000596046448
+exponent = 1.600000023841858
+
+[gyro]
+enabled = true
+output = "mouse"
+activation = "left_trigger_soft"
+activation_mode = "hold"
+activation_threshold = 0.20000000298023224
+counts_per_degree = 40.0
+stick_full_scale_dps = 360.0
+sensitivity = 1.0
+vertical_ratio = 1.0
+invert_y = false
+timestamp_source = "host"
+smoothing_ms = 0.0
+noise_threshold = 0.0
+
+[gyro.acceleration]
+fast_multiplier = 1.0
+start_dps = 40.0
+full_dps = 180.0
+curve = "linear"
+natural_half = 200.0
+power_reference = 60.0
+power_exponent = 2.0
+sigmoid_mid = 90.0
+sigmoid_width = 20.0
+jump_width = 10.0
+points = [
+    [
+    0.0,
+    1.0,
+],
+    [
+    180.0,
+    2.0,
+],
+]
+
+[gyro.motion]
+space = "pitch_yaw"
+mode = "pointer"
+hold_angles = [
+    0.0,
+    0.0,
+    0.0,
+]
+roll_contribution = 0.0
+invert_x = false
+steering_range = 30.0
+steering_exclude_y = false
+recenter_strength = 0.0
+reset_ease_ms = 250.0
+drift_correction = false
+smoothing = "ema"
+decay_threshold = 60.0
+one_euro_cutoff = 6.0
+one_euro_beta = 0.30000001192092896
+angle_snap = 0.0
+angle_snap_ease = true
+brake_strength = 0.0
+brake_threshold = 25.0
+cutoff_dps = 0.0
+recovery_ms = 0.0
+noise_gate = 0.0
+bindings = []
+turns = []
+custom_filters = []
+
+[gyro.motion.edge]
+mode = "off"
+zone = 30.0
+blend = 15.0
+ramp = 30.0
+max_dps = 180.0
+momentum = 1.0
+decay_s = 0.0
+gyro_keep = 1.0
+horizontal_only = true
+
+[gyro.motion.rotation]
+stick = "right"
+sensitivity = 1.0
+deadzone = 0.20000000298023224
+smooth_ms = 0.0
+relative = false
+return_ms = 250.0
+takeover = false
+takeover_dps = 10.0
+outer = 0.8999999761581421
+
+[gyro.motion.flick]
+enabled = false
+stick = "right"
+output = "mouse"
+deadzone = 0.8500000238418579
+smooth_ms = 100.0
+forward_deadzone = 0.0
+stabilise_ms = 0.0
+speed_gate_ms = 0.0
+slow_lock = false
+suppress = "full"
+stick_aim = true
+aim_sensitivity = 1.0
+max_dps = 180.0
+vertical_ratio = 1.0
+
+[gyro.motion.trackball]
+decay = 1.0
+
+[[actions]]
+name = "前进"
+input = "left_stick_up"
+output = "key:W"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "后退"
+input = "left_stick_down"
+output = "key:S"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "向左移动"
+input = "left_stick_left"
+output = "key:A"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "向右移动"
+input = "left_stick_right"
+output = "key:D"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "冲刺"
+input = "left_stick_click"
+output = "key:SHIFT"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "跳跃 / 翻越"
+input = "south"
+output = "key:SPACE"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "开火"
+input = "right_trigger_soft"
+output = "mouse:left"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "瞄准"
+input = "left_trigger_soft"
+output = "mouse:right"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "切换武器"
+input = "north"
+output = "wheel:down"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "近战"
+input = "right_stick_click"
+output = "key:V"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "投掷 / 装备"
+input = "right_shoulder"
+output = "key:G"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "干员技能"
+input = "left_shoulder"
+output = "key:E"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "治疗"
+input = "dpad_up"
+output = "key:H"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "标记"
+input = "dpad_right"
+output = "mouse:middle"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "背包"
+input = "dpad_down"
+output = "key:TAB"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "地图"
+input = "back"
+output = "key:M"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[[actions]]
+name = "暂停 / 返回"
+input = "start"
+output = "key:ESC"
+threshold = 0.5
+trigger = "down"
+trigger_ms = 250
+sustain = true
+
+[trigger_stages]
+left_mode = "no_full"
+right_mode = "no_full"
+soft_threshold = 0.0
+skip_delay_ms = 150.0
+
+[stick_zones]
+left_outer = 0.8500000238418579
+right_outer = 0.8500000238418579
+hysteresis = 0.05000000074505806
