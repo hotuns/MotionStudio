@@ -1733,6 +1733,8 @@ mod tests {
             profile.gyro.counts_per_degree = 10.0;
             profile.gyro.motion.flick.enabled = flick;
             profile.gyro.motion.flick.smooth_ms = 100.0;
+            // Keep the turn linear so this test isolates the output schedule.
+            profile.gyro.motion.flick.release_ease = 0.0;
             runtime.engine = Some(Engine::new(profile.clone()).unwrap());
             runtime.output = Some(
                 Dispatcher::new(Box::new(ObserveSink) as Box<dyn Sink>).with_scheduled_output(),

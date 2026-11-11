@@ -373,6 +373,7 @@ fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
 fn stick_aim_runs_between_axis_events_and_pause_restores_native_input() {
     let mut p = profile();
     gamepad(&mut p);
+    p.gyro.output = GyroOutput::Mouse;
     p.gyro.pause_input = Some("south".into());
     let mut native = Engine::new(p.clone()).unwrap();
     axis(&mut native, 2, 16384);
@@ -661,6 +662,7 @@ fn pausing_a_measurement_stops_output_and_marks_the_result_invalid() {
 fn a_held_flick_snapshot_waits_for_center_before_starting_a_turn() {
     let mut p = profile();
     gamepad(&mut p);
+    p.gyro.output = GyroOutput::Mouse;
     p.gyro.motion.flick.enabled = true;
     let mut e = Engine::new(p).unwrap();
     e.process_snapshot(&InputEvent::Axis {

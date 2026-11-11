@@ -12,7 +12,7 @@
 
 1. 首次发布前，在 [仓库的 Actions Secrets](https://github.com/hotuns/MotionStudio/settings/secrets/actions) 配置 `TAURI_SIGNING_PRIVATE_KEY`，值是与 `src-tauri/tauri.conf.json` 公钥配对的私钥文件内容。若私钥有口令，再配置 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。不要把私钥写进代码或发布资产。后续版本继续用同一密钥，并保留私钥备份。
 2. 同步 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json` 和 `src-tauri`、`crates/engine`、`crates/host` 的 Cargo 版本及 `Cargo.lock`。把版本说明写入 `docs/releases/vX.Y.Z.md`。
-3. 推送提交和对应的 `vX.Y.Z` 标签。「Prepare Windows release」会构建并签名安装包，验证签名后创建 GitHub Release 草稿。
+3. 推送前在本地检查本次改动。前端改动可运行 `npm run build:web`，引擎改动可运行对应的模拟输入测试。推送提交和 `vX.Y.Z` 标签后，「Prepare Windows release」会构建并签名安装包，验证签名后创建 GitHub Release 草稿。
 4. 核对草稿中的安装包、对应的 `.sig`、`SHA256SUMS.txt` 和 `latest.json`，再发布为正式版并设为 Latest。旧安装版可在应用内检查更新。
 
 本地开发不需要私钥，常规 `npm run build` 可照常使用。如需在本机准备签名发布，在当前终端配置同名签名环境变量后执行：
