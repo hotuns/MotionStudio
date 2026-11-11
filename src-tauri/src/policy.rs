@@ -50,6 +50,7 @@ pub fn start(state: AppState) {
             let running = matches!(snapshot.status.state.as_str(), "running" | "observing")
                 && !snapshot.status.ui_navigation
                 && !snapshot.status.binding_capture
+                && !state.game_calibration.is_open()
                 && snapshot.status.motion.measuring.is_none();
             let capture = state
                 .shortcut_capture_until
@@ -187,6 +188,7 @@ pub fn start(state: AppState) {
             if !matches!(latest_status.state.as_str(), "running" | "observing")
                 || latest_status.binding_capture
                 || latest_status.ui_navigation
+                || state.game_calibration.is_open()
                 || latest_status.motion.measuring.is_some()
             {
                 continue;
@@ -222,19 +224,7 @@ pub fn start(state: AppState) {
                     Ok(()) => {
                         *state.history.lock().unwrap() = history;
                         state.client.snapshot.lock().unwrap().policy_error = None;
-                        crate::notify_profile(
-                            &state,
-                            &target,
-                            if pad > 0 {
-                                "手柄快捷键切换"
-                            } else if shortcut {
-                                "快捷键切换"
-                            } else if edge == Some(true) {
-                                "光标显示 · 自动切换"
-                            } else {
-                                "光标隐藏 · 自动切换"
-                            },
-                        );
+                        crate::notify_profile(&state, &target);
                     }
                     Err(error) => {
                         state.client.snapshot.lock().unwrap().policy_error =

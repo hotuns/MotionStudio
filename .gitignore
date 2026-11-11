@@ -8,3 +8,4 @@ src-tauri/resources/runtime-manifest.json
 .test-data/
 test-results/
 src-tauri/gen/
+motion-studio-diagnostics.json

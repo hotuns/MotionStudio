@@ -1,0 +1,87 @@
+schema_version = 1
+name = "动作与探索"
+virtual_gamepad = "none"
+stick_deadzone = 0.12
+
+[gyro]
+enabled = false
+
+[stick_mouse]
+enabled = true
+stick = "right"
+
+[[actions]]
+name = "前进"
+input = "left_stick_up"
+output = "key:W"
+threshold = 0.25
+
+[[actions]]
+name = "后退"
+input = "left_stick_down"
+output = "key:S"
+threshold = 0.25
+
+[[actions]]
+name = "左移"
+input = "left_stick_left"
+output = "key:A"
+threshold = 0.25
+
+[[actions]]
+name = "右移"
+input = "left_stick_right"
+output = "key:D"
+threshold = 0.25
+
+[[actions]]
+name = "主攻击"
+input = "right_trigger"
+output = "mouse:left"
+threshold = 0.2
+
+[[actions]]
+name = "防御或瞄准"
+input = "left_trigger"
+output = "mouse:right"
+threshold = 0.2
+
+[[actions]]
+name = "跳跃"
+input = "south"
+output = "key:SPACE"
+
+[[actions]]
+name = "闪避"
+input = "east"
+output = "key:ALT"
+trigger = "short"
+
+[[actions]]
+name = "交互"
+input = "west"
+output = "key:E"
+
+[[actions]]
+name = "切换道具"
+input = "north"
+output = "key:Q"
+trigger = "short"
+
+[[actions]]
+name = "使用道具"
+input = "right_shoulder"
+output = "key:F"
+trigger = "short"
+
+[[actions]]
+name = "地图"
+input = "back"
+output = "key:M"
+trigger = "short"
+
+[[actions]]
+name = "菜单"
+input = "start"
+output = "key:ESC"
+trigger = "short"

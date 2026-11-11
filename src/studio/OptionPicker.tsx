@@ -16,14 +16,18 @@ export type PickerGroup = {label?: string; options: PickerOption[]};
 
 const display = (option: PickerOption) => option.localize === false ? option.label : t(option.label);
 
-export function OptionDialog({title, description, value, groups, onChoose, onClose}: {
-  title: string;
-  description?: string;
+type OptionListProps = {
   value: string | null;
   groups: PickerGroup[];
   onChoose: (value: string) => void;
   onClose: () => void;
-}) {
+  searchLabel?: string;
+  searchPlaceholder?: string;
+  emptyMessage?: string;
+};
+
+export function OptionList({value, groups, onChoose, onClose, searchLabel = '搜索选项',
+  searchPlaceholder = '搜索名称或按键', emptyMessage = '没有匹配的选项。'}: OptionListProps) {
   const [query, setQuery] = useState('');
   const results = useRef<HTMLDivElement>(null);
   const gamepad = document.documentElement.dataset.gamepad === 'on';
@@ -34,11 +38,10 @@ export function OptionDialog({title, description, value, groups, onChoose, onClo
     return terms.every(term => text.includes(term));
   })})).filter(group => group.options.length > 0);
 
-  return createPortal(<Dialog title={title} description={description} className={styles.dialog} onClose={onClose}
-    actions={<button type="button" className="secondary-btn" onClick={onClose}>取消选择</button>}>
+  return <>
     <label className={styles.search}>
       <StudioIcon name="search" size={16}/>
-      <input type="search" aria-label="搜索选项" placeholder="搜索名称或按键" value={query}
+      <input type="search" aria-label={searchLabel} placeholder={searchPlaceholder} value={query}
         autoFocus={!gamepad} onChange={event => setQuery(event.target.value)}
         onKeyDown={event => {
           if (event.nativeEvent.isComposing) return;
@@ -64,8 +67,15 @@ export function OptionDialog({title, description, value, groups, onChoose, onClo
           </button>)}
         </div>
       </section>)}
-      {!matches.length && <p role="status">没有匹配的选项。</p>}
+      {!matches.length && <p role="status">{emptyMessage}</p>}
     </div>
+  </>;
+}
+
+export function OptionDialog({title, description, ...list}: OptionListProps & {title: string; description?: string}) {
+  return createPortal(<Dialog title={title} description={description} className={styles.dialog} onClose={list.onClose}
+    actions={<button type="button" className="secondary-btn" onClick={list.onClose}>取消选择</button>}>
+    <OptionList {...list}/>
   </Dialog>, document.body);
 }
 

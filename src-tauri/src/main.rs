@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod binding_window;
 mod client;
 mod components;
+mod game_calibration;
 mod hid_inventory;
 mod import_files;
 mod installers;
@@ -8,6 +10,7 @@ mod overlay;
 mod policy;
 mod profile_share;
 mod runtime;
+mod updates;
 
 use client::Client;
 use motion_core::{
@@ -19,7 +22,7 @@ use motion_core::{
 };
 use serde::Serialize;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 use tauri::{Manager, State};
@@ -35,6 +38,7 @@ pub struct AppState {
     pub shortcut_capture_revision: Arc<std::sync::atomic::AtomicU64>,
     pub startup_warnings: Vec<String>,
     pub overlay: overlay::Overlay,
+    pub game_calibration: game_calibration::CalibrationWindow,
 }
 fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -70,10 +74,10 @@ pub fn apply_profile(state: &AppState, id: &str) -> Result<(), String> {
         profile_file: state.store.profile_path(id).map_err(text)?,
     })
 }
-pub fn notify_profile(state: &AppState, id: &str, reason: &str) {
+pub fn notify_profile(state: &AppState, id: &str) {
     if let Ok(entry) = state.store.load(id) {
         let settings = state.settings.lock().unwrap().clone();
-        if let Err(error) = state.overlay.show(&settings, &entry.profile.name, reason) {
+        if let Err(error) = state.overlay.show(&settings, &entry.profile.name) {
             state.client.log(error);
         }
     }
@@ -88,7 +92,7 @@ async fn preview_overlay(state: State<'_, AppState>) -> Result<(), String> {
             .load(&settings.selected_profile)
             .map(|e| e.profile.name)
             .unwrap_or_else(|_| "体感瞄准 · 示例配置".into());
-        state.overlay.show(&settings, &name, "配置提示预览")
+        state.overlay.show(&settings, &name)
     })
     .await
 }
@@ -124,51 +128,41 @@ async fn save_profile(
     let state = state.inner().clone();
     background(move || {
         let _lock = state.operations.lock().map_err(text)?;
-        if state
-            .client
-            .snapshot
-            .lock()
-            .map_err(text)?
-            .status
-            .binding_capture
-        {
-            return Err("请先结束映射录入，再保存配置".into());
-        }
-        if state
-            .client
-            .snapshot
-            .lock()
-            .map_err(text)?
-            .status
-            .motion
-            .measuring
-            .is_some()
-        {
-            return Err("请先结束或取消转角测量，再保存配置".into());
-        }
-        state.store.save(&entry).map_err(text)?;
-        let should_apply = active(&state)
-            && state
-                .client
-                .snapshot
-                .lock()
-                .unwrap()
-                .status
-                .profile_id
-                .as_deref()
-                == Some(&entry.id);
-        let warning = if should_apply {
-            apply_profile(&state, &entry.id).err()
-        } else {
-            None
-        };
-        Ok(SaveResult {
-            applied: should_apply && warning.is_none(),
-            entry,
-            warning,
-        })
+        save_profile_locked(&state, entry)
     })
     .await
+}
+fn save_profile_locked(state: &AppState, entry: ProfileEntry) -> Result<SaveResult, String> {
+    {
+        let snapshot = state.client.snapshot.lock().map_err(text)?;
+        if snapshot.status.binding_capture {
+            return Err("请先结束映射录入，再保存配置".into());
+        }
+        if snapshot.status.motion.measuring.is_some() {
+            return Err("请先结束或取消转角测量，再保存配置".into());
+        }
+    }
+    state.store.save(&entry).map_err(text)?;
+    let should_apply = active(state)
+        && state
+            .client
+            .snapshot
+            .lock()
+            .map_err(text)?
+            .status
+            .profile_id
+            .as_deref()
+            == Some(&entry.id);
+    let warning = if should_apply {
+        apply_profile(state, &entry.id).err()
+    } else {
+        None
+    };
+    Ok(SaveResult {
+        applied: should_apply && warning.is_none(),
+        entry,
+        warning,
+    })
 }
 #[tauri::command]
 async fn create_profile(
@@ -182,6 +176,8 @@ async fn create_profile(
         let source = match template.as_str() {
             "gyro" => include_str!("../../examples/gyro-mouse.toml"),
             "keyboard" => include_str!("../../examples/keyboard-mouse.toml"),
+            "shooter" => include_str!("../../examples/shooter.toml"),
+            "adventure" => include_str!("../../examples/adventure.toml"),
             "gamepad" => include_str!("../../examples/native-gamepad.toml"),
             "gyro-gamepad" => include_str!("../../examples/gyro-gamepad.toml"),
             "cursor" => include_str!("../../examples/cursor.toml"),
@@ -189,6 +185,18 @@ async fn create_profile(
             _ => return Err("未知配置模板".into()),
         };
         let mut profile = motion_core::storage::parse_profile(source).map_err(text)?;
+        if matches!(template.as_str(), "shooter" | "adventure")
+            && state.settings.lock().map_err(text)?.language == motion_core::storage::Language::En
+        {
+            let labels: serde_json::Value =
+                serde_json::from_str(include_str!("../../src/locales/en-game-recording.json"))
+                    .map_err(text)?;
+            for action in &mut profile.actions {
+                if let Some(name) = labels[&action.name].as_str() {
+                    action.name = name.into();
+                }
+            }
+        }
         profile.name = name.trim().into();
         let entry = ProfileEntry {
             id: uuid::Uuid::new_v4().to_string(),
@@ -376,6 +384,9 @@ async fn save_settings(
             state.store.load(id).map_err(text)?;
         }
         let mut current = state.settings.lock().map_err(text)?;
+        if settings.mouse_display_sync != current.mouse_display_sync && active(&state) {
+            return Err("请先停止映射或观察，再调整输出显示同步".into());
+        }
         if (settings.output_backend != current.output_backend
             || settings.gamepad_backend != current.gamepad_backend
             || settings.auto_hide != current.auto_hide)
@@ -441,6 +452,7 @@ async fn start_mapping(
                 auto_hide: runtime_settings.auto_hide,
                 output_backend: runtime_settings.output_backend,
                 gamepad_backend: runtime_settings.gamepad_backend,
+                mouse_display_sync: runtime_settings.mouse_display_sync,
                 bias,
                 sensor_calibration,
             }),
@@ -472,7 +484,7 @@ async fn activate_profile(state: State<'_, AppState>, id: String) -> Result<(), 
                 != Some(id.as_str());
             apply_profile(&state, &id)?;
             if changed {
-                notify_profile(&state, &id, "手动切换");
+                notify_profile(&state, &id);
             }
         }
         let mut settings = state.settings.lock().unwrap();
@@ -509,6 +521,9 @@ async fn engine_action(state: State<'_, AppState>, action: String) -> Result<(),
 }
 #[tauri::command]
 fn set_shortcut_capture(state: State<'_, AppState>, active: bool) -> Result<(), String> {
+    update_shortcut_capture(&state, active)
+}
+fn update_shortcut_capture(state: &AppState, active: bool) -> Result<(), String> {
     let mut until = state.shortcut_capture_until.lock().map_err(text)?;
     let now = std::time::Instant::now();
     let was_active = until.is_some_and(|time| now < time);
@@ -531,11 +546,6 @@ async fn motion_action(
     background(move || {
         let _lock = state.operations.lock().map_err(text)?;
         let command = match action.as_str() {
-            "measure_yaw" => Command::BeginMeasure { axis: "yaw".into() },
-            "measure_pitch" => Command::BeginMeasure {
-                axis: "pitch".into(),
-            },
-            "measure_end" => Command::EndMeasure,
             "reset_pose" => Command::ResetPose,
             "reset_filters" => Command::ResetFilters,
             "calibrate_face" => Command::CalibrateFace {
@@ -672,6 +682,7 @@ async fn open_location(state: State<'_, AppState>, kind: String) -> Result<(), S
             open::that("https://github.com/hotuns/MotionStudio/tree/main/community-configs")
                 .map_err(text)
         }
+        "releases" => open::that("https://github.com/hotuns/MotionStudio/releases").map_err(text),
         "hidhide" | "gamepads" => components::open_tool(&kind),
         _ => Err("未知位置".into()),
     })
@@ -705,8 +716,11 @@ fn main() {
         }
         return;
     }
+    let portable_restart = updates::PortableRestart::default();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updates::Updates::new(portable_restart.clone()))
         .setup(|app| {
             let handle = app.handle().clone();
             let root = runtime::runtime_dir(&handle).map_err(anyhow::Error::msg)?;
@@ -725,6 +739,7 @@ fn main() {
                 store,
                 settings: Arc::new(Mutex::new(settings)),
                 overlay: overlay::Overlay::start(),
+                game_calibration: game_calibration::CalibrationWindow::default(),
                 history: Arc::new(Mutex::new(SwitchHistory::default())),
                 operations: Arc::new(Mutex::new(())),
                 shortcut_capture_until: Arc::new(Mutex::new(None)),
@@ -732,6 +747,7 @@ fn main() {
                 startup_warnings: warnings,
             };
             app.manage(state.clone());
+            app.manage(binding_window::BindingWindows::default());
             if let Err(error) = client.spawn() {
                 client.log(error.clone());
                 client.snapshot.lock().unwrap().status.message = error;
@@ -740,8 +756,28 @@ fn main() {
             policy::start(state);
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                for label in [binding_window::LABEL, game_calibration::LABEL] {
+                    if let Some(floating) = window.get_webview_window(label) {
+                        let _ = floating.destroy();
+                    }
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             set_binding_capture,
+            binding_window::open_binding_window,
+            binding_window::binding_window_state,
+            binding_window::update_binding_window,
+            binding_window::show_binding_window,
+            binding_window::batch_capture,
+            game_calibration::open_calibration_window,
+            game_calibration::calibration_window_state,
+            game_calibration::calibration_window_action,
+            updates::check_studio_update,
+            updates::download_studio_update,
+            updates::install_studio_update,
             preview_overlay,
             workspace,
             snapshot,
@@ -778,7 +814,7 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("Motion Studio startup failed");
-    app.run(|app, event| {
+    let exit_code = app.run_return(|app, event| {
         if let tauri::RunEvent::Exit = event {
             app.state::<AppState>().overlay.shutdown();
             app.state::<AppState>().client.shutdown();
@@ -787,4 +823,13 @@ fn main() {
     unsafe {
         CloseHandle(instance);
     }
+    // Wait until both the engine and single-instance guard are released.
+    if let Some(executable) = portable_restart.lock().unwrap().take() {
+        let folder = executable.parent().unwrap_or_else(|| Path::new("."));
+        // Preserve relative data-directory overrides across the handoff.
+        if std::process::Command::new(&executable).spawn().is_err() {
+            let _ = open::that(folder);
+        }
+    }
+    std::process::exit(exit_code);
 }

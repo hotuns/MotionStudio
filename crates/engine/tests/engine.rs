@@ -1,5 +1,6 @@
 use anyhow::Result;
 use motion_core::engine::{Engine, Frame, InputEvent, PadState};
+use motion_core::motion_config::Stick;
 use motion_core::output::{Dispatcher, Sink};
 use motion_core::profile::{
     Action, GamepadTarget, Gyro, GyroActivationMode, GyroOutput, Profile, TimestampSource,
@@ -169,6 +170,68 @@ fn binding(input: &str, output: &str) -> Action {
         trigger_ms: 250,
         sustain: true,
         turbo_ms: None,
+    }
+}
+
+#[test]
+fn rws_calibration_uses_the_configured_stick_without_also_mapping_it() {
+    for (stick, name, index, output) in [
+        (Stick::Left, "left", 0, GyroOutput::RightStick),
+        (Stick::Right, "right", 2, GyroOutput::Mouse),
+    ] {
+        let mut p = profile();
+        p.virtual_gamepad = GamepadTarget::Xbox360;
+        p.gyro.output = output;
+        p.gyro.stick_full_scale_dps = 1440.;
+        p.gyro.motion.flick.stick = stick;
+        p.gyro.motion.flick.enabled = output == GyroOutput::Mouse;
+        p.stick_mouse.enabled = true;
+        p.stick_mouse.stick = name.into();
+        p.actions
+            .push(binding(&format!("{name}_stick_up"), "key:W"));
+        let mut engine = Engine::new(p).unwrap();
+        engine.begin_measurement("yaw").unwrap();
+
+        let mut ms = 1;
+        let mut mouse_x = 0.;
+        for step in 0..=36 {
+            let (x, y) = (step as f32 * 10.).to_radians().sin_cos();
+            for (axis_index, value) in [(index, x), (index + 1, -y)] {
+                let frame = engine.process(&axis(ms, axis_index, (value * 32767.).round() as i16));
+                let pad = frame.pad.unwrap();
+                let physical_stick = if stick == Stick::Left {
+                    (pad.left_x, pad.left_y)
+                } else {
+                    (pad.right_x, pad.right_y)
+                };
+                assert_eq!(physical_stick, (0, 0));
+                assert!(!frame.held.contains("key:W"));
+            }
+            for _ in 0..12 {
+                ms += 2;
+                mouse_x += engine.process(&sample(ms, [0.; 3])).mouse_delta[0];
+                assert_eq!(engine.advance(0.002, time(ms).host_ns).mouse_delta, [0.; 2]);
+            }
+        }
+        for _ in 0..100 {
+            ms += 2;
+            mouse_x += engine.process(&sample(ms, [0.; 3])).mouse_delta[0];
+        }
+        let result = engine.end_measurement().unwrap();
+        assert_eq!(result.output, output);
+        assert!(result.error.is_none(), "{:?}", result.error);
+        assert!((result.degrees - 360.).abs() < 0.1, "{result:?}");
+        if output == GyroOutput::Mouse {
+            assert!((mouse_x - 3600.).abs() < 1.);
+            assert_eq!(
+                engine.advance(0.002, time(ms + 2).host_ns).mouse_delta[0],
+                0.
+            );
+        } else {
+            assert_eq!(mouse_x, 0.);
+            assert!(result.peak > 0. && result.peak < 1.);
+        }
+        assert!(engine.end_measurement().is_none());
     }
 }
 
@@ -489,13 +552,17 @@ fn stick_to_wasd_releases_on_center_and_disconnect() {
 #[derive(Default)]
 struct Seen {
     edges: Vec<(String, bool)>,
+    motion_at_edge: Vec<[i64; 2]>,
     motion: [i64; 2],
     pad: Option<PadState>,
 }
 struct Spy(Rc<RefCell<Seen>>);
 impl Sink for Spy {
     fn button(&mut self, name: &str, down: bool) -> Result<()> {
-        self.0.borrow_mut().edges.push((name.into(), down));
+        let mut seen = self.0.borrow_mut();
+        let motion = seen.motion;
+        seen.motion_at_edge.push(motion);
+        seen.edges.push((name.into(), down));
         Ok(())
     }
     fn mouse(&mut self, dx: i32, dy: i32) -> Result<()> {
@@ -508,6 +575,69 @@ impl Sink for Spy {
         Ok(())
     }
 }
+#[test]
+fn scheduled_mouse_drains_once_and_motion_precedes_a_discrete_edge() {
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    let mut output = Dispatcher::new(Spy(seen.clone())).with_scheduled_output();
+    let small = Frame {
+        mouse_delta: [0.625, -0.625],
+        ..Frame::default()
+    };
+    output.apply(&small).unwrap();
+    output.apply(&small).unwrap();
+    assert_eq!(seen.borrow().motion, [0, 0]);
+    output.flush_output().unwrap();
+    output.flush_output().unwrap();
+    assert_eq!(seen.borrow().motion, [1, -1]);
+
+    let movement = Frame {
+        mouse_delta: [2.0, -2.0],
+        ..Frame::default()
+    };
+    output.apply(&movement).unwrap();
+    let mut pressed = Frame {
+        held: BTreeSet::from(["key:W".into()]),
+        ..Frame::default()
+    };
+    output.apply(&pressed).unwrap();
+    assert_eq!(seen.borrow().motion_at_edge, [[3, -3]]);
+    pressed.mouse_delta = [6.0, -6.0];
+    output.apply(&pressed).unwrap();
+    output.reset().unwrap();
+    output.flush_output().unwrap();
+    assert_eq!(seen.borrow().motion, [3, -3]);
+}
+
+#[test]
+fn scheduled_gamepad_uses_the_latest_axes_and_preserves_short_button_edges() {
+    let seen = Rc::new(RefCell::new(Seen::default()));
+    let mut output = Dispatcher::new(Spy(seen.clone())).with_scheduled_output();
+    let frame = |right_x, buttons| Frame {
+        pad: Some(PadState {
+            right_x,
+            buttons,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    output.apply(&frame(100, 0)).unwrap();
+    output.apply(&frame(200, 0)).unwrap();
+    assert_eq!(seen.borrow().pad, None);
+    output.flush_output().unwrap();
+    assert_eq!(seen.borrow().pad, frame(200, 0).pad);
+    assert_eq!(output.pad_reports, 1);
+
+    output.apply(&frame(200, 0x1000)).unwrap();
+    assert_eq!(seen.borrow().pad, frame(200, 0x1000).pad);
+    output.apply(&frame(200, 0)).unwrap();
+    assert_eq!(seen.borrow().pad, frame(200, 0).pad);
+    output.apply(&frame(300, 0)).unwrap();
+    output.reset().unwrap();
+    output.flush_output().unwrap();
+    assert_eq!(seen.borrow().pad, Some(PadState::default()));
+    assert_eq!(output.pad_reports, 4);
+}
+
 #[test]
 fn tiny_motion_is_not_lost_and_drop_releases_held_keys_and_pad() {
     let seen = Rc::new(RefCell::new(Seen::default()));

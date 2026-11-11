@@ -26,9 +26,9 @@
 .shortcutActions { display: flex; flex-wrap: wrap; gap: 8px; }
 .status { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--text-mid); font-size: 12px; padding: 12px 0; border-top: 1px solid var(--border-1); }
 .error { color: #c45b4c; font-size: 12px; overflow-wrap: anywhere; }
-.overlayPreview { display: grid; gap: 8px; max-width: 380px; padding: 14px 20px; border-radius: 12px; border-left: 4px solid #41c9d3; background: #181d23; color: #c4d4e0; box-sizing: border-box; }
-.overlayPreview span { font-size: 12px; }
-.overlayPreview strong { font-size: 21px; color: #f1f6fa; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overlayControls > label { flex: 0 1 180px; }
+.overlayPreview { width: max-content; max-width: min(280px, 100%); margin-left: auto; padding: 6px 12px; border-radius: 6px; background: #181d23; color: #f1f6fa; box-sizing: border-box; }
+.overlayPreview strong { display: block; font-size: 14px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .delayInput { display: flex; align-items: center; gap: 8px; }
 .delayInput input { width: 110px; min-height: 36px; border: 1px solid var(--border-1); border-radius: 6px; padding: 7px 10px; background: var(--bg-input); color: var(--text-strong); }
 .delayInput span { font-size: 12px; color: var(--text-muted); }

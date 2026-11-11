@@ -156,7 +156,7 @@ impl<S: Sink + Send> VirtualDevice for FlexVirtualSink<S> {
         if matches!(value, Signal::Float(f) if !f.is_finite())
             || matches!(value, Signal::Vec2(v) if !v.is_finite())
         {
-            self.record(bail_result("Non-finite FlexInput output signal"));
+            self.record(bail_result("输出信号包含无效数值"));
             return;
         }
         let result = match pin {
@@ -203,7 +203,7 @@ impl<S: Sink + Send> VirtualDevice for FlexVirtualSink<S> {
                     .to_string()
                 };
                 if name.is_empty() {
-                    bail_result("Unsupported FlexInput output pin")
+                    bail_result("不支持此输出通道")
                 } else {
                     let down = value.as_bool();
                     if down {
@@ -221,7 +221,7 @@ impl<S: Sink + Send> VirtualDevice for FlexVirtualSink<S> {
                 self.pad_dirty = true;
                 Ok(())
             }
-            _ => bail_result("Unsupported FlexInput output pin"),
+            _ => bail_result("不支持此输出通道"),
         };
         self.record(result);
     }
@@ -317,6 +317,12 @@ impl<S: Sink + Send> Sink for FlexVirtualSink<S> {
             "mouse_move",
             Signal::Vec2(glam::Vec2::new(dx as f32, -(dy as f32))),
         )
+    }
+    fn idle_mouse(&mut self) -> Result<()> {
+        self.inner.idle_mouse()
+    }
+    fn idle_gamepad(&mut self) -> Result<()> {
+        self.inner.idle_gamepad()
     }
     fn scroll(&mut self, horizontal: i32, vertical: i32) -> Result<()> {
         self.submit("scroll_right", Signal::Float(horizontal as f32))?;

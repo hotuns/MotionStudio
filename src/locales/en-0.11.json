@@ -1,5 +1,6 @@
 {
   "游戏震动与灯光": "Game rumble and lighting",
+  "震动与灯光": "Rumble & lights",
   "把游戏发给虚拟手柄的震动／灯光交回当前所选实体手柄。Xbox 主要提供震动，DualShock 4 还可以提供灯光；实际能力取决于实体接口。": "Forward game rumble and lighting from the virtual gamepad to the selected physical controller. Xbox mainly provides rumble; DualShock 4 can also provide lighting. Support depends on the physical interface.",
   "回传游戏震动": "Forward game rumble",
   "震动强度": "Rumble strength",
@@ -15,7 +16,7 @@
   "录入、停止、断线和切换时释放震动，恢复后等待新的游戏命令。停止灯光回传时取消待发送颜色，设备保留最后颜色。": "Recording, stopping, disconnecting and switching release rumble. Resuming waits for a new game command. Stopping lighting cancels pending colors and leaves the device at its last color.",
   "原生触摸板鼠标": "Native touchpad mouse",
   "启用触摸板鼠标": "Enable touchpad mouse",
-  "沿用 FlexInput 原生手势：单指移动、双指滚动、单指轻点左键、双指轻点右键，按下后可以拖动。双触摸板使用左板滚动、右板移动，双板同时按下为中键。": "Uses native FlexInput gestures: one-finger pointing, two-finger scrolling, one-finger tap for left click, two-finger tap for right click, and click-drag. With two pads, the left scrolls and the right points; clicking both produces a middle click.",
+  "单指移动光标，双指滚动。单指轻点为左键，双指轻点为右键，按住触摸板可拖动。双触摸板使用左板滚动、右板移动，双板同时按下为中键。": "Move the pointer with one finger and scroll with two. Tap with one finger for a left click or two for a right click. Press and move to drag. With two pads, the left scrolls and the right moves the pointer. Press both for a middle click.",
   "触摸板指针速度": "Touchpad pointer speed",
   "触摸板滚动速度": "Touchpad scroll speed",
   "自然滚动": "Natural scrolling",

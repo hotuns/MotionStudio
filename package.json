@@ -1,6 +1,6 @@
 {
   "name": "motion-studio",
-  "version": "0.15.2",
+  "version": "0.16.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "build:web": "node scripts/verify-native-input.mjs && node scripts/verify-i18n.mjs && tsc --noEmit && vite build",
     "build": "tauri build",
     "package:portable": "node scripts/package-portable.mjs",
+    "package:update": "node scripts/package-update.mjs",
     "engine:dev": "node scripts/build-engine.mjs",
     "engine:build": "node scripts/build-engine.mjs --release",
     "test": "cargo test --locked -p motion-core -p motion-engine -p motion-studio -p motion-filters -p flexinput-engine -p flexinput-devices -p flexinput-modules -p flexinput-virtual",

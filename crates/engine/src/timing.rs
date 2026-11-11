@@ -1,8 +1,24 @@
 use crate::profile::TimestampSource;
+#[cfg(windows)]
+pub use flexinput_virtual::display_clock;
 use serde::{Deserialize, Serialize};
+use std::time::{Duration, Instant};
+pub use {flexinput_engine::HrWaiter, flexinput_virtual::io_schedule};
 
 pub const MAX_GAP_NS: u64 = 50_000_000;
 pub const MAX_EVENT_AGE_NS: u64 = 100_000_000;
+pub const CONTINUOUS_OUTPUT_INTERVAL: Duration = Duration::from_millis(2);
+
+/// Carry small overruns forward on the absolute schedule, but skip missed
+/// slots instead of issuing back-to-back reports after a stall.
+pub fn next_output_deadline(deadline: Instant, now: Instant) -> Instant {
+    let next = deadline + CONTINUOUS_OUTPUT_INTERVAL;
+    if next <= now {
+        now + CONTINUOUS_OUTPUT_INTERVAL
+    } else {
+        next
+    }
+}
 
 /// Both clocks are retained. SDL's sensor clock may be synthetic; never subtract
 /// it from SDL_GetTicksNS. Host selection is deliberately explicit in the profile.

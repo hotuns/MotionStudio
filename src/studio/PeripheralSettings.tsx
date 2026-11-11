@@ -26,7 +26,7 @@ export function TouchpadSettings({profile,device,status,update}:Props){
  return <section className={styles.group}>
   <div className={styles.groupHeading}><h3>原生触摸板鼠标</h3></div>
   <Toggle label="启用触摸板鼠标" value={config.enabled} onChange={v=>set('enabled',v)}/>
-  <p className={styles.hint}>沿用 FlexInput 原生手势：单指移动、双指滚动、单指轻点左键、双指轻点右键，按下后可以拖动。双触摸板使用左板滚动、右板移动，双板同时按下为中键。</p>
+  <p className={styles.hint}>单指移动光标，双指滚动。单指轻点为左键，双指轻点为右键，按住触摸板可拖动。双触摸板使用左板滚动、右板移动，双板同时按下为中键。</p>
   {config.enabled&&<><div className={styles.grid}>
    <Range label="触摸板指针速度" value={config.pointer_speed} min={0.1} max={5} step={0.05} unit="×" onChange={v=>set('pointer_speed',v)}/>
    <Range label="触摸板滚动速度" value={config.scroll_speed} min={0.1} max={5} step={0.05} unit="×" onChange={v=>set('scroll_speed',v)}/>

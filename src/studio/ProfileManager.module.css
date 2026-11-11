@@ -24,6 +24,7 @@
 .profileFlags { display: flex; align-items: center; }.profileWarning, .profileNotApplied { color: var(--text-muted); font-size: 12px; }
 .libraryViews { display: flex; flex-wrap: wrap; gap: 6px; margin-right: auto; }
 .libraryViews button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+.pickerViews { margin-bottom: 12px; }
 .communityFilters { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 10px; }
 .communityInfo { flex: 1; min-width: 0; }
 .communityInfo > p { margin: 7px 0 0; overflow-wrap: anywhere; }

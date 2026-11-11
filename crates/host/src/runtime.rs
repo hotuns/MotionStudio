@@ -1,4 +1,4 @@
-use crate::{calibration::Calibration, guardian::Guard};
+use crate::{calibration::Calibration, guardian::Guard, io_clock::IoClock};
 use anyhow::{bail, Context, Result};
 use motion_core::{
     engine::{Engine, Frame, InputEvent},
@@ -10,7 +10,10 @@ use motion_core::{
     protocol::{Command, Event, Request, RunConfig, Status, PROTOCOL_VERSION},
     sdl::{Device, InputOrigin, Sdl},
     storage::{parse_profile, read_small},
-    timing::{Histogram, MAX_EVENT_AGE_NS},
+    timing::{
+        io_schedule::{self, IoPass},
+        Histogram, MAX_EVENT_AGE_NS,
+    },
     visibility::{self, VisibilityStatus},
 };
 use std::{
@@ -138,7 +141,8 @@ pub struct Runtime {
     watch: Arc<Mutex<Option<PathBuf>>>,
     next_discovery: Instant,
     last_status: Instant,
-    last_stick: Instant,
+    last_advance: Instant,
+    io_clock: IoClock,
     last_stats: Instant,
     last_samples: u64,
     navigation: motion_core::navigation::Navigation,
@@ -156,6 +160,7 @@ pub struct Runtime {
 impl Runtime {
     fn publish_status(&self) {
         let mut status = self.status.clone();
+        status.mouse_display_sync = self.io_clock.status();
         status.feedback = self.feedback.status.clone();
         status.output_gamepad = self
             .output
@@ -176,6 +181,7 @@ impl Runtime {
         self.publisher.status(&status);
     }
     pub fn new(dll: PathBuf, publisher: Publisher, watch: Arc<Mutex<Option<PathBuf>>>) -> Self {
+        let now = Instant::now();
         Self {
             dll,
             publisher,
@@ -190,7 +196,8 @@ impl Runtime {
             status: Status::default(),
             next_discovery: Instant::now(),
             last_status: Instant::now(),
-            last_stick: Instant::now(),
+            last_advance: now,
+            io_clock: IoClock::new(now),
             last_stats: Instant::now(),
             last_samples: 0,
             navigation: Default::default(),
@@ -254,6 +261,7 @@ impl Runtime {
         }
     }
     fn close_output(&mut self) -> Result<()> {
+        self.io_clock.set_enabled(false);
         let result = self.clear_outputs();
         self.output.take(); // Dispatcher retries releases on Drop.
         self.guard.take(); // Guardian releases any outstanding intent on EOF.
@@ -448,7 +456,6 @@ impl Runtime {
         self.processing = Histogram::default();
         self.queue = Histogram::default();
         self.last_stats = Instant::now();
-        self.last_stick = Instant::now();
         if config.emit {
             if config.auto_hide {
                 self.visibility.preparing()?;
@@ -477,15 +484,17 @@ impl Runtime {
                     }
                     OutputBackend::Legacy => Box::new(WindowsSink::new(target)?),
                 };
-                self.output = Some(Dispatcher::new(Box::new(
-                    motion_core::flex_output::FlexVirtualSink::new(sink),
-                )));
+                let sink: Box<dyn Sink> =
+                    Box::new(motion_core::flex_output::FlexVirtualSink::new(sink));
+                self.output = Some(Dispatcher::new(sink).with_scheduled_output());
             }
             if let Some(guard) = &mut self.guard {
                 guard.heartbeat()?;
             }
         } else if self.output.is_none() {
-            self.output = Some(Dispatcher::new(Box::new(ObserveSink)));
+            self.output = Some(
+                Dispatcher::new(Box::new(ObserveSink) as Box<dyn Sink>).with_scheduled_output(),
+            );
         }
         if config.emit && config.profile.virtual_gamepad != GamepadTarget::None {
             let pad = self
@@ -539,10 +548,11 @@ impl Runtime {
                 return self.lost_device();
             }
             sensors?;
+            sdl.poll_events()?;
             for _ in 0..10000 {
-                match sdl.next_event()? {
+                match sdl.take_event()? {
                     None => break,
-                    Some(Some(InputEvent::Disconnected { .. })) => return self.lost_device(),
+                    Some(InputEvent::Disconnected { .. }) => return self.lost_device(),
                     _ => {}
                 }
             }
@@ -561,6 +571,10 @@ impl Runtime {
         if let Some(engine) = &self.engine {
             self.dispatch(engine.frame.clone())?;
         }
+        self.last_advance = Instant::now();
+        self.io_clock.reset(self.last_advance);
+        self.io_clock
+            .set_enabled(config.emit && config.mouse_display_sync);
         Ok(())
     }
     fn discover(&mut self) -> Result<()> {
@@ -751,6 +765,7 @@ impl Runtime {
             }
             Control::Request(request) => {
                 let shutdown = matches!(request.command, Command::Shutdown);
+                let mut measurement = None;
                 let result = (|| -> Result<()> {
                     match request.command {
                         Command::Start { config } => self.start(*config),
@@ -771,6 +786,7 @@ impl Runtime {
                                 auto_hide: false,
                                 output_backend: Default::default(),
                                 gamepad_backend: Default::default(),
+                                mouse_display_sync: false,
                                 bias: [0.; 3],
                                 sensor_calibration: Default::default(),
                             })?;
@@ -878,22 +894,54 @@ impl Runtime {
                                 self.prepare_engine()
                             }
                         }
-                        Command::BeginMeasure { axis } => {
-                            if self.calibration.is_some() || !self.status.emitting {
-                                Err(anyhow::anyhow!("转角测量需要先保存配置并启用映射输出"))
-                            } else {
-                                self.clear_outputs()?;
-                                self.engine
-                                    .as_mut()
-                                    .context("引擎未运行")?
-                                    .begin_measurement(&axis)
+                        Command::BeginMeasure {
+                            axis,
+                            expected_revision,
+                        } => {
+                            if expected_revision.is_some_and(|rev| rev != self.status.revision) {
+                                bail!("校准所用的映射已改变，请重新打开校准悬浮窗。");
                             }
+                            if self.calibration.is_some()
+                                || !self.status.emitting
+                                || !self
+                                    .status
+                                    .device
+                                    .as_ref()
+                                    .is_some_and(|device| device.gyro)
+                            {
+                                bail!("转角测量需要先保存配置并启用映射输出");
+                            }
+                            if !self.active_layers.is_empty() {
+                                bail!("请松开配置层按键，切回基础层后再校准。");
+                            }
+                            self.engine
+                                .as_mut()
+                                .context("引擎未运行")?
+                                .begin_measurement(&axis)?;
+                            if let Err(error) = self.clear_outputs() {
+                                self.fault(format!("输出已暂停：{error:#}"));
+                                return Err(error);
+                            }
+                            self.status.motion =
+                                self.engine.as_ref().unwrap().motion.telemetry.clone();
+                            self.publish_status();
+                            Ok(())
                         }
-                        Command::EndMeasure => {
-                            self.clear_outputs()?;
-                            if let Some(engine) = &mut self.engine {
-                                engine.end_measurement();
+                        Command::EndMeasure { expected_revision } => {
+                            if expected_revision.is_some_and(|rev| rev != self.status.revision) {
+                                bail!("校准所用的映射已改变，请重新打开校准悬浮窗。");
                             }
+                            if let Some(engine) = &mut self.engine {
+                                measurement = engine.end_measurement();
+                                self.status.motion = engine.motion.telemetry.clone();
+                            }
+                            if measurement.is_some() {
+                                if let Err(error) = self.clear_outputs() {
+                                    self.fault(format!("输出已暂停：{error:#}"));
+                                    return Err(error);
+                                }
+                            }
+                            self.publish_status();
                             Ok(())
                         }
                         Command::ResetPose => {
@@ -915,6 +963,7 @@ impl Runtime {
                     id: request.id,
                     ok: result.is_ok(),
                     error: result.err().map(|e| format!("{e:#}")),
+                    measurement,
                 })?;
                 self.track_pad_shortcut(true);
                 self.publish_status();
@@ -1328,6 +1377,71 @@ impl Runtime {
         }
         Ok(())
     }
+    fn output_pass(&mut self, pass: IoPass) -> Result<()> {
+        let advance_at = pass.display_tick.unwrap_or(pass.started).max(pass.started);
+        let dt = advance_at
+            .saturating_duration_since(self.last_advance)
+            .as_secs_f32();
+        self.last_advance = advance_at;
+        if self.calibration.is_some() || self.status.binding_capture {
+            self.io_clock.begin_flush(pass);
+            return Ok(());
+        }
+        let Some(engine) = &mut self.engine else {
+            self.io_clock.begin_flush(pass);
+            return Ok(());
+        };
+        let now_ns = self.sdl.as_ref().map(Sdl::now_ns).unwrap_or(0);
+        let before = engine.base_trigger_inputs();
+        engine.advance(dt, now_ns);
+        let trigger_changed = before != engine.base_trigger_inputs();
+        self.status.motion = engine.motion.telemetry.clone();
+        self.status.processed_axes = engine.processed_axes();
+        self.track_pad_shortcut(false);
+        if trigger_changed {
+            self.sync_layers()?;
+        }
+        if let Some(engine) = &self.engine {
+            self.dispatch(engine.frame.clone())?;
+        }
+        self.io_clock.begin_flush(pass);
+        if let Some(output) = &mut self.output {
+            output.flush_output()?;
+        }
+        Ok(())
+    }
+    fn poll_inputs(&mut self) -> Result<()> {
+        if let Some(sdl) = &mut self.sdl {
+            sdl.poll_events()?;
+        }
+        for _ in 0..256 {
+            let Some(sdl) = &self.sdl else { break };
+            let Some(event) = sdl.take_event()? else {
+                break;
+            };
+            if matches!(event, InputEvent::Disconnected { .. }) {
+                self.lost_device()?;
+                break;
+            }
+            let age = sdl.now_ns().saturating_sub(event.time().host_ns);
+            if age > MAX_EVENT_AGE_NS {
+                self.status.stats.stale_events += 1;
+                self.clear_outputs()?;
+                if let Some(engine) = &mut self.engine {
+                    engine.reset();
+                }
+                continue;
+            }
+            self.queue.add(age);
+            let start = Instant::now();
+            self.input(event, self.config.is_none())?;
+            self.processing.add(start.elapsed().as_nanos() as u64);
+        }
+        if self.status.device.is_some() && self.connected_input().is_none() {
+            self.lost_device()?;
+        }
+        Ok(())
+    }
     pub fn tick(&mut self) -> Result<()> {
         if self.config.is_some() && emergency_stop() {
             self.stop_mapping("F12 紧急停止：输出已释放")?;
@@ -1362,62 +1476,6 @@ impl Runtime {
                 self.status.state = "waiting".into();
                 self.status.message = format!("连接尚未就绪，稍后重试：{error:#}");
                 self.next_discovery = Instant::now() + Duration::from_secs(2);
-            }
-        }
-        for _ in 0..256 {
-            let Some(event) = self
-                .sdl
-                .as_mut()
-                .map(Sdl::next_event)
-                .transpose()?
-                .flatten()
-            else {
-                break;
-            };
-            let Some(event) = event else {
-                continue;
-            };
-            if matches!(event, InputEvent::Disconnected { .. }) {
-                self.lost_device()?;
-                break;
-            }
-            let now = self.sdl.as_ref().map(Sdl::now_ns).unwrap_or(0);
-            let age = now.saturating_sub(event.time().host_ns);
-            if age > MAX_EVENT_AGE_NS {
-                self.status.stats.stale_events += 1;
-                self.clear_outputs()?;
-                if let Some(engine) = &mut self.engine {
-                    engine.reset();
-                }
-                continue;
-            }
-            self.queue.add(age);
-            let start = Instant::now();
-            self.input(event, self.config.is_none())?;
-            self.processing.add(start.elapsed().as_nanos() as u64);
-        }
-        if self.status.device.is_some() && self.connected_input().is_none() {
-            self.lost_device()?;
-        }
-        if self.last_stick.elapsed() >= Duration::from_millis(4) {
-            let dt = self.last_stick.elapsed().as_secs_f32();
-            self.last_stick = Instant::now();
-            if self.calibration.is_none() && !self.status.binding_capture {
-                if let Some(engine) = &mut self.engine {
-                    let now_ns = self.sdl.as_ref().map(Sdl::now_ns).unwrap_or(0);
-                    let before = engine.base_trigger_inputs();
-                    engine.advance(dt, now_ns);
-                    let trigger_changed = before != engine.base_trigger_inputs();
-                    self.status.motion = engine.motion.telemetry.clone();
-                    self.status.processed_axes = engine.processed_axes();
-                    self.track_pad_shortcut(false);
-                    if trigger_changed {
-                        self.sync_layers()?;
-                    }
-                    if let Some(engine) = &self.engine {
-                        self.dispatch(engine.frame.clone())?;
-                    }
-                }
             }
         }
         if let Some(calibration) = &self.calibration {
@@ -1455,6 +1513,17 @@ impl Runtime {
                 }
             }
         }
+        let pass = self.io_clock.begin(Instant::now());
+        if !pass.input_due && !pass.output_due {
+            self.io_clock.wait_until(pass.wake);
+            return Ok(());
+        }
+        if pass.input_due {
+            self.poll_inputs()?;
+        }
+        if pass.output_due {
+            self.output_pass(pass)?;
+        }
         if self.last_stats.elapsed() >= Duration::from_secs(1) {
             if let Some(engine) = &self.engine {
                 let count = engine.gyro_events;
@@ -1487,11 +1556,7 @@ impl Runtime {
             self.publish_status();
             self.last_status = Instant::now();
         }
-        if let Some(sdl) = &self.sdl {
-            sdl.idle();
-        } else {
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        self.io_clock.finish(pass);
         Ok(())
     }
 }
@@ -1555,6 +1620,7 @@ pub fn run(dll: &Path) -> Result<()> {
     if let Err(error) = runtime.scan() {
         runtime.status.message = format!("设备发现暂不可用：{error:#}");
     }
+    io_schedule::prepare_io_thread();
     'service: while !done.load(Ordering::Relaxed) {
         for _ in 0..16 {
             match rx.try_recv() {
@@ -1581,6 +1647,125 @@ mod tests {
     use super::*;
     use motion_core::{engine::PadState, timing::SampleTime};
     use std::{cell::RefCell, rc::Rc};
+
+    #[test]
+    fn finishing_angle_measurement_returns_the_final_sample_and_checks_the_revision() {
+        let (mut runtime, _, rx) = fixture();
+        let engine = runtime.engine.as_mut().unwrap();
+        engine.begin_measurement("yaw").unwrap();
+        engine.motion.telemetry.measured_degrees = 123.45;
+        runtime.status.revision = 5;
+
+        for revision in [4, 5] {
+            runtime
+                .control(Control::Request(Request {
+                    id: revision,
+                    command: Command::EndMeasure {
+                        expected_revision: Some(revision),
+                    },
+                }))
+                .unwrap();
+            let reply = rx
+                .try_iter()
+                .find(|event| matches!(event, Event::Reply { .. }));
+            if revision == 4 {
+                assert!(matches!(
+                    reply,
+                    Some(Event::Reply {
+                        ok: false,
+                        measurement: None,
+                        ..
+                    })
+                ));
+                assert!(runtime.engine.as_ref().unwrap().is_measuring());
+            } else {
+                let Some(Event::Reply {
+                    ok: true,
+                    measurement: Some(result),
+                    ..
+                }) = reply
+                else {
+                    panic!("Expected the final measurement")
+                };
+                assert_eq!(result.degrees, 123.45);
+                assert!(runtime.status.motion.measuring.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn held_stick_and_flick_emit_at_the_mouse_output_period() {
+        for (hz, flick, expected_counts, max_step) in [
+            (500, false, 120, 3),
+            (500, true, 900, 19),
+            (960, false, 120, 2),
+            (960, true, 900, 11),
+        ] {
+            let (mut runtime, _, _rx) = fixture();
+            let profile = &mut runtime.config.as_mut().unwrap().profile;
+            profile.stick_mouse.enabled = !flick;
+            profile.stick_mouse.speed = 1200.0;
+            profile.gyro.enabled = flick;
+            profile.gyro.counts_per_degree = 10.0;
+            profile.gyro.motion.flick.enabled = flick;
+            profile.gyro.motion.flick.smooth_ms = 100.0;
+            runtime.engine = Some(Engine::new(profile.clone()).unwrap());
+            runtime.output = Some(
+                Dispatcher::new(Box::new(ObserveSink) as Box<dyn Sink>).with_scheduled_output(),
+            );
+
+            let start = Instant::now() - Duration::from_secs(1);
+            runtime.last_advance = start;
+            let poll_period = Duration::from_millis(2);
+            let period = Duration::from_nanos(1_000_000_000 / u64::from(hz));
+            let mut schedule = io_schedule::IoSchedule::new(start + period);
+            let mut advance = |runtime: &mut Runtime, slot| {
+                let deadline = start + period * slot;
+                let tick = (hz == 960).then_some(deadline);
+                let now = tick.map_or(deadline, |t| t - Duration::from_micros(100));
+                let pass = schedule.begin(now, poll_period, period, tick, Duration::ZERO);
+                assert!(pass.output_due);
+                runtime.output_pass(pass).unwrap();
+                schedule.flushed(deadline);
+                schedule.finish(pass, deadline, tick.map(|t| t + period));
+            };
+            let axis = |host_ns, value| InputEvent::Axis {
+                time: SampleTime {
+                    host_ns,
+                    sensor_ns: 0,
+                },
+                index: 2,
+                value,
+            };
+            let slots = hz / 10;
+            let slot_ns = period.as_nanos() as u64;
+            advance(&mut runtime, 1);
+            runtime.input(axis(slot_ns + 1, i16::MAX), false).unwrap();
+            let mut previous = 0;
+            for slot in 2..=slots + 1 {
+                advance(&mut runtime, slot);
+                let counts = runtime.output.as_ref().unwrap().mouse_counts[0];
+                assert!(
+                    (1..=max_step).contains(&(counts - previous)),
+                    "flick={flick}, {hz} Hz slot {slot}, step={}",
+                    counts - previous
+                );
+                previous = counts;
+            }
+            assert!(previous.abs_diff(expected_counts) <= 1);
+
+            runtime
+                .input(axis(slot_ns * u64::from(slots + 1) + 1, 0), false)
+                .unwrap();
+            advance(&mut runtime, slots + 2);
+            // 96 truncated nanosecond slots can leave one fractional count
+            // of the 100 ms Flick to finish in the next slot.
+            let remaining = u64::from(flick && hz == 960);
+            let counts = runtime.output.as_ref().unwrap().mouse_counts[0];
+            assert!(counts.abs_diff(previous) <= remaining);
+        }
+    }
+
     #[test]
     fn capture_timeout_waits_for_neutral_then_resumes_the_original_session() {
         let (mut runtime, held, rx) = fixture();
@@ -2252,6 +2437,7 @@ mod tests {
             auto_hide: false,
             output_backend: Default::default(),
             gamepad_backend: Default::default(),
+            mouse_display_sync: false,
             bias: [0.0; 3],
             sensor_calibration: Default::default(),
         });

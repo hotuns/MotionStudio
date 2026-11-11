@@ -6,7 +6,7 @@ export function VirtualOutputStatus({status,onClose,onOpenLegacy}:{status?:Statu
   return <Dialog title="虚拟手柄运行状态" onClose={onClose} actions={<button type="button" className="primary-btn" onClick={onClose}>完成</button>}>
     {pad?<>
       <p role="status">{pad.connected?'虚拟手柄已建立':'虚拟手柄连接异常'} · <span translate="no">{gamepadNames[pad.target]}</span></p>
-      <p>运行后端：<span translate="no">{pad.backend==='vigem'?'ViGEm / FlexInput':'HIDMaestro / FlexInput'}</span></p>
+      <p>运行后端：<span translate="no">{pad.backend==='vigem'?'ViGEm':'HIDMaestro'}</span></p>
       {pad.player_index!==null?<p>XInput 玩家槽位：<span translate="no">{pad.player_index+1} / 4</span></p>:pad.target==='xbox_360'?<p>本设备的 XInput 接口已通过就绪检查；HIDMaestro 未提供玩家槽位查询。</p>:null}
       <p>正在运行的配置：<strong translate="no">{status?.profile_name}</strong></p>
       {status?.binding_capture&&<p>正在录入，输出暂时释放；虚拟设备和隐藏会话保持连接。</p>}

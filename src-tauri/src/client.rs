@@ -1,5 +1,6 @@
 use crate::runtime;
 use motion_core::{
+    motion::GameAngleMeasurement,
     protocol::{Command as EngineCommand, Event, Request, Status, PROTOCOL_VERSION},
     sdl::Device,
 };
@@ -14,7 +15,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
+
+type EngineReply = Result<Option<GameAngleMeasurement>, String>;
 
 #[derive(Clone, Default, Serialize)]
 pub struct Snapshot {
@@ -30,7 +33,7 @@ pub struct Client {
     lifecycle: Mutex<()>,
     child: Mutex<Option<Child>>,
     stdin: Mutex<Option<ChildStdin>>,
-    pending: Mutex<HashMap<u64, mpsc::Sender<Result<(), String>>>>,
+    pending: Mutex<HashMap<u64, mpsc::Sender<EngineReply>>>,
     serial: AtomicU64,
     generation: AtomicU64,
     pub stopping: AtomicBool,
@@ -138,10 +141,15 @@ impl Client {
                     self.snapshot.lock().unwrap().engine_ready = true;
                 }
             }
-            Event::Reply { id, ok, error } => {
+            Event::Reply {
+                id,
+                ok,
+                error,
+                measurement,
+            } => {
                 if let Some(sender) = self.pending.lock().unwrap().remove(&id) {
                     let _ = sender.send(if ok {
-                        Ok(())
+                        Ok(measurement)
                     } else {
                         Err(error.unwrap_or_else(|| "引擎操作失败".into()))
                     });
@@ -149,6 +157,7 @@ impl Client {
             }
             Event::Status { status } => {
                 self.snapshot.lock().unwrap().status = *status.clone();
+                self.publish_calibration();
                 let _ = self.app.emit("engine-status", status);
             }
             Event::Devices { devices } => {
@@ -165,7 +174,6 @@ impl Client {
                     serde_json::json!({"device_path": device_path, "bias": bias, "sensor":sensor}),
                 );
                 // Persist on the Rust side even if the webview is hidden or unavailable.
-                use tauri::Manager;
                 if let Some(state) = self.app.try_state::<crate::AppState>() {
                     if let Ok(mut settings) = state.settings.lock() {
                         settings.calibrations.insert(device_path.clone(), bias);
@@ -179,7 +187,26 @@ impl Client {
             Event::Log { message } => self.log(message),
         }
     }
+    fn publish_calibration(&self) {
+        if let Some(state) = self.app.try_state::<crate::AppState>() {
+            crate::game_calibration::publish_view(&self.app, &state);
+        }
+    }
     pub fn request(&self, command: EngineCommand) -> Result<(), String> {
+        self.request_reply(command).map(|_| ())
+    }
+    pub fn finish_angle_measurement(
+        &self,
+        revision: u64,
+    ) -> Result<Option<GameAngleMeasurement>, String> {
+        self.request_reply(EngineCommand::EndMeasure {
+            expected_revision: Some(revision),
+        })
+    }
+    fn request_reply(
+        &self,
+        command: EngineCommand,
+    ) -> Result<Option<GameAngleMeasurement>, String> {
         let timeout = if matches!(
             &command,
             EngineCommand::Start { .. } | EngineCommand::Apply { .. }
@@ -221,12 +248,16 @@ impl Client {
         }
         self.pending.lock().unwrap().clear();
         self.snapshot.lock().unwrap().engine_ready = false;
+        self.publish_calibration();
     }
     pub fn restart(self: &Arc<Self>) -> Result<(), String> {
         let _lifecycle = self
             .lifecycle
             .lock()
             .map_err(|_| "Engine lifecycle lock failed")?;
+        self.restart_worker()
+    }
+    fn restart_worker(self: &Arc<Self>) -> Result<(), String> {
         if self.stopping.load(Ordering::Relaxed) {
             return Err("应用正在退出".into());
         }
@@ -247,6 +278,12 @@ impl Client {
             let mut restarts = Vec::<Instant>::new();
             while !this.stopping.load(Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(250));
+                let Ok(_lifecycle) = this.lifecycle.try_lock() else {
+                    continue;
+                };
+                if this.stopping.load(Ordering::Relaxed) {
+                    break;
+                }
                 let dead = this
                     .child
                     .lock()
@@ -269,7 +306,7 @@ impl Client {
                             "引擎连续故障，自动重试已停止。可查看诊断后手动恢复。".into();
                     } else {
                         restarts.push(Instant::now());
-                        if let Err(error) = this.restart() {
+                        if let Err(error) = this.restart_worker() {
                             this.log(error.clone());
                             this.snapshot.lock().unwrap().status.message = error;
                         }
@@ -281,6 +318,29 @@ impl Client {
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::Relaxed);
         let _lifecycle = self.lifecycle.lock().unwrap();
+        self.stop_worker();
+    }
+    pub fn with_worker_stopped_for_update(
+        self: &Arc<Self>,
+        install: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| "Engine lifecycle lock failed")?;
+        if self.stopping.load(Ordering::Relaxed) {
+            return Err("应用正在退出".into());
+        }
+        self.stop_worker();
+        // On Windows the updater exits this process if the installer starts.
+        // A launch failure leaves this version open, with the worker back in standby.
+        let result = install();
+        if let Err(error) = self.spawn_worker() {
+            self.log(error);
+        }
+        result
+    }
+    fn stop_worker(&self) {
         self.stdin.lock().unwrap().take(); // Worker observes EOF and releases normally.
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(3) {

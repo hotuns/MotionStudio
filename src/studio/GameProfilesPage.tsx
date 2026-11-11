@@ -1,8 +1,7 @@
-import {useState, type ReactNode} from 'react';
+import {useId, useState, type ReactNode} from 'react';
 import {ActionMappings, type ActionMappingsProps} from './ActionMappings';
 import {FeedbackSettings, TouchpadSettings} from './PeripheralSettings';
 import {Dialog} from './Controls';
-import {OptionPicker} from './OptionPicker';
 import type {GamepadTarget} from '../types';
 import {StickSettings} from './StickSettings';
 import {TriggerSettings} from './TriggerSettings';
@@ -23,16 +22,11 @@ type Props = Omit<ActionMappingsProps, 'touchOnly' | 'onClearTouch'> & {
   onNavigate: (page: StudioPage) => void;
 };
 
-const outputChoices = [{options:[
-  {value:'none', label:'键盘与鼠标'},
-  {value:'xbox_360', label:'虚拟 Xbox 360'},
-  {value:'dualshock_4', label:'虚拟 DualShock 4（PS4）'},
-]}];
-
 export function GameProfilesPage(props: Props) {
   const {profile, status, device, blocked, capture, onUpdate, tab, onTab, layerMode} = props;
   const [touchOnly, setTouchOnly] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const outputModeId = useId();
   const measuring = !!status?.motion?.measuring;
   const virtual = profile.virtual_gamepad !== 'none';
   const conflicts = !virtual && profile.gyro.enabled && profile.gyro.output === 'right_stick';
@@ -45,29 +39,36 @@ export function GameProfilesPage(props: Props) {
   return <div className={styles.page}>
     <section className={styles.profileHeader} aria-label="游戏配置与输出">
       <div className={styles.gameHeader}>
-        <div className={styles.gameMark}>{Array.from(profile.name.trim()).slice(0, 2).join('') || '＋'}</div>
-        <div className="studio-game-info">
+        <div className={styles.gameInfo}>
           <small>当前游戏配置</small>
-          <input className="studio-game-name" aria-label="配置名称" maxLength={100} value={profile.name}
+          <input className={styles.gameName} aria-label="配置名称" maxLength={100} value={profile.name}
             disabled={blocked || layerMode || !!capture || measuring}
             onChange={event=>onUpdate(draft=>{draft.name=event.target.value;})}/>
           <p>{virtual ? '标准手柄按键和摇杆自动映射，可添加键鼠动作。' : '用手柄操作游戏中的键盘与鼠标动作。'}</p>
         </div>
-        <div className="studio-game-output"><span>输出方式</span>
-          <div className={styles.actionTools}>
-            <OptionPicker label="输出方式" value={profile.virtual_gamepad} groups={outputChoices}
+        <div className={styles.gameControls}>
+          <div className={styles.gameOutput}>
+            <label htmlFor={outputModeId}>输出方式</label>
+            <select id={outputModeId} className={styles.outputSelect} value={profile.virtual_gamepad}
               disabled={blocked || layerMode || !!capture || measuring}
-              onChange={target=>onUpdate(draft=>{draft.virtual_gamepad=target as GamepadTarget;})}/>
+              onChange={event=>{
+                const target = event.currentTarget.value as GamepadTarget;
+                onUpdate(draft=>{draft.virtual_gamepad=target;});
+              }}>
+              <option value="none">键盘与鼠标</option>
+              <option value="xbox_360">虚拟 Xbox 360</option>
+              <option value="dualshock_4">虚拟 DualShock 4（PS4）</option>
+            </select>
             <button type="button" className="secondary-btn" disabled={blocked || !!capture || measuring}
-              onClick={()=>setFeedbackOpen(true)}>游戏震动与灯光</button>
+              onClick={()=>setFeedbackOpen(true)}>震动与灯光</button>
+          </div>
+          <div className={styles.profileTools}>
+            <button type="button" className="secondary-btn" disabled={blocked || measuring} onClick={props.onImportJsm}>导入 JSM 配置</button>
+            <button type="button" className="secondary-btn" disabled={blocked || measuring} onClick={props.onExport}>导出配置</button>
+            <button type="button" className="secondary-btn" disabled={measuring} onClick={()=>props.onNavigate('profiles')}>配置库</button>
+            <button type="button" className="secondary-btn" onClick={props.onOpenFolder}>配置文件夹</button>
           </div>
         </div>
-      </div>
-      <div className={styles.profileTools}>
-        <button type="button" className="secondary-btn" disabled={blocked || measuring} onClick={props.onImportJsm}>导入 JSM 配置</button>
-        <button type="button" className="secondary-btn" disabled={blocked || measuring} onClick={props.onExport}>导出配置</button>
-        <button type="button" className="secondary-btn" disabled={measuring} onClick={()=>props.onNavigate('profiles')}>配置库</button>
-        <button type="button" className="secondary-btn" onClick={props.onOpenFolder}>配置文件夹</button>
       </div>
       {feedbackOpen&&<Dialog title="游戏震动与灯光" onClose={()=>setFeedbackOpen(false)}
         actions={<button type="button" className="primary-btn" onClick={()=>setFeedbackOpen(false)}>完成</button>}>
@@ -88,7 +89,7 @@ export function GameProfilesPage(props: Props) {
     <div data-pad-zone="game-panel" className={styles.tabPanel}>
       {tab==='actions' ? <ActionMappings profile={profile} device={device} status={status} blocked={blocked}
         capture={capture} onCapture={props.onCapture} onCancelCapture={props.onCancelCapture} onAssignEscape={props.onAssignEscape}
-        onUpdate={onUpdate} onEdit={props.onEdit} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :
+        onUpdate={onUpdate} onEdit={props.onEdit} onBatch={props.onBatch} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :
         <fieldset className="studio-content" disabled={blocked || !!capture}>
           {tab==='sticks' && <StickSettings profile={profile} update={onUpdate}/>}
           {tab==='triggers' && <TriggerSettings profile={profile} layerMode={layerMode} update={onUpdate} onEditBase={props.onEditBase}/>}

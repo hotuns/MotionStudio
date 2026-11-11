@@ -48,11 +48,17 @@ impl<K: Sink, P: Sink> Sink for SplitSink<K, P> {
     fn mouse(&mut self, x: i32, y: i32) -> Result<()> {
         self.keys.mouse(x, y)
     }
+    fn idle_mouse(&mut self) -> Result<()> {
+        self.keys.idle_mouse()
+    }
     fn scroll(&mut self, h: i32, v: i32) -> Result<()> {
         self.keys.scroll(h, v)
     }
     fn gamepad(&mut self, pad: PadState) -> Result<()> {
         self.pad.gamepad(pad)
+    }
+    fn idle_gamepad(&mut self) -> Result<()> {
+        self.pad.idle_gamepad()
     }
 }
 

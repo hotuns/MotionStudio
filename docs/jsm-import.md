@@ -17,7 +17,7 @@ ZRF = LMOUSE
 
 `ZL` 和 `ZLF` 对应左扳机轻拉和全拉，`ZR` 和 `ZRF` 对应右扳机。动作列表里可以继续编辑每个绑定，也可以为手动创建的配置选择这四个输入。模式、轻拉阈值和快拉时间窗位于「游戏配置 → 扳机」，全拉点使用校准后的最大行程。
 
-转换支持 `NO_FULL`、`NO_SKIP`、`NO_SKIP_EXCLUSIVE`、`MAY_SKIP`、`MUST_SKIP` 及后两种的 `_R` 变体。`NO_SKIP_EXCLUSIVE` 在全拉时释放轻拉动作。原配置没有启用全拉模式时，转换会保留全拉绑定并提示在 Studio 启用对应模式。识别轻拉和全拉复用 FlexInput JSM 的状态机。
+转换支持 `NO_FULL`、`NO_SKIP`、`NO_SKIP_EXCLUSIVE`、`MAY_SKIP`、`MUST_SKIP` 及后两种的 `_R` 变体。`NO_SKIP_EXCLUSIVE` 在全拉时释放轻拉动作。原配置没有启用全拉模式时，转换会保留全拉绑定并提示在 Studio 启用对应模式。
 
 ## 转换成 Studio 配置
 

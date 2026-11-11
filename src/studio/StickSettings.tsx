@@ -22,7 +22,7 @@ export function StickSettings({ profile, update }: { profile: Profile; update: M
       <p className={styles.hint}>外圈按推杆幅度判断，不限方向，回到内圈后释放。内圈不包含中心死区。在「动作映射」中可将内圈或外圈绑定到按键、组合键或滚轮。</p>
       <Toggle label="启用摇杆防回弹" value={profile.stick_rebound_ms!=null} onChange={enabled=>update(profile=>{profile.stick_rebound_ms=enabled?40:null;})}/>
       {profile.stick_rebound_ms!=null&&<Range label="防回弹窗口" value={profile.stick_rebound_ms} min={10} max={150} step={5} unit=" ms" onChange={ms=>update(profile=>{profile.stick_rebound_ms=ms;})}/>}
-      <p className={styles.hint}>复用 FlexInput 的回弹过滤，抑制快速松杆时短暂越过中心造成的反向输入。默认关闭，可按手柄手感启用。</p>
+      <p className={styles.hint}>抑制快速松杆时越过中心造成的短暂反向输入。默认关闭，可按手柄手感启用。</p>
     </div>
     <div className={styles.grid}>
       <div className={styles.group}>

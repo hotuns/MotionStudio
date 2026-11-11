@@ -2,6 +2,7 @@
 //! Studio supplies the lifecycle-owned, fallible device implementation.
 pub mod layouts;
 pub mod keyboard;
+pub mod io_schedule;
 use flexinput_core::{Signal, SignalType};
 /// Original lib.rs helper: a signed Float is a number of wheel notches.
 pub fn scroll_notches(value: Signal) -> i32 {
@@ -85,6 +86,8 @@ pub trait VirtualDevice: Send {
 
 pub mod pins;
 pub use pins::apply_pin;
+#[cfg(windows)]
+pub mod display_clock;
 #[cfg(windows)]
 mod sony_feedback;
 #[cfg(windows)]

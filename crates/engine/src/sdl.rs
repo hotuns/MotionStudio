@@ -125,7 +125,7 @@ fn load_dll(path: &Path) -> Result<(PathBuf, &'static Library)> {
     let version = unsafe { library.get::<unsafe extern "C" fn() -> i32>(b"SDL_GetVersion\0")?() };
     anyhow::ensure!(
         version == 3_004_018,
-        "The FlexInput provider requires the verified Studio SDL 3.4.18, found {version}"
+        "手柄输入需要 SDL 3.4.18，检测到版本编号 {version}"
     );
     let library: &'static Library = Box::leak(Box::new(library));
     *loaded = Some((path.clone(), library));
@@ -219,10 +219,23 @@ fn windows_input_origin(_: &str) -> InputOrigin {
     InputOrigin::Unknown
 }
 
+// Translate the two provider messages exposed by the event-session adapter.
+fn event_error(message: String) -> anyhow::Error {
+    match message.as_str() {
+        "A FlexInput SDL event session is already active" => {
+            anyhow::anyhow!("手柄输入会话已在运行")
+        }
+        "FlexInput raw input queue overflow; stop and release output" => {
+            anyhow::anyhow!("手柄输入事件积压，无法继续处理")
+        }
+        _ => anyhow::Error::msg(message),
+    }
+}
+
 impl Sdl {
     pub fn load(path: &Path) -> Result<Self> {
         let (path, library) = load_dll(path)?;
-        let backend = SdlBackend::for_events().map_err(anyhow::Error::msg)?;
+        let backend = SdlBackend::for_events().map_err(event_error)?;
         let mut this = Self {
             backend,
             _library: library,
@@ -306,13 +319,6 @@ impl Sdl {
             .map(input_event)
             .collect()
     }
-    pub fn next_event(&mut self) -> Result<Option<Option<InputEvent>>> {
-        Ok(self
-            .backend
-            .next_raw_event()
-            .map_err(anyhow::Error::msg)?
-            .map(|e| Some(input_event(e))))
-    }
     pub fn is_connected(&self) -> bool {
         self.backend.event_connected()
     }
@@ -322,8 +328,15 @@ impl Sdl {
     pub fn now_ns(&self) -> u64 {
         SdlBackend::event_now_ns()
     }
-    pub fn idle(&self) {
-        SdlBackend::event_idle();
+    pub fn poll_events(&mut self) -> Result<()> {
+        self.backend.update_events().map_err(event_error)
+    }
+    pub fn take_event(&self) -> Result<Option<InputEvent>> {
+        Ok(self
+            .backend
+            .take_raw_event()
+            .map_err(event_error)?
+            .map(input_event))
     }
     fn error(&self) -> String {
         string(flexinput_devices::sdl_sys::error::SDL_GetError())
@@ -455,8 +468,9 @@ impl Sdl {
         if guard.joystick.is_null() {
             bail!("Open synthetic joystick: {}", self.error());
         }
+        self.poll_events()?;
         for _ in 0..10000 {
-            if self.next_event()?.is_none() {
+            if self.take_event()?.is_none() {
                 break;
             }
         }
@@ -520,12 +534,12 @@ impl Sdl {
             }
         }
         let mut events = vec![];
+        self.poll_events()?;
         for _ in 0..10000 {
-            match self.next_event()? {
-                Some(Some(event)) => events.push(event),
-                Some(None) => {}
-                None => break,
-            }
+            let Some(event) = self.take_event()? else {
+                break;
+            };
+            events.push(event);
         }
         let gyro: Vec<_> = events
             .iter()

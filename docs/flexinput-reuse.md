@@ -9,10 +9,11 @@ For the complete upstream crate inventory, the current 0.8.0 integration and rem
 | Responsibility | Implementation | Necessary Studio adaptation |
 |---|---|---|
 | Mapping evaluation, standard gamepad mapping, RWS | FlexInput core and engine graph/evaluator modules | Translate game/action settings into the graph; feed timestamped samples and expose telemetry |
+| In-game angle calibration | `processing.rws` measurement mode and upstream `CalFlick` | Feed the selected processed stick from the input bus, isolate its regular mappings, and save the measured scale through a game overlay |
 | Node definitions | Selected original `flexinput-modules` descriptors for processing, logic, math and generators | Build Studio graphs using upstream output metadata; preserve additional dynamic outlets and Studio source/sink nodes |
 | Coordinate spaces, orientation, IMU estimation | FlexInput 3DOF/IMU implementations | Activation, device calibration, profile lifecycle and Studio settings |
 | Curves, One Euro, decay, brake, angle snapping | Original `eval/modules/jsm/cc.rs` through the headless API | `motion_curves.rs` is a compatibility re-export for Studio profiles |
-| High-resolution output timing | FlexInput `HrWaiter`, used directly | Studio owns the sender thread and its cancellation boundaries; no global timer-resolution change |
+| Input and output timing | FlexInput `start_io_thread` deadline rules, `HrWaiter` and Windows `display_clock.rs` | Headless I/O loop supplies SDL FIFO work and scheduled device submission |
 | Continuous HID mouse | FlexInput `keymouse_hm.rs::flush` behavior: accumulated displacement, default 500 Hz cadence, raw publication, signed count carry and one neutral transition | Consume Studio's already integrated displacement exactly once; preserve discrete chord/scroll ordering; cancel queued output on stop/switch |
 | HID transport, keyboard/mouse descriptors, gamepad encoding, GIP, feature answers, driver deployment | Pinned FlexInput HIDMaestro client and payloads | Studio-owned fixed-profile helper, device ownership, consent entry, error reporting and crash protection |
 | SendInput / ViGEm compatibility mode | Existing Studio Windows adapter remains during migration | This is a retained compatibility implementation, not claimed as fully migrated to FlexInput's enigo wrapper; its guardian and bindings must remain compatible before replacement |
@@ -24,11 +25,23 @@ For the complete upstream crate inventory, the current 0.8.0 integration and rem
 
 0.6.0 reused the native driver/client but added an inline ACK wait to every mouse report in the SDL processing thread. A slow confirmation could block sample processing, create a backlog, and trigger the existing 50 ms stale-input reset. This was a Studio adaptation error, not evidence that FlexInput itself had the same problem.
 
-The corrected path keeps input processing independent of key/mouse I/O. Continuous mouse output follows the upstream raw-stream path, with its default 500 Hz cadence, the original high-resolution timer, an absolute deadline and no repeated catch-up burst. Displacement is accumulated between output ticks; fractional input residuals stay intact. Like upstream, a transition to zero is emitted once and then an idle relative device stays silent.
+The 0.6.1 correction separated synchronous HID confirmation from input processing. It accumulated mouse displacement between 500 Hz output ticks and carried fractional counts forward. Like upstream, the mouse emitted one zero-motion transition and stayed idle afterward.
 
-Extra confirmation is limited to discrete key/button/scroll and release boundaries on the I/O thread, where Studio must preserve short transitions and modifier ordering from its action model. It no longer blocks gyro sampling or paces every continuous mouse report. A bounded ordered queue, generation cancellation and a release/join boundary prevent a stopped profile from replaying old movement into the next one. The output thread never renews the main runtime's safety lease.
+Studio kept confirmation on a worker for discrete key, button, scroll and release boundaries. A bounded ordered queue, generation cancellation and a release/join boundary prevent a stopped profile from replaying old movement into the next one. The main runtime owns the safety lease.
 
 `vendor/flexinput/crates/virtual/src/keymouse_hm.rs` and `crates/ui/src/app/threads.rs` retain the original reference source and hashes for comparing the adapted scheduling code; these references do not pull the FlexInput UI into the application. The original `hr_timer.rs` and pure curve file are compiled directly. 0.6.1 checked 111 vendor files; 0.7.0 checks 141.
+
+## Input and output schedule
+
+`crates/virtual/src/io_schedule.rs` extracts the timing portion of `crates/ui/src/app/threads.rs::start_io_thread` at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Separate absolute deadlines drive input polling and output. The rules carry over the quarter-period slack, stall recovery, measured preparation lead, high-resolution waits and Windows I/O priority. The original `crates/virtual/src/display_clock.rs` supplies vblank tracking, VRR and `PreciseWait`. Studio uses 500 Hz for polling and fixed output. Display sync schedules four slots per frame and falls back to four times the nominal refresh rate, with 60 Hz as the nominal rate until a display is known.
+
+The Studio adapter polls SDL once per input deadline and evaluates each event from the timestamped FIFO on the I/O thread. This retains gyro sample clocks and button edges. At output deadlines it advances held-stick aim, Flick Stick and timed turns, then submits accumulated mouse displacement and the latest virtual gamepad axes. Digital gamepad edges still submit immediately. The HID keyboard and mouse adapter uses the raw mouse write and single neutral transition from `keymouse_hm.rs::flush`. The worker still confirms discrete edges and releases. If an edge is pending, movement joins the ordered queue behind it. That queue also handles descriptor-sized overflow and generation cancellation. The pinned manifest covers 152 files.
+
+## In-game angle calibration
+
+The Studio gyro graph uses `cal_measure` and `cal_output` in the original `crates/engine/src/eval/modules/rws.rs::compute_rws` at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Its second input receives the configured Flick stick's processed vector on each timed gyro sample during yaw measurement. The existing `rws_calibration.rs` headless extraction of `Flick` from upstream `eval/modules/jsm/cal.rs` supplies the rim tracking, smoothing and angle accumulation. The same evaluator combines the stick and gyro, drives the selected output, and reports signed degrees and peak stick deflection.
+
+Studio's controls use a separate graph. The adapter neutralizes the selected stick on that graph's input bus during calibration and continues feeding its original processed value to RWS. The desktop overlay keeps game focus, pins the measurement to the running base profile and revision, and uses the engine's final result to update only the calibrated output scale through the existing profile save path.
 
 ## 0.7.0 provider and contract integration
 
@@ -69,6 +82,8 @@ The activator port includes one behavior correction: once the second double pres
 General hold layers are a Studio configuration adapter over the existing engine. Their sparse patches inherit unmodified fields, replace actions by canonical input and stack in explicit order. All nonempty combinations of the bounded eight layers are validated before accepting a configuration. Runtime reconfiguration preserves the sample clock, input bus, unchanged activator state, shared held outputs and current virtual device. No dedicated ADS branch was added. Hold modifiers use physical inputs and base geometry so a layer cannot invalidate its own trigger by changing a ring or filter. This follows the user-facing inheritance principle in [Steam Input action set layers](https://partner.steamgames.com/doc/features/steam_controller/action_set_layers?l=english), not its API or a claim of complete Steam Input behavior parity.
 
 Recording now uses an output-only pause lease. It retains the input, output device and visibility session, suppresses all automatic profile switching, and resumes only after neutral physical controls. The Windows profile-switch overlay and UI localization belong to the Studio shell; neither is a competing input or motion implementation.
+
+Guided binding setup extends that same lease across the whole queue. The main view and the always-on-top recording window share the Studio action list and focused WebView keyboard and mouse capture. The existing engine lease keeps the FlexInput SDL provider (`flexinput-devices`, pinned `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`) and virtual device attached while output is paused. Both entry points produce existing Studio `Action` output strings and retain the same validated profile format.
 
 Reviewed further candidates remain explicit:
 

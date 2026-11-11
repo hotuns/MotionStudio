@@ -1,0 +1,53 @@
+name: Prepare Windows release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: node scripts/package-update.mjs --check-tag
+      - run: npm ci
+      - name: Build and sign Windows packages
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Configure the TAURI_SIGNING_PRIVATE_KEY repository secret first.' }
+          npm run build -- --ci --bundles nsis --config src-tauri/tauri.release.conf.json -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run package:update
+      - name: Verify both signed packages without installing them
+        run: cargo test --locked --release -p motion-studio updates::tests::signed_release_packages -- --ignored
+      - name: Create a draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $release = Join-Path $PWD "artifacts/release-$tag"
+          $assets = @(Get-ChildItem -LiteralPath $release -File | ForEach-Object { $_.FullName })
+          $notes = (Get-Content -LiteralPath (Join-Path $release 'latest.json') -Raw | ConvertFrom-Json).notes
+          if ($notes) {
+            $notesPath = Join-Path $env:RUNNER_TEMP 'motion-studio-release-notes.md'
+            Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8
+            $notesArgs = @('--notes-file', $notesPath)
+          } else {
+            $notesArgs = @('--generate-notes')
+          }
+          gh release create $tag @assets --verify-tag --draft --title "Motion Studio $tag" @notesArgs

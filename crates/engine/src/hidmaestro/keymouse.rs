@@ -1,7 +1,10 @@
 //! Ordered keyboard/mouse delivery off the SDL sampling thread.
 //! Relative motion coalesces only between discrete input transitions. ACK waits
 //! and descriptor-sized splitting happen exclusively on this I/O worker.
-use crate::output::{MouseTrace, MouseTracePoint, OutputStats};
+use crate::{
+    output::{MouseTrace, MouseTracePoint, OutputStats},
+    timing::{next_output_deadline, CONTINUOUS_OUTPUT_INTERVAL},
+};
 use anyhow::{bail, Context, Result};
 use std::{
     collections::VecDeque,
@@ -13,7 +16,6 @@ use std::{
 const MAX_QUEUE: usize = 256;
 const MAX_MOTION: i64 = 8_000_000;
 const MAX_QUEUE_AGE: Duration = Duration::from_millis(100);
-const OUTPUT_INTERVAL: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Delivery {
@@ -60,19 +62,31 @@ struct State {
     error: Option<String>,
     stats: OutputStats,
     mouse_trace: MouseTrace,
+    last_mouse: [u8; 7],
 }
-#[derive(Default)]
 struct Shared {
     state: Mutex<State>,
+    mouse: Mutex<Box<dyn ReportWriter>>,
     wake: Condvar,
 }
 impl Shared {
+    fn new(mouse: impl ReportWriter) -> Self {
+        Self {
+            state: Mutex::default(),
+            mouse: Mutex::new(Box::new(mouse)),
+            wake: Condvar::new(),
+        }
+    }
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
     fn current(&self, generation: u64) -> bool {
         let s = self.lock();
         s.generation == generation && !s.closing && s.error.is_none()
+    }
+    fn with_mouse<T>(&self, run: impl FnOnce(&mut dyn ReportWriter) -> Result<T>) -> Result<T> {
+        let mut mouse = self.mouse.lock().unwrap_or_else(|error| error.into_inner());
+        run(mouse.as_mut())
     }
     fn error(s: &State) -> Result<()> {
         if let Some(error) = &s.error {
@@ -90,13 +104,13 @@ pub(super) struct KeyMouse {
 }
 impl KeyMouse {
     pub(super) fn start(keyboard: impl ReportWriter, mouse: impl ReportWriter) -> Result<Self> {
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared::new(mouse));
         let worker = shared.clone();
         let thread = thread::Builder::new()
             .name("hid-keymouse-output".into())
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run(&worker, keyboard, mouse)
+                    run(&worker, keyboard)
                 }));
                 let mut s = worker.lock();
                 if result.is_err() && s.error.is_none() {
@@ -117,8 +131,57 @@ impl KeyMouse {
         Shared::error(&self.shared.lock())
     }
     pub(super) fn submit(&self, report: Report) -> Result<()> {
+        let s = self.shared.lock();
+        Shared::error(&s)?;
+        self.enqueue(s, report)
+    }
+    pub(super) fn motion(&self, buttons: u8, dx: i32, dy: i32) -> Result<()> {
         let mut s = self.shared.lock();
         Shared::error(&s)?;
+        if !s.busy
+            && !s.reset
+            && s.queue.is_empty()
+            && dx.unsigned_abs() <= 32767
+            && dy.unsigned_abs() <= 32767
+        {
+            self.write_at_tick(&mut s, mouse_report(buttons, dx as i16, dy as i16, 0, 0))?;
+            s.stats.direct_motion_reports += 1;
+            return Ok(());
+        }
+        self.enqueue(
+            s,
+            Report::Motion {
+                buttons,
+                x: i64::from(dx),
+                y: i64::from(dy),
+            },
+        )
+    }
+    pub(super) fn idle_motion(&self, buttons: u8) -> Result<()> {
+        let mut s = self.shared.lock();
+        Shared::error(&s)?;
+        if !s.busy && !s.reset && s.queue.is_empty() && s.last_mouse[1..7] != [0; 6] {
+            self.write_at_tick(&mut s, mouse_report(buttons, 0, 0, 0, 0))?;
+        }
+        Ok(())
+    }
+    fn write_at_tick(&self, s: &mut State, report: [u8; 7]) -> Result<()> {
+        // An idle worker owns no pending edge or ACK. Hold the state lock
+        // through the nonblocking raw write so it cannot start one mid-flush.
+        let start = Instant::now();
+        let result = self
+            .shared
+            .with_mouse(|writer| writer.write(&report, Delivery::Stream));
+        record_write(s, &report, true, start, Instant::now(), result.is_ok());
+        if let Err(error) = &result {
+            s.error = Some(format!("HIDMaestro 键鼠输出失败：{error:#}"));
+            s.generation += 1;
+            s.reset = true;
+            self.shared.wake.notify_one();
+        }
+        result
+    }
+    fn enqueue(&self, mut s: MutexGuard<'_, State>, report: Report) -> Result<()> {
         if let Report::Motion { buttons, x, y } = &report {
             if x.unsigned_abs() > MAX_MOTION as u64 || y.unsigned_abs() > MAX_MOTION as u64 {
                 bail!("HIDMaestro 鼠标位移过大");
@@ -235,31 +298,24 @@ impl Drop for KeyMouse {
     }
 }
 
-// Stream behavior follows FlexInput c69f53ad keymouse_hm.rs::flush:
-// accumulate displacement, emit signed HID counts on the I/O cadence, publish
-// raw motion without per-frame delivery waits, and send one zero transition.
-// The timer is the upstream HrWaiter itself. The ordered queue/reset boundary
-// adapts Studio's timestamped samples and immediate configuration switches.
-fn send(
-    shared: &Shared,
-    writer: &mut impl ReportWriter,
+fn record_write(
+    s: &mut State,
     report: &[u8],
     mouse: bool,
-    delivery: Delivery,
-) -> Result<()> {
-    let start = Instant::now();
-    let result = writer.write(report, delivery);
-    let completed = Instant::now();
+    start: Instant,
+    completed: Instant,
+    succeeded: bool,
+) {
     let us = completed
         .duration_since(start)
         .as_micros()
         .min(u128::from(u64::MAX)) as u64;
-    let mut s = shared.lock();
     s.stats.wait_total_us = s.stats.wait_total_us.saturating_add(us);
     s.stats.wait_max_us = s.stats.wait_max_us.max(us);
-    if result.is_ok() {
+    if succeeded {
         if mouse {
             s.stats.mouse_reports += 1;
+            s.last_mouse.copy_from_slice(report);
             let dx = i32::from(i16::from_le_bytes([report[1], report[2]]));
             let dy = i32::from(i16::from_le_bytes([report[3], report[4]]));
             s.mouse_trace.record([dx, dy], completed);
@@ -267,43 +323,48 @@ fn send(
             s.stats.keyboard_reports += 1;
         }
     }
-    result
 }
-fn next_deadline(previous: Instant, now: Instant) -> Instant {
-    let next = previous + OUTPUT_INTERVAL;
-    if now.saturating_duration_since(next) > OUTPUT_INTERVAL {
-        now + OUTPUT_INTERVAL
-    } else {
-        next
-    }
-}
-struct Devices<'a, K, M> {
+struct Devices<'a, K> {
     shared: &'a Shared,
     keyboard: K,
-    mouse: M,
     timer: flexinput_engine::HrWaiter,
-    next_motion: Instant,
-    last_mouse: [u8; 7],
-    zero_due: Option<Instant>,
+    next_scroll: Instant,
 }
-impl<K: ReportWriter, M: ReportWriter> Devices<'_, K, M> {
+impl<K: ReportWriter> Devices<'_, K> {
     fn mouse(&mut self, report: [u8; 7], delivery: Delivery) -> Result<()> {
-        send(self.shared, &mut self.mouse, &report, true, delivery)?;
-        self.last_mouse = report;
-        self.zero_due = (report[1..7] != [0; 6]).then(|| Instant::now() + OUTPUT_INTERVAL);
-        Ok(())
+        let start = Instant::now();
+        let result = self
+            .shared
+            .with_mouse(|writer| writer.write(&report, delivery));
+        let completed = Instant::now();
+        record_write(
+            &mut self.shared.lock(),
+            &report,
+            true,
+            start,
+            completed,
+            result.is_ok(),
+        );
+        result
+    }
+    fn keyboard(&mut self, report: [u8; 8], delivery: Delivery) -> Result<()> {
+        let start = Instant::now();
+        let result = self.keyboard.write(&report, delivery);
+        let completed = Instant::now();
+        record_write(
+            &mut self.shared.lock(),
+            &report,
+            false,
+            start,
+            completed,
+            result.is_ok(),
+        );
+        result
     }
     fn neutral(&mut self) -> Result<()> {
-        let keys = send(
-            self.shared,
-            &mut self.keyboard,
-            &[0; 8],
-            false,
-            Delivery::Release,
-        );
+        let keys = self.keyboard([0; 8], Delivery::Release);
         let mouse = self.mouse([0; 7], Delivery::Release);
-        self.zero_due = None;
-        self.next_motion = Instant::now();
+        self.next_scroll = Instant::now();
         keys.and(mouse)
     }
     fn wait_until(&self, deadline: Instant) {
@@ -311,9 +372,9 @@ impl<K: ReportWriter, M: ReportWriter> Devices<'_, K, M> {
             self.timer.wait(left);
         }
     }
-    fn pace(&mut self) {
-        self.wait_until(self.next_motion);
-        self.next_motion = next_deadline(self.next_motion, Instant::now());
+    fn pace_scroll(&mut self) {
+        self.wait_until(self.next_scroll);
+        self.next_scroll = next_output_deadline(self.next_scroll, Instant::now());
     }
     fn deliver(&mut self, generation: u64, report: Report) -> Result<()> {
         if !self.shared.current(generation) {
@@ -322,14 +383,8 @@ impl<K: ReportWriter, M: ReportWriter> Devices<'_, K, M> {
         match report {
             Report::Keyboard(bytes) => {
                 // A modifier cannot overtake an older mouse/scroll frame.
-                self.mouse.finish()?;
-                send(
-                    self.shared,
-                    &mut self.keyboard,
-                    &bytes,
-                    false,
-                    Delivery::Confirmed,
-                )
+                self.shared.with_mouse(|writer| writer.finish())?;
+                self.keyboard(bytes, Delivery::Confirmed)
             }
             Report::Buttons(buttons) => {
                 self.mouse(mouse_report(buttons, 0, 0, 0, 0), Delivery::Confirmed)
@@ -339,7 +394,6 @@ impl<K: ReportWriter, M: ReportWriter> Devices<'_, K, M> {
                 mut x,
                 mut y,
             } => loop {
-                self.pace();
                 if !self.shared.current(generation) {
                     return Ok(());
                 }
@@ -351,13 +405,15 @@ impl<K: ReportWriter, M: ReportWriter> Devices<'_, K, M> {
                 if x == 0 && y == 0 {
                     return Ok(());
                 }
+                // Only descriptor-sized overflow needs an additional report.
+                self.timer.wait(CONTINUOUS_OUTPUT_INTERVAL);
             },
             Report::Scroll {
                 buttons,
                 mut horizontal,
                 mut vertical,
             } => loop {
-                self.pace();
+                self.pace_scroll();
                 if !self.shared.current(generation) {
                     return Ok(());
                 }
@@ -382,7 +438,7 @@ fn mouse_report(buttons: u8, x: i16, y: i16, h: i8, v: i8) -> [u8; 7] {
     r[6] = h as u8;
     r
 }
-fn run(shared: &Shared, keyboard: impl ReportWriter, mouse: impl ReportWriter) {
+fn run(shared: &Shared, keyboard: impl ReportWriter) {
     // FlexInput raises only its bounded I/O loop; the UI remains at normal
     // priority. HrWaiter yields on an absolute grid rather than catch-up bursts.
     #[cfg(windows)]
@@ -395,15 +451,12 @@ fn run(shared: &Shared, keyboard: impl ReportWriter, mouse: impl ReportWriter) {
     let mut devices = Devices {
         shared,
         keyboard,
-        mouse,
         timer: flexinput_engine::HrWaiter::new(),
-        next_motion: Instant::now(),
-        last_mouse: [0; 7],
-        zero_due: None,
+        next_scroll: Instant::now(),
     };
     loop {
         let mut s = shared.lock();
-        while !s.closing && !s.reset && s.queue.is_empty() && devices.zero_due.is_none() {
+        while !s.closing && !s.reset && s.queue.is_empty() {
             s = shared.wake.wait(s).unwrap_or_else(|e| e.into_inner());
         }
         let generation = s.generation;
@@ -427,51 +480,22 @@ fn run(shared: &Shared, keyboard: impl ReportWriter, mouse: impl ReportWriter) {
             }
             continue;
         }
-        // Wait before removing a pending motion frame, so newly arrived sensor
-        // deltas still coalesce into the report for this tick.
-        if matches!(
-            s.queue.front().map(|p| &p.report),
-            Some(Report::Motion { .. })
-        ) && Instant::now() < devices.next_motion
-        {
-            let deadline = devices.next_motion;
-            drop(s);
-            devices.wait_until(deadline);
+        let Some(pending) = s.queue.pop_front() else {
             continue;
-        }
-        let result = if let Some(pending) = s.queue.pop_front() {
-            s.busy = true;
-            let age = pending.queued.elapsed();
-            s.stats.queue_max_us = s
-                .stats
-                .queue_max_us
-                .max(age.as_micros().min(u128::from(u64::MAX)) as u64);
-            drop(s);
-            if age > MAX_QUEUE_AGE {
-                Err(anyhow::anyhow!(
-                    "HIDMaestro 输出积压超过 100 ms，已暂停映射"
-                ))
-            } else {
-                devices.deliver(generation, pending.report)
-            }
-        } else if let Some(due) = devices.zero_due {
-            if Instant::now() < due {
-                drop(s);
-                devices.wait_until(due);
-                continue;
-            }
-            s.busy = true;
-            drop(s);
-            if shared.current(generation) {
-                devices.mouse(
-                    mouse_report(devices.last_mouse[0], 0, 0, 0, 0),
-                    Delivery::Stream,
-                )
-            } else {
-                Ok(())
-            }
+        };
+        s.busy = true;
+        let age = pending.queued.elapsed();
+        s.stats.queue_max_us = s
+            .stats
+            .queue_max_us
+            .max(age.as_micros().min(u128::from(u64::MAX)) as u64);
+        drop(s);
+        let result = if age > MAX_QUEUE_AGE {
+            Err(anyhow::anyhow!(
+                "HIDMaestro 输出积压超过 100 ms，已暂停映射"
+            ))
         } else {
-            continue;
+            devices.deliver(generation, pending.report)
         };
         if let Err(e) = result {
             {
@@ -646,8 +670,8 @@ mod tests {
         entered.recv_timeout(Duration::from_secs(2)).unwrap();
         io.submit(Report::Keyboard([1, 0, 0, 0, 0, 0, 0, 0]))
             .unwrap();
-        move_by(&io, 2, 0, 0);
-        move_by(&io, 3, 0, 0);
+        io.motion(0, 2, 0).unwrap();
+        io.motion(0, 3, 0).unwrap();
         io.submit(Report::Scroll {
             buttons: 0,
             horizontal: 1,
@@ -655,7 +679,8 @@ mod tests {
         })
         .unwrap();
         io.submit(Report::Buttons(8)).unwrap();
-        move_by(&io, 4, 0, 8);
+        io.motion(8, 4, 0).unwrap();
+        assert_eq!(io.stats().direct_motion_reports, 0);
         io.submit(Report::Buttons(0)).unwrap();
         io.submit(Report::Keyboard([0; 8])).unwrap();
         io.submit(Report::Keyboard([0, 0, 4, 0, 0, 0, 0, 0]))
@@ -776,9 +801,47 @@ mod tests {
         assert!(frames[2..].iter().all(|(_, b)| b.iter().all(|v| *v == 0)));
     }
     #[test]
+    fn failed_direct_motion_releases_devices_and_latches_the_error() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let fake = |mouse| Fake {
+            mouse,
+            log: log.clone(),
+            gate: None,
+            fail_press: mouse,
+        };
+        let io = KeyMouse::start(fake(false), fake(true)).unwrap();
+        assert!(io.motion(0, 20, -10).is_err());
+        assert!(io.motion(0, 1, 0).is_err());
+        {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut state = io.shared.lock();
+            while state.reset_done == 0 {
+                let left = deadline.checked_duration_since(Instant::now()).unwrap();
+                state = io.shared.wake.wait_timeout(state, left).unwrap().0;
+            }
+        }
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                (true, mouse_report(0, 20, -10, 0, 0).to_vec()),
+                (false, vec![0; 8]),
+                (true, vec![0; 7]),
+            ]
+        );
+        assert_eq!(io.stats().direct_motion_reports, 0);
+    }
+
+    #[test]
     fn queue_limits_are_explicit_and_stale_input_is_neutralized_instead_of_replayed() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let fake = |mouse| Fake {
+            mouse,
+            log: log.clone(),
+            gate: None,
+            fail_press: false,
+        };
         let io = KeyMouse {
-            shared: Arc::new(Shared::default()),
+            shared: Arc::new(Shared::new(fake(true))),
             thread: None,
         };
         for _ in 0..MAX_QUEUE {
@@ -786,7 +849,7 @@ mod tests {
         }
         assert!(io.submit(Report::Buttons(0)).is_err());
         assert_eq!(io.stats().queued, MAX_QUEUE);
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared::new(fake(true)));
         shared.lock().queue.push_back(Pending {
             report: Report::Motion {
                 buttons: 0,
@@ -795,21 +858,9 @@ mod tests {
             },
             queued: Instant::now() - Duration::from_secs(1),
         });
-        let log = Arc::new(Mutex::new(vec![]));
-        let k = Fake {
-            mouse: false,
-            log: log.clone(),
-            gate: None,
-            fail_press: false,
-        };
-        let m = Fake {
-            mouse: true,
-            log: log.clone(),
-            gate: None,
-            fail_press: false,
-        };
+        let keyboard = fake(false);
         let worker_shared = shared.clone();
-        let worker = thread::spawn(move || run(&worker_shared, k, m));
+        let worker = thread::spawn(move || run(&worker_shared, keyboard));
         {
             let mut s = shared.lock();
             let deadline = Instant::now() + Duration::from_secs(2);
@@ -856,29 +907,12 @@ mod tests {
             },
         )
         .unwrap();
-        move_by(&io, 3, 0, 0);
-        io.drain().unwrap();
-        {
-            let deadline = Instant::now() + Duration::from_secs(1);
-            let mut s = io.shared.lock();
-            while s.stats.mouse_reports < 2 || s.busy {
-                let left = deadline
-                    .checked_duration_since(Instant::now())
-                    .expect("idle transition was not delivered");
-                s = io.shared.wake.wait_timeout(s, left).unwrap().0;
-            }
-            let count = s.stats.mouse_reports;
-            s = io
-                .shared
-                .wake
-                .wait_timeout(s, Duration::from_millis(20))
-                .unwrap()
-                .0;
-            assert_eq!(
-                s.stats.mouse_reports, count,
-                "idle must not flood zero mouse packets"
-            );
-        }
+        io.motion(0, 3, 0).unwrap();
+        assert_eq!(io.stats().direct_motion_reports, 1);
+        assert_eq!(io.stats().queued, 0);
+        io.idle_motion(0).unwrap();
+        io.idle_motion(0).unwrap();
+        assert_eq!(io.stats().mouse_reports, 2);
         io.submit(Report::Keyboard([1, 0, 0, 0, 0, 0, 0, 0]))
             .unwrap();
         io.submit(Report::Scroll {
@@ -906,11 +940,18 @@ mod tests {
     fn absolute_mouse_deadlines_do_not_accumulate_drift_or_replay_a_stall_as_a_burst() {
         let start = Instant::now();
         assert_eq!(
-            next_deadline(start, start + Duration::from_micros(100)),
-            start + OUTPUT_INTERVAL
+            next_output_deadline(start, start + Duration::from_micros(100)),
+            start + CONTINUOUS_OUTPUT_INTERVAL
+        );
+        let missed = start + CONTINUOUS_OUTPUT_INTERVAL;
+        assert_eq!(
+            next_output_deadline(start, missed),
+            missed + CONTINUOUS_OUTPUT_INTERVAL
         );
         let stalled = start + Duration::from_millis(100);
-        assert_eq!(next_deadline(start, stalled), stalled + OUTPUT_INTERVAL);
-        assert!(next_deadline(start, stalled) > stalled);
+        assert_eq!(
+            next_output_deadline(start, stalled),
+            stalled + CONTINUOUS_OUTPUT_INTERVAL
+        );
     }
 }

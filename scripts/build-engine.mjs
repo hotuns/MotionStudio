@@ -1,6 +1,6 @@
 import './verify-resources.mjs';
-import { readFileSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { readFileSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,16 +28,33 @@ const args=release?['build','--locked','-p','motion-engine','--release','--targe
 const result=spawnSync('cargo',args,{cwd:root,env:buildEnv,stdio:'inherit',windowsHide:true});
 if(result.error)throw result.error;
 if(result.status!==0)process.exit(result.status||1);
-const exe=resolve(root,'src-tauri/resources/motion-engine.exe');
-const builtEngine=release?resolve(staticTarget,'x86_64-pc-windows-msvc/release/motion-engine.exe'):resolve(root,'target/debug/motion-engine.exe');
+const desktopTarget=resolve(root,process.env.CARGO_TARGET_DIR||'target');
+const builtEngine=release?resolve(staticTarget,'x86_64-pc-windows-msvc/release/motion-engine.exe'):resolve(desktopTarget,'debug/motion-engine.exe');
 const sdlLinkage=verifySdlLinkage(builtEngine);
-copyFileSync(builtEngine,exe);
+const engineHash=sha(builtEngine);
+const exe=release?resolve(root,'src-tauri/resources/motion-engine.exe'):
+  resolve(root,'target/studio-dev-runtime',engineHash,'motion-engine.exe');
 if (release) {
-  const releaseEngine = resolve(root, 'target/release/motion-engine.exe');
+  copyFileSync(builtEngine,exe);
+  const releaseEngine = resolve(desktopTarget, 'release/motion-engine.exe');
   mkdirSync(dirname(releaseEngine), { recursive: true });
   copyFileSync(builtEngine, releaseEngine);
+} else if (!existsSync(exe)) {
+  // A running worker or helper can keep its executable locked on Windows.
+  // Stage each dev build beside earlier builds instead of replacing a live file.
+  mkdirSync(dirname(exe), {recursive:true});
+  const staging=exe+'.'+randomUUID()+'.tmp';
+  try {
+    copyFileSync(builtEngine,staging);
+    try { renameSync(staging,exe); }
+    catch (error) { if (!existsSync(exe)) throw error; }
+  } finally {
+    rmSync(staging,{force:true});
+  }
 }
-writeFileSync(resolve(root,'src-tauri/resources/runtime-manifest.json'),JSON.stringify({
+if(sha(exe)!==engineHash)throw new Error('Staged engine checksum mismatch');
+const manifestPath=resolve(root,release?'src-tauri/resources/runtime-manifest.json':'target/studio-dev-runtime/runtime-manifest.json');
+const manifest=JSON.stringify({
   version,engine:'motion-engine',flexinputCommit:'c69f53ad3bca4ed34ef5f2d63509addaa7c767be',
   inputProvider:{crate:'flexinput-devices',backend:'SDL3',timestampedEvents:true,touchEvents:true,sdlRuntime:'shared verified DLL',...sdlLinkage},
   physicalProcessing:{crate:'flexinput-engine',entry:'eval_graph_tick / device_cal',sharedStickInput:true},
@@ -47,5 +64,12 @@ writeFileSync(resolve(root,'src-tauri/resources/runtime-manifest.json'),JSON.str
   peripheralRouting:{feedback:'native poll_outputs -> selected SDL DeviceBackend::send',touchpad:'native eval_graph_tick / route_touchpad'},
   hidmaestro:{sdkVersion:'2.0.1',driverVersion:'2.0.0.2201',client:'FlexInput c69f53ad',payloads:JSON.parse(readFileSync(resolve(root,'vendor/flexinput/manifest.json'),'utf8')).files.filter(f=>/^crates\/hidmaestro\/driver\/.*\.(dll|inf)$/.test(f.path)).map(f=>({name:f.path.split('/').at(-1),sha256:f.vendoredSha256}))},
   sdlVersion:'3.4.18',sdlPatch:'Flydigi device 150 gyro axes only: (-oldZ, -oldX, -oldY)',
-  files:[{name:'motion-engine.exe',sha256:sha(exe)},{name:'SDL3.dll',sha256:sha(sdl)}],
-},null,2)+'\n');
+  files:[{name:'motion-engine.exe',sha256:engineHash},{name:'SDL3.dll',sha256:sha(sdl)}],
+},null,2)+'\n';
+const manifestStaging=manifestPath+'.'+randomUUID()+'.tmp';
+try {
+  writeFileSync(manifestStaging,manifest);
+  renameSync(manifestStaging,manifestPath);
+} finally {
+  rmSync(manifestStaging,{force:true});
+}

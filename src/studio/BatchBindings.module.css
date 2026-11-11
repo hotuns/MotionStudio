@@ -1,0 +1,110 @@
+.dialog { width: min(780px, calc(100vw - 40px)); }
+.context, .context > div, .controls, .current, .binding {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+.context { justify-content: space-between; margin-bottom: 12px; font-size: 12px; color: var(--text-muted); }
+.context strong, .current strong { color: var(--text-strong); overflow-wrap: anywhere; }
+.prompt { border: 1px solid var(--border-1); border-radius: 8px; padding: 12px; background: var(--bg-1); }
+.prompt p { margin: 6px 0; }
+.current { font-size: 12px; color: var(--text-mid); }
+.current strong { font-size: 15px; }
+.controls button { min-height: 30px; padding: 5px 9px; font-size: 12px; }
+.controls kbd, .current kbd { opacity: 1; }
+.actionName {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.actionName input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border-1);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-strong);
+}
+.captureArea {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  min-height: 46px;
+  border: 1px dashed var(--accent);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: crosshair;
+  user-select: none;
+}
+.captureArea strong { color: var(--accent); }
+.captureArea kbd { opacity: 1; }
+.rows { max-height: min(40vh, 390px); overflow: auto; margin-top: 14px; border: 1px solid var(--border-1); border-radius: 8px; }
+.rows table { width: 100%; border-collapse: separate; border-spacing: 0; text-align: left; font-size: 12px; }
+.rows th { position: sticky; top: 0; z-index: 1; background: var(--bg-1); color: var(--text-muted); font-weight: 500; }
+.rows th, .rows td { padding: 8px 12px; border-bottom: 1px solid var(--border-1); }
+.rows tr:last-child td { border-bottom: 0; }
+.rows tr[data-current='true'] td { background: color-mix(in srgb, var(--accent) 9%, var(--bg-2)); }
+.rows .clickableRow { cursor: pointer; }
+.rows .clickableRow:is(:hover, :focus-within) td { background: color-mix(in srgb, var(--accent) 15%, var(--bg-2)); }
+.rows .actionButton { background: transparent; border: 0; padding: 3px 0; color: var(--text-strong); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.rows .actionButton:disabled { cursor: default; }
+.rows .rowRecord {
+  margin-inline-start: auto;
+  padding: 2px 7px;
+  border: 1px solid var(--border-1);
+  border-radius: 5px;
+  background: var(--bg-2);
+  color: var(--accent);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rows .rowRecord:hover:not(:disabled) { border-color: var(--accent); }
+.rows .rowRecord:disabled { opacity: .5; cursor: default; }
+.binding small { padding: 2px 5px; border-radius: 4px; background: var(--bg-1-5); color: var(--text-muted); white-space: nowrap; }
+.binding small[data-filled='true'] { color: var(--accent); }
+.binding kbd { opacity: 1; }
+.surface {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  color: var(--text-strong);
+}
+.surfaceHeading { padding: 12px 14px 8px; }
+.surfaceHeading h1 { margin: 0; font-size: 18px; }
+.surfaceHeading p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; }
+.surfaceTitle { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.surfaceTitle button { min-height: 34px; font-size: 12px; }
+.surfaceBody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  padding: 4px 14px 12px;
+}
+.surfaceBody .context { margin-bottom: 8px; }
+.surfaceBody .prompt { flex-shrink: 0; }
+.surfaceBody .prompt p { color: var(--text-muted); font-size: 12px; }
+.surfaceBody .rows { flex: 1; min-height: 95px; max-height: none; margin-top: 10px; }
+.surfaceBody .rows th, .surfaceBody .rows td { padding: 6px 8px; }
+.surfaceFooter {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-1);
+}
+.surfaceFooter button { font-size: 12px; min-height: 32px; }

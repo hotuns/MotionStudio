@@ -1,6 +1,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "console")]
 mod calibration;
 mod guardian;
+mod io_clock;
 mod runtime;
 
 fn main() {
@@ -95,7 +96,7 @@ fn self_test(dll: &std::path::Path) -> anyhow::Result<()> {
         }
         anyhow::ensure!(
             engine.gyro_events == 3 && stick_samples == 2,
-            "FlexInput SDL sensor to RWS stick path failed"
+            "Controller motion to calibrated stick output check failed"
         );
     }
     println!(r#"{{"ok":true,"gyro_events":3,"touch_events":3,"system_output":false}}"#);

@@ -88,7 +88,7 @@
   "快捷键在映射或观察运行时全局生效，修改后自动保存。选择「不启用」可关闭快捷键切换。": "The shortcut works globally while mapping or monitoring is active. Changes save automatically. Select Disabled to turn it off.",
   "可停止映射并释放输出。": "stops mapping and releases all output.",
   "游戏内配置提示": "In-game profile notifications",
-  "自动或手动切换成功后，在游戏所在屏幕显示当前配置。": "Show the current profile on the game's display after a successful automatic or manual switch.",
+  "切换成功后，在游戏所在屏幕的右下角显示配置名称。": "Show the profile name in the bottom-right corner of the game's display after a successful switch.",
   "显示游戏内配置提示": "Show in-game profile notifications",
   "启用配置提示": "Enable profile notifications",
   "提示位置": "Notification position",

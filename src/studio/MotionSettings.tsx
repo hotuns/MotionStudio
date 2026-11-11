@@ -26,7 +26,7 @@ function initialView(): MotionView {
 }
 
 export function MotionSettings({ profile, profileId, update, device, recording, canRecord, onRecord,
-  onCancelRecording, onOpenDevice, onPreviewOutput, status, canMeasure, onMotionAction, deviceNoise }: {
+  onCancelRecording, onOpenDevice, onPreviewOutput, status, canMeasure, onMotionAction, onOpenCalibration, deviceNoise }: {
   profile: Profile;
   profileId:string;
   update: Update;
@@ -216,8 +216,7 @@ export function MotionSettings({ profile, profileId, update, device, recording, 
           onReset={()=>onMotionAction('reset_filters')}/>
       </>}
       {tab==='turning'&&<><h2>高级转向</h2><AdvancedTurning profile={profile} update={update}/></>}
-      {tab==='calibration'&&<GameAngleCalibration profile={profile} update={update} status={status}
-        canMeasure={canMeasure} onMotionAction={onMotionAction}/>}
+      {tab==='calibration'&&<GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>}
     </section>
     </>}
   </div>;

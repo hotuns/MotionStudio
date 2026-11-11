@@ -115,7 +115,7 @@
   "外圈按推杆幅度判断，不限方向，回到内圈后释放。内圈不包含中心死区。在「动作映射」中可将内圈或外圈绑定到按键、组合键或滚轮。": "The outer ring triggers based on how far you tilt the stick in any direction and releases when you move back inward. The inner ring excludes the center deadzone. In Action mapping, bind either ring to keys, chords, or the mouse wheel.",
   "启用摇杆防回弹": "Enable stick rebound filtering",
   "防回弹窗口": "Rebound filtering window",
-  "复用 FlexInput 的回弹过滤，抑制快速松杆时短暂越过中心造成的反向输入。默认关闭，可按手柄手感启用。": "Uses FlexInput's rebound filter to suppress brief opposite inputs when a released stick overshoots the center. Disabled by default; enable it to suit your controller.",
+  "抑制快速松杆时越过中心造成的短暂反向输入。默认关闭，可按手柄手感启用。": "Suppresses brief opposite input when a released stick overshoots the center. Off by default. Enable it to suit your controller.",
   "启用摇杆鼠标": "Enable stick mouse",
   "最大移动速度": "Maximum cursor speed",
   "死区与响应": "Deadzone and response",
@@ -145,5 +145,14 @@
   "调整方向、灵敏度和防抖": "Adjust direction, sensitivity and smoothing",
   "管理配置": "Manage profiles",
   "导入、切换和恢复游戏配置": "Import, switch and restore game profiles",
-  "确认输入": "Check input"
+  "确认输入": "Check input",
+  "手柄映射概览": "Controller mapping overview",
+  "数字表示当前编辑层中与该控件关联的自定义动作数。点控件可查看，包括组合键。": "Counts show the custom actions tied to each control in the layer you are editing. Select a control to see its actions and chords.",
+  "有映射的手柄控件": "Mapped controller controls",
+  "添加手柄绑定后，这里会显示映射分布。": "Add a controller binding to see it here.",
+  "正在查看 {0} 的映射": "Showing mappings for {0}",
+  "显示全部控件": "Show all controls",
+  "1 个动作": "1 action",
+  "{0} 个动作": "{0} actions",
+  "这个控件还没有自定义动作。": "This control has no custom actions."
 }

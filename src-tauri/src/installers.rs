@@ -93,23 +93,30 @@ fn resource(app: &AppHandle, filename: &str) -> Result<PathBuf, String> {
         .join("drivers")
         .join(filename))
 }
-pub fn verify_engine(path: &Path) -> Result<File, String> {
-    let name = "motion-engine.exe";
-    // The expected hash is compiled into the desktop app after engine:build.
+pub fn expected_engine_hash() -> Result<String, String> {
+    #[cfg(debug_assertions)]
+    const ENGINE_MANIFEST: &str =
+        include_str!("../../target/studio-dev-runtime/runtime-manifest.json");
+    #[cfg(not(debug_assertions))]
+    const ENGINE_MANIFEST: &str = include_str!("../resources/runtime-manifest.json");
     let manifest: serde_json::Value =
-        serde_json::from_str(include_str!("../resources/runtime-manifest.json"))
-            .map_err(|e| e.to_string())?;
-    let sha256 = manifest["files"]
+        serde_json::from_str(ENGINE_MANIFEST).map_err(|e| e.to_string())?;
+    manifest["files"]
         .as_array()
-        .and_then(|files| files.iter().find(|f| f["name"] == name))
+        .and_then(|files| files.iter().find(|f| f["name"] == "motion-engine.exe"))
         .and_then(|f| f["sha256"].as_str())
-        .ok_or("Engine integrity manifest is missing")?;
+        .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .ok_or_else(|| "Engine integrity manifest is missing".into())
+}
+pub fn verify_engine(path: &Path) -> Result<File, String> {
+    let sha256 = expected_engine_hash()?;
     let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     verify(
         path,
         &Installer {
-            file: name.into(),
-            sha256: sha256.into(),
+            file: "motion-engine.exe".into(),
+            sha256,
             size,
         },
     )

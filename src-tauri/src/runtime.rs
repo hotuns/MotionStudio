@@ -18,5 +18,11 @@ pub fn resources(app: &AppHandle) -> Result<PathBuf, String> {
         .join("resources"))
 }
 pub fn engine_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if cfg!(debug_assertions) {
+        return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/studio-dev-runtime")
+            .join(crate::installers::expected_engine_hash()?)
+            .join("motion-engine.exe"));
+    }
     Ok(resources(app)?.join("motion-engine.exe"))
 }

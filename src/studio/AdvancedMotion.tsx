@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { MotionConfig, Profile, Status } from '../types';
 import { Range, SettingsGroup as Group, Toggle } from './Controls';
 import {OptionPicker} from './OptionPicker';
@@ -199,34 +198,15 @@ export type GameCalibrationProps = {
   status?: Status;
   canMeasure: boolean;
   onMotionAction: (action: string) => void;
+  onOpenCalibration: () => void;
 };
 
-export function GameAngleCalibration({profile, update, status, canMeasure, onMotionAction}: Props & GameCalibrationProps) {
-  const [finished,setFinished]=useState<{degrees:number;axis:string;peak:number;error:string|null}|null>(null);
-  const live = status?.motion;
-  const measuring = live?.measuring;
-  const apply=()=>{
-    if(!finished)return;const known=finished.axis==='yaw'?360:180;
-    update(p=>{if(p.gyro.output==='mouse')p.gyro.counts_per_degree*=Math.abs(finished.degrees)/known;
-      else p.gyro.stick_full_scale_dps*=known/Math.abs(finished.degrees);});setFinished(null);
-  };
+export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'> & {profile:Profile}) {
   return <Group title="游戏内转角校准">
-      <p className={styles.hint}>先保存配置并启用输出。在游戏中选定参照点，开始测量后完成水平一整圈，或从最低看到最高完成垂直半圈，再结束测量。需要你手动对齐参照点。</p>
-      {measuring?<>
-        <p role="status">正在测量{measuring==='yaw'?'水平 360°':'垂直 180°'} · 已累计 {Math.abs(live?.measured_degrees??0).toFixed(1)}° 手柄转角</p>
-        {live?.measurement_error&&<p role="alert">{live.measurement_error}</p>}
-        <button type="button" className="primary-btn" onClick={()=>{setFinished({degrees:live?.measured_degrees??0,axis:measuring,peak:live?.measurement_peak??0,error:live?.measurement_error??null});onMotionAction('measure_end');}}>结束测量</button>
-        <button type="button" className="secondary-btn" onClick={()=>{setFinished(null);onMotionAction('measure_end');}}>取消测量</button>
-      </>:<div className="studio-actions">
-        <button type="button" className="secondary-btn" disabled={!canMeasure||profile.gyro.motion.mode!=='pointer'} onClick={()=>{setFinished(null);onMotionAction('measure_yaw');}}>测量水平 360°</button>
-        <button type="button" className="secondary-btn" disabled={!canMeasure||profile.gyro.motion.mode!=='pointer'} onClick={()=>{setFinished(null);onMotionAction('measure_pitch');}}>测量垂直 180°</button>
-      </div>}
-      {finished&&<>
-        <p>本次手柄转角：{Math.abs(finished.degrees).toFixed(2)}°</p>
-        {finished.error&&<p role="alert">{finished.error}</p>}
-        {profile.gyro.output==='right_stick'&&finished.peak>1&&<p role="alert">测量过程中已超过满杆速度，请更慢地转动后重新测量。</p>}
-        <button type="button" className="secondary-btn" disabled={!!measuring||!!finished.error||Math.abs(finished.degrees)<1||!Number.isFinite(finished.degrees)||(profile.gyro.output==='right_stick'&&finished.peak>1)} onClick={apply}>将测量结果填入当前配置</button>
-        <p className={styles.hint}>填入后仍需保存并应用配置。</p>
-      </>}
+    <p className={styles.hint}>保存并应用基础层配置，启用映射后打开悬浮窗。开始、结束和保存测量都可以在游戏内完成。</p>
+    <div className="studio-actions">
+      <button type="button" className="primary-btn" disabled={!canMeasure||!profile.gyro.enabled||profile.gyro.motion.mode!=='pointer'}
+        onClick={onOpenCalibration}>打开校准悬浮窗</button>
+    </div>
     </Group>;
 }

@@ -2,7 +2,8 @@ import {t,type Language} from '../i18n';
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { version } from '../../package.json';
 import { StudioIcon, type StudioIconName } from './StudioIcon';
-import {OptionPicker} from './OptionPicker';
+import {CurrentProfilePicker} from './CurrentProfilePicker';
+import type {CommunityProfile} from '../profile-sharing';
 import {gameTabs, type GameTab} from './game-tabs';
 import styles from './StudioShell.module.css';
 import themeStyles from './ThemeToggle.module.css';
@@ -32,6 +33,7 @@ type Props = {
   profileId: string;
   profiles: { id: string; name: string }[];
   onSelectProfile: (id: string) => void;
+  onChooseCommunity: (profile: CommunityProfile) => void;
   layerControls?: ReactNode;
   onNewProfile: () => void;
   onImportJsm: () => void;
@@ -50,6 +52,7 @@ type Props = {
   busy: boolean;
   dirty: boolean;
   pending: boolean;
+  canSave: boolean;
   canApply: boolean;
   deviceCount: number;
   status: string;
@@ -60,6 +63,7 @@ type Props = {
   language:Language;
   languageDisabled:boolean;
   onLanguage:(language:Language)=>void;
+  updateVersion?: string;
 };
 
 export function StudioShell(props: Props) {
@@ -78,6 +82,10 @@ export function StudioShell(props: Props) {
   useEffect(() => { scrollArea.current?.scrollTo(0, 0); }, [props.page, props.gameTab]);
   useEffect(() => { if (searchOpen && !palette.current?.open) palette.current?.showModal(); }, [searchOpen]);
   const openSearch = () => { setQuery(''); setSearchOpen(true); };
+  const openUpdates = () => {
+    props.onNavigate('settings');
+    scrollArea.current?.scrollTo(0, 0);
+  };
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
       if (latest.current.capturing || event.defaultPrevented || event.repeat || event.altKey ||
@@ -98,6 +106,7 @@ export function StudioShell(props: Props) {
   }, []);
 
   const tools: Command[] = [
+    { label: '软件更新', icon: 'settings', run: openUpdates },
     { label: '打开配置文件夹', icon: 'folder', run: props.onOpenFolder },
     { label: '自动切换', icon: 'profiles', run: () => props.onNavigate('switching') },
     { label: '帮助与快捷键', icon: 'help', run: props.onHelp },
@@ -164,6 +173,9 @@ export function StudioShell(props: Props) {
               <span className={themeStyles.switch} aria-hidden="true"><span className={themeStyles.thumb} /></span>
             </button>
           </div>
+          {props.updateVersion && <button type="button" className={styles.updateLink} onClick={openUpdates}>
+            {t('发现新版本 v{0}').replace('{0}', props.updateVersion)}
+          </button>}
           <div className={styles.version}>Motion Studio <span>v{version}</span></div>
         </div>
       </aside>
@@ -172,9 +184,8 @@ export function StudioShell(props: Props) {
           <div className={styles.profileTools}>
             <div className={styles.profileSelect} data-profile-picker>
               <StudioIcon name="profiles" size={18} /><span>当前配置</span>
-              <OptionPicker label="当前配置" placeholder="选择配置" value={props.profileId || null} disabled={blocked || !props.profiles.length}
-                groups={[{options:props.profiles.map(profile => ({value:profile.id, label:profile.name, localize:false}))}]}
-                onChange={props.onSelectProfile}/>
+              <CurrentProfilePicker value={props.profileId} profiles={props.profiles} disabled={blocked}
+                onSelect={props.onSelectProfile} onChooseCommunity={props.onChooseCommunity} onCreate={props.onNewProfile}/>
               {props.dirty && <span className={styles.dirtyDot} title="有未保存的修改" />}
             </div>
             {props.layerControls}
@@ -229,7 +240,7 @@ export function StudioShell(props: Props) {
           <div className={styles.footerActions}>
             <span className={styles.connection}><span className={styles.statusDot} />{props.deviceCount ? props.deviceCount + ' 台设备' : '未连接设备'}</span>
             {props.dirty && <button type="button" className="ghost-btn" disabled={blocked} onClick={props.onDiscard}>撤销修改</button>}
-            <button type="button" className="secondary-btn" disabled={!props.dirty || outputBlocked} onClick={props.onSave}>保存配置<kbd>Ctrl S</kbd></button>
+            <button type="button" className="secondary-btn" disabled={!props.canSave || outputBlocked} onClick={props.onSave}>保存配置<kbd>Ctrl S</kbd></button>
             <button type="button" className="primary-btn" disabled={!props.canApply || outputBlocked} onClick={props.onApply}>应用修改<kbd>Ctrl ↵</kbd></button>
           </div>
         </footer>

@@ -150,15 +150,11 @@ export function SwitchSettings({ entries, settings, busy, onChange, status, onPr
     </section>
     <section className={styles.panel}>
       <div className={styles.heading}>
-        <div><h4>游戏内配置提示</h4><p>自动或手动切换成功后，在游戏所在屏幕显示当前配置。</p></div>
+        <div><h4>游戏内配置提示</h4><p>切换成功后，在游戏所在屏幕的右下角显示配置名称。</p></div>
         <label className={styles.toggle}><input type="checkbox" aria-label="显示游戏内配置提示"
           checked={settings.overlay_enabled!==false} disabled={locked} onChange={event=>onChange({overlay_enabled:event.target.checked})}/>启用配置提示</label>
       </div>
-      <div className={styles.controls}>
-        <label>提示位置<select aria-label="配置提示位置" value={settings.overlay_position??'top_right'} disabled={locked||settings.overlay_enabled===false}
-          onChange={event=>onChange({overlay_position:event.target.value as Settings['overlay_position']})}>
-          <option value="top_right">右上角</option><option value="top_left">左上角</option><option value="bottom_right">右下角</option><option value="bottom_left">左下角</option>
-        </select></label>
+      <div className={`${styles.controls} ${styles.overlayControls}`}>
         <label>显示时长<select aria-label="配置提示显示时长" value={settings.overlay_duration_ms??2500} disabled={locked||settings.overlay_enabled===false}
           onChange={event=>onChange({overlay_duration_ms:Number(event.target.value)})}>
           {Array.from(new Set([1000,2500,4000,6000,8000,settings.overlay_duration_ms??2500])).sort((a,b)=>a-b).map(ms=><option key={ms} value={ms}>{ms/1000} 秒</option>)}
@@ -167,7 +163,7 @@ export function SwitchSettings({ entries, settings, busy, onChange, status, onPr
       </div>
       {overlayError&&<p className={styles.error} role="alert">{overlayError}</p>}
       <div className={styles.overlayPreview} aria-label="配置提示样式示例">
-        <span>Motion Studio · 配置已切换</span><strong translate="no">{entries.find(entry=>entry.id===settings.selected_profile)?.profile.name??'体感瞄准'}</strong><span>光标隐藏 · 自动切换</span>
+        <strong translate="no">{entries.find(entry=>entry.id===settings.selected_profile)?.profile.name??'体感瞄准'}</strong>
       </div>
       <p className={styles.hint}>提示会自动消失，不抢焦点、不接收鼠标点击。连续切换会显示最新配置。支持窗口化和无边框全屏；独占全屏可能无法显示，可尝试改为无边框全屏。</p>
     </section>

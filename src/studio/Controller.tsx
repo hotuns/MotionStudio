@@ -2,11 +2,11 @@ import { buttonNames, type Device, type Status } from '../types';
 import styles from './ControllerStatusSvg.module.css';
 
 type ControllerStatusSvgProps = {
-  boundCommands?: ReadonlySet<string>
+  bindingCounts?: ReadonlyMap<string, number>
   device?: Device | null
   status?: Status | null
-  selectedCommand?: string | null
-  onSelectCommand?: (command: string) => void
+  selectedControl?: string | null
+  onSelectControl?: (control: string) => void
 }
 
 type SharedControlProps = {
@@ -58,10 +58,6 @@ type PaddleButtonProps = SharedControlProps & {
   y: number
 }
 
-const LEFT_STICK_COMMANDS = ['left_stick_click', 'left_stick_up', 'left_stick_down', 'left_stick_left', 'left_stick_right', 'left_stick_inner', 'left_stick_outer']
-const RIGHT_STICK_COMMANDS = ['right_stick_click', 'right_stick_up', 'right_stick_down', 'right_stick_left', 'right_stick_right', 'right_stick_inner', 'right_stick_outer']
-const LEFT_TRIGGER_COMMANDS = ['left_trigger', 'left_trigger_soft', 'left_trigger_full']
-const RIGHT_TRIGGER_COMMANDS = ['right_trigger', 'right_trigger_soft', 'right_trigger_full']
 const PADDLE_COMMANDS = ['left_paddle1', 'left_paddle2', 'right_paddle1', 'right_paddle2'] as const
 
 type PaddleCommand = (typeof PADDLE_COMMANDS)[number]
@@ -79,6 +75,17 @@ const PADDLE_LAYOUT: PaddleLayoutEntry[] = [
   { command: 'left_paddle2', x: 196, y: 710, width: 132, height: 38 },
   { command: 'right_paddle1', x: 823, y: 656, width: 132, height: 38 },
   { command: 'right_paddle2', x: 789, y: 710, width: 132, height: 38 },
+]
+
+const BINDING_BADGES: ReadonlyArray<readonly [string, number, number]> = [
+  ['left_trigger', 326, 37], ['right_trigger', 797, 37],
+  ['left_shoulder', 345, 106], ['right_shoulder', 778, 106],
+  ['left_stick', 347, 244], ['right_stick', 753, 397],
+  ['dpad_up', 424, 413], ['dpad_left', 373, 456], ['dpad_right', 474, 456], ['dpad_down', 424, 502],
+  ['north', 855, 202], ['east', 927, 326], ['south', 854, 392], ['west', 734, 327],
+  ['back', 461, 319], ['start', 664, 319], ['guide', 586, 179],
+  ['misc1', 608, 352], ['misc2', 617, 420], ['touchpad', 628, 236],
+  ...PADDLE_LAYOUT.map(({command, x, y, width, height}) => [command, x + width - 10, y + height / 2] as const),
 ]
 
 const BACK_INPUT_TITLES: Record<PaddleCommand, string> = {
@@ -103,6 +110,7 @@ const GENERIC_PATHS = {
   dpadRight: 'M449 432 H477 Q499 432 500 444 V468 Q499 480 477 480 H449 Z',
   view: 'M482 276 A24 24 0 1 1 482 324 A24 24 0 1 1 482 276 Z',
   menu: 'M642 276 A24 24 0 1 1 642 324 A24 24 0 1 1 642 276 Z',
+  touchpad: 'M516 232 H608 Q619 232 619 243 V259 Q619 270 608 270 H516 Q505 270 505 259 V243 Q505 232 516 232 Z',
   share: 'M545 339 H579 Q591 339 591 350 V358 Q591 369 579 369 H545 Q533 369 533 358 V350 Q533 339 545 339 Z',
   mic: 'M539 406 H585 Q597 406 597 418 V424 Q597 436 585 436 H539 Q527 436 527 424 V418 Q527 406 539 406 Z',
 } as const
@@ -110,17 +118,6 @@ const GENERIC_PATHS = {
 const join = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(' ')
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
-
-const hasAny = (commands: readonly string[], set?: ReadonlySet<string>) => commands.some(command => set?.has(command))
-
-const isAnySelected = (commands: readonly string[], selectedCommand?: string | null) =>
-  commands.some(command => command === selectedCommand)
-
-const pickCommand = (commands: readonly string[], boundCommands?: ReadonlySet<string>, selectedCommand?: string | null) => {
-  if (selectedCommand && commands.includes(selectedCommand)) return selectedCommand
-  const boundCommand = commands.find(command => boundCommands?.has(command))
-  return boundCommand ?? commands[0]
-}
 
 const paddleLabels: Record<PaddleCommand, string> = {
   left_paddle1: 'L B1',
@@ -350,38 +347,32 @@ function Stick({
 }
 
 export default function Controller({
-  boundCommands,
+  bindingCounts,
   device,
   status,
-  selectedCommand,
-  onSelectCommand,
+  selectedControl,
+  onSelectControl,
 }: ControllerStatusSvgProps) {
-  // Keep the preview, binding highlights and click targets on the same input
-  // identifiers as Status.buttons. Legacy JSM tokens are not runtime IDs.
+  // Live button state uses the runtime input IDs. Mapping counts group the
+  // different inputs produced by a physical trigger, stick or touchpad.
   const pressed = new Set<(typeof buttonNames)[number] | 'left_trigger' | 'right_trigger'>(buttonNames.filter((_, index) => status?.buttons[index]));
   const [leftStickX, leftStickY, rightStickX, rightStickY, leftTrigger, rightTrigger] = status?.axes ?? [0, 0, 0, 0, 0, 0];
   if (leftTrigger > 0.2) pressed.add('left_trigger');
   if (rightTrigger > 0.2) pressed.add('right_trigger');
-  const leftTriggerLabel = 'LT'
-  const rightTriggerLabel = 'RT'
-  const leftStickBound = hasAny(LEFT_STICK_COMMANDS, boundCommands)
-  const rightStickBound = hasAny(RIGHT_STICK_COMMANDS, boundCommands)
-  const leftStickSelected = isAnySelected(LEFT_STICK_COMMANDS, selectedCommand)
-  const rightStickSelected = isAnySelected(RIGHT_STICK_COMMANDS, selectedCommand)
-  const leftTriggerBound = hasAny(LEFT_TRIGGER_COMMANDS, boundCommands)
-  const rightTriggerBound = hasAny(RIGHT_TRIGGER_COMMANDS, boundCommands)
-  const leftTriggerSelected = isAnySelected(LEFT_TRIGGER_COMMANDS, selectedCommand)
-  const rightTriggerSelected = isAnySelected(RIGHT_TRIGGER_COMMANDS, selectedCommand)
-  const visiblePaddleCommands = PADDLE_COMMANDS.filter(command =>
-    device?.buttons.includes(command) || pressed.has(command) || boundCommands?.has(command) || selectedCommand === command
-  );
-  const visiblePaddleCommandSet = new Set(visiblePaddleCommands);
+  const mapping = (control: string): SharedControlProps => ({
+    bound: bindingCounts?.has(control),
+    selected: control === selectedControl,
+    onSelect: bindingCounts?.has(control) && onSelectControl ? () => onSelectControl(control) : undefined,
+  })
+  const visiblePaddles = PADDLE_LAYOUT.filter(({command}) =>
+    device?.buttons.includes(command) || pressed.has(command) || bindingCounts?.has(command) || selectedControl === command
+  )
 
   return (
     <div className={styles.visualizer}>
       <svg
         className={styles.controllerSvg}
-        viewBox={visiblePaddleCommands.length ? "0 0 1117 780" : "0 0 1117 700"}
+        viewBox={visiblePaddles.length ? "0 0 1117 780" : "0 0 1117 700"}
         role="img"
         aria-label="通用手柄预览"
       >
@@ -392,16 +383,12 @@ export default function Controller({
           fillX={245}
           fillY={55}
           fillWidth={42}
-          label={leftTriggerLabel}
+          label="LT"
           labelX={270}
           labelY={46}
           value={leftTrigger}
           pressed={pressed.has('left_trigger')}
-          bound={leftTriggerBound}
-          selected={leftTriggerSelected}
-          onSelect={
-            onSelectCommand ? () => onSelectCommand(pickCommand(LEFT_TRIGGER_COMMANDS, boundCommands, selectedCommand)) : undefined
-          }
+          {...mapping('left_trigger')}
           title="Left trigger"
         />
         <PathButton
@@ -411,9 +398,7 @@ export default function Controller({
           labelX={270}
           labelY={107}
           pressed={pressed.has('left_shoulder')}
-          bound={boundCommands?.has('left_shoulder')}
-          selected={selectedCommand === 'left_shoulder'}
-          onSelect={onSelectCommand ? () => onSelectCommand('left_shoulder') : undefined}
+          {...mapping('left_shoulder')}
           title="Left bumper"
         />
 
@@ -422,16 +407,12 @@ export default function Controller({
           fillX={837}
           fillY={55}
           fillWidth={42}
-          label={rightTriggerLabel}
+          label="RT"
           labelX={860}
           labelY={46}
           value={rightTrigger}
           pressed={pressed.has('right_trigger')}
-          bound={rightTriggerBound}
-          selected={rightTriggerSelected}
-          onSelect={
-            onSelectCommand ? () => onSelectCommand(pickCommand(RIGHT_TRIGGER_COMMANDS, boundCommands, selectedCommand)) : undefined
-          }
+          {...mapping('right_trigger')}
           title="Right trigger"
         />
         <PathButton
@@ -441,9 +422,7 @@ export default function Controller({
           labelX={860}
           labelY={107}
           pressed={pressed.has('right_shoulder')}
-          bound={boundCommands?.has('right_shoulder')}
-          selected={selectedCommand === 'right_shoulder'}
-          onSelect={onSelectCommand ? () => onSelectCommand('right_shoulder') : undefined}
+          {...mapping('right_shoulder')}
           title="Right bumper"
         />
 
@@ -454,9 +433,7 @@ export default function Controller({
             labelX={410}
             labelY={450}
             pressed={pressed.has('dpad_up')}
-            bound={boundCommands?.has('dpad_up')}
-            selected={selectedCommand === 'dpad_up'}
-            onSelect={onSelectCommand ? () => onSelectCommand('dpad_up') : undefined}
+            {...mapping('dpad_up')}
             title="D-pad up"
           />
           <PathButton
@@ -465,9 +442,7 @@ export default function Controller({
             labelX={355}
             labelY={505}
             pressed={pressed.has('dpad_left')}
-            bound={boundCommands?.has('dpad_left')}
-            selected={selectedCommand === 'dpad_left'}
-            onSelect={onSelectCommand ? () => onSelectCommand('dpad_left') : undefined}
+            {...mapping('dpad_left')}
             title="D-pad left"
           />
           <PathButton
@@ -476,9 +451,7 @@ export default function Controller({
             labelX={465}
             labelY={505}
             pressed={pressed.has('dpad_right')}
-            bound={boundCommands?.has('dpad_right')}
-            selected={selectedCommand === 'dpad_right'}
-            onSelect={onSelectCommand ? () => onSelectCommand('dpad_right') : undefined}
+            {...mapping('dpad_right')}
             title="D-pad right"
           />
           <PathButton
@@ -487,9 +460,7 @@ export default function Controller({
             labelX={410}
             labelY={560}
             pressed={pressed.has('dpad_down')}
-            bound={boundCommands?.has('dpad_down')}
-            selected={selectedCommand === 'dpad_down'}
-            onSelect={onSelectCommand ? () => onSelectCommand('dpad_down') : undefined}
+            {...mapping('dpad_down')}
             title="D-pad down"
           />
           <PathButton
@@ -499,9 +470,7 @@ export default function Controller({
             labelY={300}
             pressed={pressed.has('back')}
             compact
-            bound={boundCommands?.has('back')}
-            selected={selectedCommand === 'back'}
-            onSelect={onSelectCommand ? () => onSelectCommand('back') : undefined}
+            {...mapping('back')}
             title="View / Back button"
           />
         </g>
@@ -513,9 +482,7 @@ export default function Controller({
           labelX={562}
           labelY={354}
           pressed={pressed.has('misc1')}
-          bound={boundCommands?.has('misc1')}
-          selected={selectedCommand === 'misc1'}
-          onSelect={onSelectCommand ? () => onSelectCommand('misc1') : undefined}
+          {...mapping('misc1')}
           title="Share / Capture button"
         />
 
@@ -526,9 +493,7 @@ export default function Controller({
             radius={34.957}
             label="Y"
             pressed={pressed.has('north')}
-            bound={boundCommands?.has('north')}
-            selected={selectedCommand === 'north'}
-            onSelect={onSelectCommand ? () => onSelectCommand('north') : undefined}
+            {...mapping('north')}
             title="North face button"
           />
           <ButtonBubble
@@ -537,9 +502,7 @@ export default function Controller({
             radius={34.957}
             label="B"
             pressed={pressed.has('east')}
-            bound={boundCommands?.has('east')}
-            selected={selectedCommand === 'east'}
-            onSelect={onSelectCommand ? () => onSelectCommand('east') : undefined}
+            {...mapping('east')}
             title="East face button"
           />
           <ButtonBubble
@@ -548,9 +511,7 @@ export default function Controller({
             radius={34.957}
             label="A"
             pressed={pressed.has('south')}
-            bound={boundCommands?.has('south')}
-            selected={selectedCommand === 'south'}
-            onSelect={onSelectCommand ? () => onSelectCommand('south') : undefined}
+            {...mapping('south')}
             title="South face button"
           />
           <ButtonBubble
@@ -559,9 +520,7 @@ export default function Controller({
             radius={34.957}
             label="X"
             pressed={pressed.has('west')}
-            bound={boundCommands?.has('west')}
-            selected={selectedCommand === 'west'}
-            onSelect={onSelectCommand ? () => onSelectCommand('west') : undefined}
+            {...mapping('west')}
             title="West face button"
           />
           <PathButton
@@ -571,9 +530,7 @@ export default function Controller({
             labelY={300}
             pressed={pressed.has('start')}
             compact
-            bound={boundCommands?.has('start')}
-            selected={selectedCommand === 'start'}
-            onSelect={onSelectCommand ? () => onSelectCommand('start') : undefined}
+            {...mapping('start')}
             title="Menu / Start button"
           />
         </g>
@@ -584,13 +541,7 @@ export default function Controller({
           x={leftStickX}
           y={-leftStickY}
           pressed={pressed.has('left_stick_click')}
-          bound={leftStickBound}
-          selected={leftStickSelected}
-          onSelect={
-            onSelectCommand
-              ? () => onSelectCommand(pickCommand(LEFT_STICK_COMMANDS, boundCommands, selectedCommand))
-              : undefined
-          }
+          {...mapping('left_stick')}
           title="Left stick"
         />
         <Stick
@@ -599,17 +550,11 @@ export default function Controller({
           x={rightStickX}
           y={-rightStickY}
           pressed={pressed.has('right_stick_click')}
-          bound={rightStickBound}
-          selected={rightStickSelected}
-          onSelect={
-            onSelectCommand
-              ? () => onSelectCommand(pickCommand(RIGHT_STICK_COMMANDS, boundCommands, selectedCommand))
-              : undefined
-          }
+          {...mapping('right_stick')}
           title="Right stick"
         />
 
-        {PADDLE_LAYOUT.filter(entry => visiblePaddleCommandSet.has(entry.command)).map(entry => {
+        {visiblePaddles.map(entry => {
           return (
             <PaddleButton
               key={entry.command}
@@ -619,9 +564,7 @@ export default function Controller({
               height={entry.height}
               label={paddleLabels[entry.command]}
               pressed={pressed.has(entry.command)}
-              bound={boundCommands?.has(entry.command)}
-              selected={selectedCommand === entry.command}
-              onSelect={onSelectCommand ? () => onSelectCommand(entry.command) : undefined}
+              {...mapping(entry.command)}
               title={BACK_INPUT_TITLES[entry.command]}
             />
           )
@@ -633,12 +576,10 @@ export default function Controller({
           radius={24}
           label=""
           pressed={pressed.has('guide')}
-          bound={boundCommands?.has('guide')}
-          selected={selectedCommand === 'guide'}
-          onSelect={onSelectCommand ? () => onSelectCommand('guide') : undefined}
+          {...mapping('guide')}
           title="Home / Guide button"
         />
-        {(device?.buttons.includes('misc2') || pressed.has('misc2') || boundCommands?.has('misc2') || selectedCommand === 'misc2') && (
+        {(device?.buttons.includes('misc2') || pressed.has('misc2') || bindingCounts?.has('misc2') || selectedControl === 'misc2') && (
           <PathButton
             d={GENERIC_PATHS.mic}
             label="M2"
@@ -646,12 +587,33 @@ export default function Controller({
             labelY={421}
             pressed={pressed.has('misc2')}
             compact
-            bound={boundCommands?.has('misc2')}
-            selected={selectedCommand === 'misc2'}
-            onSelect={onSelectCommand ? () => onSelectCommand('misc2') : undefined}
+            {...mapping('misc2')}
             title="扩展键 2"
           />
         )}
+        {(bindingCounts?.has('touchpad') || selectedControl === 'touchpad') && (
+          <PathButton
+            d={GENERIC_PATHS.touchpad}
+            label="TP"
+            labelX={562}
+            labelY={251}
+            pressed={pressed.has('touchpad')}
+            compact
+            {...mapping('touchpad')}
+            title="触摸板"
+          />
+        )}
+        {bindingCounts && <g aria-hidden="true">{BINDING_BADGES.map(([control, x, y]) => {
+          const count = bindingCounts.get(control)
+          if (!count) return null
+          const width = Math.max(49, String(count).length * 21 + 20)
+          return <g key={control} data-control={control} data-selected={selectedControl === control}
+            className={join(styles.bindingCount, onSelectControl && styles.bindingCountInteractive)}
+            onClick={onSelectControl ? () => onSelectControl(control) : undefined}>
+            <rect x={x - width / 2} y={y - 24} width={width} height={48} rx={23}/>
+            <text x={x} y={y}>{count}</text>
+          </g>
+        })}</g>}
       </svg>
     </div>
   )

@@ -27,7 +27,9 @@ export function Toggle({ value, onChange, label, help, disabled }: {
   return <div className="studio-toggle-row">
     <div><span>{label}</span>{help && <p className="studio-muted">{help}</p>}</div>
     <button className="studio-toggle" type="button" role="switch" aria-checked={value} aria-label={label}
-      disabled={disabled} onClick={() => onChange(!value)}><i /></button>
+      disabled={disabled} onClick={() => onChange(!value)}>
+      <span className="studio-toggle-track" aria-hidden="true" />
+    </button>
   </div>;
 }
 

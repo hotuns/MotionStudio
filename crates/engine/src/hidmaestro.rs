@@ -391,7 +391,9 @@ impl Sink for HidMaestroSink {
     }
     fn poll(&mut self) -> Result<()> {
         self.check()?;
-        self.keymouse.poll()?;
+        self.keymouse.poll()
+    }
+    fn idle_gamepad(&mut self) -> Result<()> {
         if let Some(device) = &mut self.pad {
             device.flush();
         }
@@ -436,11 +438,10 @@ impl Sink for HidMaestroSink {
     }
     fn mouse(&mut self, dx: i32, dy: i32) -> Result<()> {
         self.check()?;
-        self.keymouse.submit(keymouse::Report::Motion {
-            buttons: self.mouse_buttons(),
-            x: i64::from(dx),
-            y: i64::from(dy),
-        })
+        self.keymouse.motion(self.mouse_buttons(), dx, dy)
+    }
+    fn idle_mouse(&mut self) -> Result<()> {
+        self.keymouse.idle_motion(self.mouse_buttons())
     }
     fn scroll(&mut self, h: i32, v: i32) -> Result<()> {
         self.check()?;

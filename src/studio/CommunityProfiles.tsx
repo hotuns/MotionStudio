@@ -5,10 +5,11 @@ import {OptionPicker} from './OptionPicker';
 import {StudioIcon} from './StudioIcon';
 import styles from './ProfileManager.module.css';
 
-export function CommunityProfiles({onChoose, onContribute, blocked}: {
+export function CommunityProfiles({onChoose, onContribute, blocked, embedded = false}: {
   onChoose: (entry: CommunityProfile) => void;
-  onContribute: () => void;
+  onContribute?: () => void;
   blocked: boolean;
+  embedded?: boolean;
 }) {
   const [entries, setEntries] = useState<CommunityProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -33,12 +34,12 @@ export function CommunityProfiles({onChoose, onContribute, blocked}: {
   const rows = entries.filter(entry => (!output || entry.output === output) &&
     terms.every(term => [entry.name, entry.game, entry.author, entry.controller, entry.code]
       .some(value => value.toLocaleLowerCase().includes(term))));
-  return <section className={'app-card ' + styles.profileLibrary}>
+  return <section className={embedded ? styles.profileLibrary : 'app-card ' + styles.profileLibrary}>
     <div className={styles.profileLibraryHeader}>
-      <div><h3>社区配置</h3><p>按游戏或手柄查找配置，预览后添加到本地。</p></div>
+      <div>{!embedded && <h3>社区配置</h3>}<p>按游戏或手柄查找配置，预览后添加到本地。</p></div>
       <div className={styles.profileLibraryButtons}>
         <button type="button" className="secondary-btn" disabled={loading} onClick={() => setRevision(value => value + 1)}>刷新社区配置</button>
-        <button type="button" className="secondary-btn" onClick={onContribute}>社区投稿说明</button>
+        {onContribute && <button type="button" className="secondary-btn" onClick={onContribute}>社区投稿说明</button>}
       </div>
     </div>
     <div className={styles.communityFilters}>

@@ -26,6 +26,16 @@ pub mod stability_preview;
 const DEVICE: &str = "motion.sensor";
 const SINK: &str = "motion.result";
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GameAngleMeasurement {
+    pub axis: String,
+    pub degrees: f32,
+    pub peak: f32,
+    pub error: Option<String>,
+    pub output: crate::profile::GyroOutput,
+    pub scale: f32,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MotionTelemetry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -189,12 +189,17 @@ impl SdlBackend {
         Ok(())
     }
 
+    /// Drain one captured event without performing another SDL poll.
+    pub fn take_raw_event(&self) -> Result<Option<RawEvent>, String> {
+        crate::raw::take()
+    }
+
     pub fn next_raw_event(&mut self) -> Result<Option<RawEvent>, String> {
-        if let Some(event) = crate::raw::take()? {
+        if let Some(event) = self.take_raw_event()? {
             return Ok(Some(event));
         }
         self.update_events()?;
-        crate::raw::take()
+        self.take_raw_event()
     }
 
     pub fn event_snapshot(&self) -> Vec<RawEvent> {

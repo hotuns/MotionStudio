@@ -1,9 +1,11 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { StudioShell, type StudioPage } from './studio/StudioShell';
 import { StudioOverview } from './studio/StudioOverview';
 import { GameProfilesPage } from './studio/GameProfilesPage';
+import { BatchBindings, addedDraftActions, emptyBatchProgress, type BatchProgress, type BatchScope, type BindingWindowState } from './studio/BatchBindings';
 import type { Capture, CaptureKind } from './studio/ActionMappings';
 import type { GameTab } from './studio/game-tabs';
 import { MotionSettings } from './studio/MotionSettings';
@@ -12,24 +14,29 @@ import { ProfileLibrary } from './studio/ProfileLibrary';
 import { ProfileShareDialog } from './studio/ProfileShareDialog';
 import type { CommunityProfile, SharedSource } from './profile-sharing';
 import { SystemPage, type ComponentAction } from './studio/SystemPage';
+import { SoftwareUpdate } from './studio/SoftwareUpdate';
+import { useStudioUpdate } from './studio/software-update';
 import { SwitchSettings } from './studio/SwitchSettings';
 import {shortcutLabel} from './shortcuts';
 import { Dialog } from './studio/Controls';
 import {ActionEditor} from './studio/ActionEditor';
-import {keyboardKeyFromEvent,syncRecordedModifiers,modifierOutputs} from './keyboard';
+import {modifierOutputs} from './keyboard';
+import {listenForBindingInput} from './output-capture';
 import {ImportJsm} from './studio/ImportJsm';
 import {ImportFiles} from './studio/ImportFiles';
 import {GamepadNavigation} from './studio/GamepadNavigation';
 import {LayerToolbar} from './studio/LayerToolbar';
 import {editingProfile,updateLayer} from './layers';
 import {useLanguage,setLanguage,getLanguage,t} from './i18n';
-import { chordParts,inputLabel,outputLabel,keyNames, type Action, type ComponentStatus, type Entry, type Profile, type Settings, type Snapshot, type Workspace } from './types';
+import { chordParts,inputLabel,outputLabel, type Action, type ComponentStatus, type Entry, type Profile, type Settings, type Snapshot, type Workspace } from './types';
 import { padBindingCandidates, gyroInputNeutral, heldPadInputs, type GyroBindingField, type GyroBindingRecording } from './pad-capture';
 import dialogStyles from './studio/CreateProfileDialog.module.css';
 
 const DevicePage = lazy(() => import('./studio/DevicePage'));
 
 const templates = [
+  ['shooter', '射击与体感', '扳机瞄准和开火，左摇杆移动，配好常用动作后连续填键。'],
+  ['adventure', '动作与探索', '右摇杆控制视角，预设攻击、闪避和交互，创建后可以连续填键。'],
   ['blank', '空白配置', '从头添加自己的动作'],
   ['keyboard', '键鼠与体感', '左摇杆 WASD，扳机瞄准开火'],
   ['gyro', '只使用体感', '按住左扳机控制鼠标视角'],
@@ -49,6 +56,24 @@ const uniqueGyroPath = (devices: Snapshot['devices']) => {
   return candidates.length === 1 ? candidates[0].path : '';
 };
 
+function batchScope(entry: Entry, layerId: string): BatchScope {
+  const actions = editingProfile(entry.profile,layerId).actions;
+  const total = (entry.profile.layers??[]).reduce((count,layer)=>count+layer.actions.length,entry.profile.actions.length);
+  return {
+    profileId: entry.id,
+    profileName: entry.profile.name,
+    layerId,
+    layerName: entry.profile.layers?.find(layer=>layer.id===layerId)?.name,
+    actions,
+    maxActions: actions.length+Math.max(0,128-total),
+  };
+}
+
+function hasUnboundActions(profile: Profile) {
+  const unbound = (action:Action) => !action.input;
+  return profile.actions.some(unbound) || (profile.layers??[]).some(layer=>layer.actions.some(unbound));
+}
+
 export default function App() {
   useLanguage();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
@@ -66,6 +91,9 @@ export default function App() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
   const [template, setTemplate] = useState<Template>('blank');
+  const [batch, setBatch] = useState<BatchScope | null>(null);
+  const [batchProgress,setBatchProgress] = useState<BatchProgress|null>(null);
+  const [bindingWindowId,setBindingWindowId] = useState<string|null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [capture, setCapture] = useState<ActiveCapture | null>(null);
   const [components, setComponents] = useState<ComponentStatus | null>(null);
@@ -93,11 +121,16 @@ export default function App() {
   },[]);
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  const batchRef = useRef(batch);
+  batchRef.current = batch;
   const inFlight = useRef(false);
 
   const native = '__TAURI_INTERNALS__' in window;
+  const studioUpdate = useStudioUpdate(native);
   const entries = workspace?.profiles ?? [];
   const saved = entries.find(entry => entry.id === draft?.id);
+  const savedRef = useRef(saved);
+  savedRef.current = saved;
   const dirty = !!draft && JSON.stringify(draft) !== JSON.stringify(saved);
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -118,11 +151,18 @@ export default function App() {
     ['running','observing'].includes(status.state) && !captureActive && !status.motion?.measuring;
   const appliedId = active ? status?.profile_id : workspace?.settings.selected_profile;
   const pending = dirty || !!(draft && (draft.id !== appliedId || (active && draft.id === failedApplyId)));
-  const canApply = !!draft && pending;
+  const needsBindings = !!draft && hasUnboundActions(draft.profile);
+  const canSave = dirty && !needsBindings;
+  const canApply = !!draft && pending && !needsBindings;
   const canObserve = !!(draft && devicePath && snapshot?.engine_ready);
   const deviceCount = snapshot?.devices.filter(device => device.gamepad && device.origin !== 'virtual' && !device.open_error).length ?? 0;
 
   const notify = useCallback((text: string, error = false) => setNotice({ text, error }), []);
+  const recordSave = useCallback((result:SaveResult) => {
+    setWorkspace(data => data && { ...data, profiles: data.profiles.map(entry => entry.id === result.entry.id ? result.entry : entry) });
+    setFailedApplyId(current => result.warning ? result.entry.id : current === result.entry.id ? null : current);
+    notify(result.warning ? '配置已保存，应用失败：' + result.warning : result.applied ? '配置已保存并应用' : '配置已保存', !!result.warning);
+  },[notify]);
   const refresh = useCallback(async (selectId?: string) => {
     const data = await invoke<Workspace>('workspace');
     if(data.settings.language)setLanguage(data.settings.language);
@@ -156,6 +196,31 @@ export default function App() {
   useEffect(() => {
     if (native) void refresh().catch(error => notify(String(error), true));
   }, [native, notify, refresh]);
+
+  useEffect(() => {
+    if (!native) return;
+    let disposed = false;
+    let unlisten: (()=>void) | undefined;
+    void listen<SaveResult>('game-calibration-saved', ({payload}) => {
+      if (disposed) return;
+      const previous = savedRef.current;
+      const entry = payload.entry;
+      setDraft(current => {
+        if (!current || current.id !== entry.id || previous?.id !== entry.id) return current;
+        if (JSON.stringify(current) === JSON.stringify(previous)) return structuredClone(entry);
+        const gyro = current.profile.gyro;
+        const calibrated = entry.profile.gyro;
+        const key = calibrated.output === 'mouse' ? 'counts_per_degree' : 'stick_full_scale_dps';
+        if (gyro.output !== calibrated.output || gyro[key] !== previous.profile.gyro[key]) return current;
+        return {...current,profile:{...current.profile,gyro:{...gyro,[key]:calibrated[key]}}};
+      });
+      recordSave(payload);
+    }).then(dispose => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(()=>{});
+    return ()=>{disposed=true;unlisten?.();};
+  },[native,recordSave]);
 
   useEffect(() => {
     if (!notice) return;
@@ -210,13 +275,13 @@ export default function App() {
   useEffect(()=>{gestureSerial.current=status?.input_serial??0;},[snapshot?.restart_count]);
   useEffect(()=>{
     const serial=status?.input_serial??0;if(serial<=gestureSerial.current)return;gestureSerial.current=serial;
-    if(!windowFocused||busy||calibrating||status?.motion?.measuring)return;
+    if(!windowFocused||busy||batch||calibrating||status?.motion?.measuring)return;
     const chord=status?.input_chord??[];
     if(chord.includes('back')&&chord.includes('start')){
       if(capture&&status?.ui_navigation){cancelCapture();notify('录入已取消');}
       else if(!capture&&!status?.binding_capture&&!status?.ui_navigation)enableGamepad();
     }
-  },[status?.input_serial,windowFocused,busy,capture?.kind]);
+  },[status?.input_serial,windowFocused,busy,batch,capture?.kind]);
 
   const revision = status?.revision;
   const runningProfile = status?.profile_id;
@@ -228,7 +293,7 @@ export default function App() {
       const current = draftRef.current;
       const entry = data.profiles.find(item => item.id === current?.id);
       setWorkspace(data);
-      if (entry && !dirtyRef.current) setDraft(structuredClone(entry));
+      if (entry && !dirtyRef.current && !batchRef.current) setDraft(structuredClone(entry));
     }).catch(error => notify(String(error), true));
     return () => { disposed = true; };
   }, [native, notify, revision, runningProfile]);
@@ -331,63 +396,14 @@ export default function App() {
 
   useEffect(() => {
     if (!capture) return;
-    const target=capture;const held=new Set<string>();let best:string[]=[];let invalid=false;let finished=false;let timer:number|undefined;
-    const commit=(value:string,delay=0)=>{
-      if(finished)return;finished=true;
-      if(delay)timer=window.setTimeout(()=>finishCapture(target,value),delay);else finishCapture(target,value);
-    };
-    const mods=(event:KeyboardEvent|MouseEvent)=>syncRecordedModifiers(held,event);
-    const preview=()=>{
-      if(held.size>4){invalid=true;notify('组合输出最多支持 4 个按键或鼠标操作，请松开后重试。',true);return;}
-      if(held.size>=best.length)best=[...held];
-      setCapture(c=>c?.kind==='key'?{...c,preview:best}:c);
-    };
-    const settle=()=>{
-      if(held.size)return;
-      if(invalid){invalid=false;best=[];setCapture(c=>c?.kind==='key'?{...c,preview:[]}:c);return;}
-      if(best.length)commit(best.join('+'),best.some(v=>v.startsWith('mouse:'))?40:0);
-    };
-    const keyValue=keyboardKeyFromEvent;
-    const keyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        finished=true;
-        cancelCapture();
-        return;
-      }
-      if (capture.kind !== 'key' || event.repeat) return;
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      if(finished)return;
-      const key=keyValue(event);
-      if(keyNames.includes(key)&&!event.isComposing){held.add('key:'+key);mods(event);preview();}
-      else {invalid=true;notify('此按键暂不支持。F12 保留用于紧急停止，Esc 可取消录入。',true);}
-    };
-    const keyUp=(event:KeyboardEvent)=>{
-      if(target.kind!=='key')return;event.preventDefault();event.stopImmediatePropagation();
-      if(finished)return;
-      held.delete('key:'+keyValue(event));mods(event);settle();
-    };
-    const mouseNames=['mouse:left','mouse:middle','mouse:right','mouse:x1','mouse:x2'];
-    const mouse=(event:MouseEvent)=>{
-      if(target.kind!=='key'||(event.target instanceof Element&&event.target.closest('[data-cancel-capture],button[data-dialog-close]')))return;
-      event.preventDefault();event.stopImmediatePropagation();if(finished)return;mods(event);
-      const name=mouseNames[event.button];if(!name)return;
-      if(event.type==='mousedown'){held.add(name);preview();}else{held.delete(name);settle();}
-    };
-    const wheel=(event:WheelEvent)=>{
-      if(target.kind!=='key')return;event.preventDefault();event.stopImmediatePropagation();if(finished)return;mods(event);
-      if(!event.deltaX&&!event.deltaY)return;
-      const part=Math.abs(event.deltaX)>Math.abs(event.deltaY)?(event.deltaX>0?'wheel:right':'wheel:left'):(event.deltaY>0?'wheel:down':'wheel:up');
-      const parts=[...held,part];if(parts.length>4||invalid){notify('组合输出最多支持 4 个操作，请松开后重试。',true);return;}
-      commit(parts.join('+'));
-    };
-    const preventDefault=(event:Event)=>{if(target.kind==='key'){event.preventDefault();event.stopImmediatePropagation();}};
-    window.addEventListener('keydown', keyDown, true);
-    window.addEventListener('keyup',keyUp,true);window.addEventListener('mousedown',mouse,true);window.addEventListener('mouseup',mouse,true);
-    window.addEventListener('wheel',wheel,{capture:true,passive:false});window.addEventListener('auxclick',preventDefault,true);window.addEventListener('contextmenu',preventDefault,true);
-    return () => {window.removeEventListener('keydown',keyDown,true);window.removeEventListener('keyup',keyUp,true);window.removeEventListener('mousedown',mouse,true);window.removeEventListener('mouseup',mouse,true);window.removeEventListener('wheel',wheel,true);window.removeEventListener('auxclick',preventDefault,true);window.removeEventListener('contextmenu',preventDefault,true);if(timer!==undefined)window.clearTimeout(timer);};
+    const target = capture;
+    return listenForBindingInput({
+      output: target.kind==='key',
+      onValue: value=>finishCapture(target,value),
+      onPreview: preview=>setCapture(current=>current?.kind==='key'?{...current,preview}:current),
+      onCancel: cancelCapture,
+      onError: message=>notify(message,true),
+    });
   }, [capture?.kind,capture?.index,finishCapture,notify,cancelCapture]);
 
   const navigate = (target: StudioPage, tab: GameTab = 'actions', showCalibration = false) => {
@@ -429,11 +445,10 @@ export default function App() {
   async function saveDraft() {
     if(measuringRef.current)throw new Error('请先结束或取消转角测量，再保存配置');
     if (!draft) throw new Error('请先选择配置');
+    if (hasUnboundActions(draft.profile)) throw new Error('请先给待绑定的动作设置手柄输入。');
     const result = await invoke<SaveResult>('save_profile', { entry: draft });
-    setWorkspace(data => data && { ...data, profiles: data.profiles.map(entry => entry.id === result.entry.id ? result.entry : entry) });
+    recordSave(result);
     setDraft(current => current === draft ? structuredClone(result.entry) : current);
-    setFailedApplyId(current => result.warning ? result.entry.id : current === result.entry.id ? null : current);
-    notify(result.warning ? '配置已保存，应用失败：' + result.warning : result.applied ? '配置已保存并应用' : '配置已保存', !!result.warning);
     return result;
   }
 
@@ -458,6 +473,7 @@ export default function App() {
 
   async function startMapping(emit: boolean) {
     if (!draft) return false;
+    if (emit && hasUnboundActions(draft.profile)) throw new Error('请先给待绑定的动作设置手柄输入。');
     if (!devicePath) {
       navigate('controllerStatus');
       notify('请先选择一个手柄接口', true);
@@ -543,6 +559,90 @@ export default function App() {
     if (action) setEditor({ index, action: { ...action } });
   }
 
+  function prepareBatch(scope: BatchScope) {
+    const progress = emptyBatchProgress(scope);
+    setBatch(scope);
+    setBatchProgress(progress);
+    return progress;
+  }
+
+  function openBatch(floating=false) {
+    if (!draft || !profile || (!floating && !profile.actions.length) || busy || calibrating || captureActive || measuringRef.current) return;
+    setNotice(null);
+    const scope = batchScope(draft, editingLayer);
+    const progress = prepareBatch(scope);
+    if (floating) openBatchWindow(scope,progress);
+  }
+
+  function openBatchWindow(scope: BatchScope, progress: BatchProgress) {
+    void run(async()=>{
+      const id = await invoke<string>('open_binding_window',{
+        scope,progress,split:(device?.touchpads ?? 0)>=2,
+        theme:document.documentElement.dataset.theme??'light',
+      });
+      setBindingWindowId(id);
+    });
+  }
+
+  function closeBatch() {
+    setBatch(null);
+    setBatchProgress(null);
+    setNotice(null);
+  }
+
+  function keepBatch(progress: BatchProgress) {
+    if (!batch || !draft || draft.id !== batch.profileId || editingLayer !== batch.layerId
+      || !profile || JSON.stringify(profile.actions) !== JSON.stringify(batch.actions)) {
+      notify('配置或动作已改变，请重新打开批量填键。', true);
+      return;
+    }
+    const added = addedDraftActions(progress,batch.actions.length);
+    update(current=>{
+      progress.values.slice(0,batch.actions.length).forEach((value,index)=>{
+        const action = current.actions[index];
+        if (value && action && action.output !== value) {
+          action.output = value;
+          if (!chordParts(value).some(part=>part.startsWith('wheel:'))) action.repeat_ms = null;
+        }
+      });
+      current.actions.push(...added);
+    });
+    closeBatch();
+    notify(added.length||needsBindings?'已写入草稿，绑定手柄输入后可应用。':'已写入配置草稿，核对后可应用修改。');
+  }
+
+  const keepBatchRef = useRef(keepBatch);
+  keepBatchRef.current = keepBatch;
+  useEffect(()=>{
+    if (!bindingWindowId) return;
+    let disposed = false;
+    let reading = false;
+    const poll = async () => {
+      if (reading) return;
+      reading = true;
+      try {
+        const session = await invoke<BindingWindowState>('binding_window_state',{id:bindingWindowId});
+        if (disposed || !session.outcome) return;
+        disposed = true;
+        setBindingWindowId(null);
+        setBatchProgress(session.progress);
+        if (session.outcome==='keep') keepBatchRef.current(session.progress);
+      } catch (error) {
+        if (!disposed) notify(String(error),true);
+      } finally {
+        reading = false;
+      }
+    };
+    const timer = window.setInterval(()=>void poll(),300);
+    window.addEventListener('focus',poll);
+    void poll();
+    return ()=>{
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus',poll);
+    };
+  },[bindingWindowId,notify]);
+
   function closeEditor() { cancelCapture(); setEditor(null); }
 
   function finishEditing() {
@@ -615,16 +715,21 @@ export default function App() {
   }
 
   const locked = busy || calibrating;
+  const updateBlocked = dirty ? '请先保存或撤销当前配置的修改。'
+    : captureActive || calibrating || status?.motion?.measuring || batch || bindingWindowId ? '请先结束录入或校准，再安装更新。'
+    : busy || status?.state === 'preparing_output' ? '请等待当前操作完成。' : null;
   const dialogError = notice?.error ? notice.text : undefined;
-  const shellStatus = dirty ? '保存到文件，或应用为当前配置。' :
+  const shellStatus = needsBindings ? '请先给待绑定的动作设置手柄输入。' :
+    dirty ? '保存到文件，或应用为当前配置。' :
     pending ? '点击应用修改可切换当前配置。' : status?.message || '连接设备后可开始测试。';
 
   return <>
     <StudioShell page={page} gameTab={gameTab} onNavigate={navigate} onGameTab={tab=>navigate('games',tab)}
       profiles={entries.map(entry => ({ id: entry.id, name: entry.id === draft?.id ? draft.profile.name : entry.profile.name }))}
       profileId={draft?.id ?? ''} onSelectProfile={id => { const entry = entries.find(item => item.id === id); if (entry) selectProfile(entry); }}
+      onChooseCommunity={community => setSharedImport({community})}
       layerControls={draft&&<LayerToolbar key={draft.id} profile={draft.profile} profileId={draft.id} selected={editingLayer} onSelect={setEditingLayer}
-        blocked={locked||!!capture||!!editor||!!status?.motion?.measuring} status={status} onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
+        blocked={locked||!!capture||!!editor||!!batch||!!status?.motion?.measuring} status={status} onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
       onNewProfile={() => openCreate()} onOpenFolder={() => openLocation('profiles')} onHelp={() => setHelp(true)}
       onImportJsm={openJsmImport} onGamepad={()=>status?.ui_navigation?disableGamepad():enableGamepad()}
       gamepadOn={!!status?.ui_navigation} gamepadAvailable={!!devicePath&&!!snapshot?.engine_ready}
@@ -632,13 +737,14 @@ export default function App() {
       outputDisabled={!snapshot?.engine_ready || (!draft && !status?.emitting && !waiting)}
       onStartMapping={() => void run(() => startMapping(true))} onStopMapping={stop}
       calibrating={calibrating} busy={busy} dirty={dirty} pending={pending}
-      canApply={canApply} deviceCount={deviceCount} status={shellStatus} capturing={captureActive}
+      canSave={canSave} canApply={canApply} deviceCount={deviceCount} status={shellStatus} capturing={captureActive}
       language={workspace?.settings.language??getLanguage()} languageDisabled={busy||!workspace||!!capture}
+      updateVersion={studioUpdate.release?.version}
       onLanguage={language=>void run(async()=>{await changeSettings({language});setLanguage(language);})}
       onSave={() => { if (dirty && !locked && !captureActive) void run(saveDraft); }}
       onApply={() => { if (!locked && !captureActive && canApply) void run(applyProfile); }}
       onDiscard={() => { if (saved) { setDraft(structuredClone(saved)); cancelCapture(); } }}>
-      {notice && !(notice.error && (creating || editor || deleting)) &&
+      {notice && !(notice.error && (creating || editor || deleting || batch)) &&
         <div className={'studio-toast' + (notice.error ? ' studio-toast-error' : '')} role={notice.error ? 'alert' : 'status'}>{notice.text}</div>}
       {workspace?.warnings.map((warning, index) => <div className="studio-note studio-error" key={index}>{warning}</div>)}
       {(status?.reload_error || snapshot?.policy_error) && <div className="studio-note studio-error" role="alert">{status?.reload_error || snapshot?.policy_error}</div>}
@@ -650,19 +756,22 @@ export default function App() {
       {page === 'games' && workspace && (profile && draft
         ? <GameProfilesPage key={draft.id+':'+editingLayer} layerMode={!!editingLayer} tab={gameTab} profile={profile} device={device} status={status}
             blocked={locked} capture={actionRecording} onCapture={startCapture} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
-            onUpdate={update} onEdit={openEditor} onTab={tab=>navigate('games',tab)}
+            onUpdate={update} onEdit={openEditor} onBatch={openBatch} onTab={tab=>navigate('games',tab)}
             onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={openJsmImport}
             motion={<MotionSettings profile={profile} profileId={draft.id} update={update} device={device}
               deviceNoise={workspace.settings.motion_calibrations[devicePath]?.gyro_noise_dps}
               recording={gyroRecording} canRecord={canRecordGyro}
               onRecord={gyroField=>beginCapture({kind:'pad',index:null,gyroField})} onCancelRecording={cancelCapture}
               onOpenDevice={()=>navigate('controllerStatus','actions',true)} onPreviewOutput={()=>navigate('controllerStatus')} status={status}
-              canMeasure={!!status?.emitting&&!pending&&!captureActive&&runningProfile===draft.id}
+              canMeasure={!!status?.emitting&&!!status.device?.gyro&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
+              onOpenCalibration={()=>void run(()=>invoke('open_calibration_window',{
+                profileId:draft.id,theme:document.documentElement.dataset.theme??'light',
+              }))}
               onMotionAction={motionAction}/>}
             onExport={() => void run(() => exportProfile(draft))} onOpenFolder={() => openLocation('profiles')} onNavigate={navigate} />
         : <section className="app-card"><h2>创建你的第一份游戏配置</h2>
             <p className="studio-muted">选择合适的模板后，就可以按游戏动作配置手柄。</p>
-            <div className="studio-actions"><button type="button" className="primary-btn" onClick={() => openCreate('keyboard')}>新建游戏配置</button>
+            <div className="studio-actions"><button type="button" className="primary-btn" onClick={() => openCreate('shooter')}>新建游戏配置</button>
             <button type="button" className="secondary-btn" onClick={openJsmImport}>导入 JSM 配置</button>
             <button type="button" className="secondary-btn" onClick={() => navigate('profiles')}>配置库</button></div>
           </section>)}
@@ -680,7 +789,10 @@ export default function App() {
         blocked={locked} dirty={dirty} view={libraryView} onView={setLibraryView}
         onChooseCommunity={community => setSharedImport({community})} onImportCode={() => setSharedImport({})}
         onContribute={() => openLocation('community')}
-        onCopyCode={entry => void run(() => invoke('copy_profile_code', {profile: entry.profile}), '配置码已复制')}
+        onCopyCode={entry => void run(async()=>{
+          if (hasUnboundActions(entry.profile)) throw new Error('请先给待绑定的动作设置手柄输入。');
+          await invoke('copy_profile_code', {profile: entry.profile});
+        }, '配置码已复制')}
         onSelect={selectProfile} onRename={name => update(profile => { profile.name = name; })}
         onCreate={() => openCreate()} onImport={() => {
           if (dirty) notify('请先保存或撤销当前配置的修改。', true);
@@ -698,7 +810,11 @@ export default function App() {
           const current=await invoke<Snapshot>('snapshot');setSnapshot(current);return current.status;
         }} />}
       {page === 'settings' && workspace && <SystemPage components={components} snapshot={snapshot} dataDir={workspace.data_dir}
+        softwareUpdate={<SoftwareUpdate update={studioUpdate} blocked={updateBlocked}
+          onInstall={() => { if (!updateBlocked) void run(studioUpdate.install); }} onOpenReleases={() => openLocation('releases')}/>}
         backend={workspace.settings.output_backend ?? 'hid_maestro'} outputActive={active}
+        mouseDisplaySync={workspace.settings.mouse_display_sync ?? false}
+        onMouseDisplaySync={enabled => void run(() => changeSettings({mouse_display_sync: enabled}), '输出显示同步已保存，下次开始映射时生效')}
         gamepadBackend={workspace.settings.gamepad_backend??'vigem'}
         onGamepadBackend={backend=>void run(()=>changeSettings({gamepad_backend:backend}),'虚拟手柄后端已保存，下次开始映射时生效')}
         autoHide={workspace.settings.auto_hide !== false}
@@ -716,7 +832,7 @@ export default function App() {
         onDiagnostics={() => void run(exportDiagnostics)} onDevices={() => navigate('controllerStatus')} />}
     </StudioShell>
 
-    <GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||!!status?.motion?.measuring} canSave={dirty} canPlay={canObserve&&!locked}
+    <GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||!!status?.motion?.measuring} canSave={canSave} canPlay={canObserve&&!locked&&!needsBindings}
       onSave={()=>{if(dirty&&!locked)void run(saveDraft);}} onPlay={()=>void run(()=>startMapping(true))} onDisable={disableGamepad}/>
     {importingJsm&&<ImportJsm onClose={()=>setImportingJsm(false)} onImported={async entry=>{
       await refresh(entry.id);
@@ -733,6 +849,7 @@ export default function App() {
         await refresh(entry.id);
         setCreating(false);
         navigate('games');
+        if (template === 'shooter' || template === 'adventure') prepareBatch(batchScope(entry, ''));
       }, '配置已创建')}
       actions={<>
         <button type="button" className="secondary-btn" onClick={() => setCreating(false)}>取消</button>
@@ -749,6 +866,22 @@ export default function App() {
         </label>)}
       </fieldset>
     </Dialog>}
+    {batch && batchProgress && (bindingWindowId
+      ? <Dialog title="正在悬浮窗中填键" description="小窗已置顶。切到游戏键位页，在小窗里点「新增动作」开始录键。"
+          error={dialogError}
+          onClose={()=>void run(()=>invoke('update_binding_window',{id:bindingWindowId,progress:null,finish:'return'}))}
+          actions={<>
+            <button type="button" className="secondary-btn" disabled={busy}
+              onClick={()=>void run(()=>invoke('update_binding_window',{id:bindingWindowId,progress:null,finish:'return'}))}>关闭悬浮窗</button>
+            <button type="button" className="primary-btn" disabled={busy}
+              onClick={()=>void run(()=>invoke('show_binding_window',{id:bindingWindowId}))}>显示悬浮窗</button>
+          </>}>
+          <strong translate="no">{batch.profileName}</strong>
+        </Dialog>
+      : <BatchBindings scope={batch} progress={batchProgress} onProgress={setBatchProgress} busy={locked}
+          captureLease={!!status?.binding_capture} split={(device?.touchpads ?? 0)>=2}
+          error={dialogError} onOpenWindow={progress=>openBatchWindow(batch,progress)}
+          onClose={closeBatch} onKeep={keepBatch}/>)}
     {editor && <ActionEditor key={editingLayer+':'+String(editor.index)} action={editor.action} isNew={editor.index===null}
       onChange={updateEditor} onClose={closeEditor} onSubmit={finishEditing} error={dialogError} busy={busy}
       capture={actionRecording} onCapture={kind=>startCapture(kind,null)} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}

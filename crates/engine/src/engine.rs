@@ -4,7 +4,7 @@ use crate::profile::{
 };
 use crate::timing::{SampleClock, SampleTime, MAX_GAP_NS};
 use crate::{
-    motion::{self, MotionRuntime},
+    motion::{self, GameAngleMeasurement, MotionRuntime},
     motion_config::*,
 };
 use anyhow::{bail, Result};
@@ -323,7 +323,7 @@ fn controls(profile: &Profile) -> GraphRunner {
 
 fn gyro_graph(profile: &Profile) -> GraphRunner {
     let mut rws = node(1, "processing.rws", 5);
-    rws.input_sources = vec![Some((0, 0))];
+    rws.input_sources = vec![Some((0, 0)), Some((0, 1))];
     rws.params = HashMap::from([
         ("scale".into(), json!(profile.gyro.counts_per_degree)),
         ("rws".into(), json!(profile.gyro.sensitivity)),
@@ -349,7 +349,11 @@ fn gyro_graph(profile: &Profile) -> GraphRunner {
         ],
         ..Default::default()
     });
-    GraphRunner::new(vec![source(vec!["aim_rate".into()], 0.0), rws, sink])
+    GraphRunner::new(vec![
+        source(vec!["aim_rate".into(), "calibration_stick".into()], 0.0),
+        rws,
+        sink,
+    ])
 }
 
 /// Simple Studio profiles are compiled into FlexInput graphs, never a GUI canvas.
@@ -718,14 +722,27 @@ impl Engine {
         self.input.tick(&self.raw_signals, dt, !filter);
         self.base_input.tick(&self.raw_signals, dt, !filter);
         self.signals.clone_from(&self.input.signals);
-        for (i, (prefix, limit)) in [
-            ("left", self.profile.stick_zones.left_outer),
-            ("right", self.profile.stick_zones.right_outer),
+        for (i, (prefix, stick, limit)) in [
+            ("left", Stick::Left, self.profile.stick_zones.left_outer),
+            ("right", Stick::Right, self.profile.stick_zones.right_outer),
         ]
         .into_iter()
         .enumerate()
         {
-            let value = self.input.stick(&format!("{prefix}_stick"));
+            let pin = format!("{prefix}_stick");
+            // Studio's controls and gyro run in separate graphs. Keep the
+            // original processed vector on the input bus for the RWS sweep.
+            let value = if self.measuring.is_some() && stick == self.profile.gyro.motion.flick.stick
+            {
+                self.signals.set_pin(SOURCE, &pin, Signal::Vec2(Vec2::ZERO));
+                self.signals
+                    .set_pin(SOURCE, &format!("{pin}_x"), Signal::Float(0.));
+                self.signals
+                    .set_pin(SOURCE, &format!("{pin}_y"), Signal::Float(0.));
+                Vec2::ZERO
+            } else {
+                self.input.stick(&pin)
+            };
             for (direction, value) in [
                 ("left", -value.x),
                 ("right", value.x),
@@ -758,7 +775,11 @@ impl Engine {
         }
     }
     pub fn processed_axes(&self) -> [f32; 6] {
-        let mut axes: [f32; 6] = std::array::from_fn(|i| self.input_value(AXES[i]));
+        let mut axes: [f32; 6] = std::array::from_fn(|i| {
+            input_pin(AXES[i])
+                .and_then(|pin| self.input.signals.get_pin(SOURCE, pin))
+                .map_or(0., |signal| signal.as_float())
+        });
         axes[1] = -axes[1];
         axes[3] = -axes[3];
         axes
@@ -1271,8 +1292,10 @@ impl Engine {
                 .is_some_and(|s| s.as_bool())
         });
         let out = self.touchpad.tick(now_ns, clicks, snapshot);
-        for (value, delta) in self.frame.mouse_delta.iter_mut().zip(out.mouse) {
-            *value += delta;
+        if self.measuring.is_none() {
+            for (value, delta) in self.frame.mouse_delta.iter_mut().zip(out.mouse) {
+                *value += delta;
+            }
         }
         for (value, delta) in self.frame.scroll.iter_mut().zip(out.scroll) {
             *value += delta;
@@ -1391,6 +1414,17 @@ impl Engine {
         };
         self.gyro_signals
             .set_pin(SOURCE, "aim_rate", Signal::Vec2(rate / BUS_GYRO_DPS));
+        if self.measuring.as_deref() == Some("yaw") {
+            let pin = match self.profile.gyro.motion.flick.stick {
+                Stick::Left => "left_stick",
+                Stick::Right => "right_stick",
+            };
+            self.gyro_signals.set_pin(
+                SOURCE,
+                "calibration_stick",
+                Signal::Vec2(self.input.stick(pin)),
+            );
+        }
         self.gyro.eval(&self.gyro_signals, dt);
         if self.measuring.is_some() {
             self.motion.telemetry.measured_degrees = self
@@ -1503,6 +1537,7 @@ impl Engine {
         if !["yaw", "pitch"].contains(&axis)
             || !self.profile.gyro.enabled
             || self.profile.gyro.motion.mode != MotionMode::Pointer
+            || self.paused()
         {
             bail!("转角测量需要启用角速度瞄准模式，并选择水平或垂直轴");
         }
@@ -1526,7 +1561,8 @@ impl Engine {
             }),
         );
         self.motion.telemetry.measuring = self.measuring.clone();
-        self.update_pad();
+        self.refresh_sticks(self.stick_time, true);
+        self.eval_controls(false, 0.);
         Ok(())
     }
     pub fn is_measuring(&self) -> bool {
@@ -1539,14 +1575,30 @@ impl Engine {
             self.motion.telemetry.measurement_error = Some("测量期间姿态已重置，请重新测量".into());
         }
     }
-    pub fn end_measurement(&mut self) {
-        self.measuring = None;
+    pub fn end_measurement(&mut self) -> Option<GameAngleMeasurement> {
+        let axis = self.measuring.take()?;
+        let gyro = &self.profile.gyro;
+        let result = GameAngleMeasurement {
+            axis,
+            degrees: self.motion.telemetry.measured_degrees,
+            peak: self.motion.telemetry.measurement_peak,
+            error: self.motion.telemetry.measurement_error.clone(),
+            output: gyro.output,
+            scale: match gyro.output {
+                GyroOutput::Mouse => gyro.counts_per_degree,
+                GyroOutput::RightStick => gyro.stick_full_scale_dps,
+            },
+        };
         self.gyro.graph.nodes[1].params.remove("cal_measure");
         self.gyro.state.clear();
         self.gyro_stick = Vec2::ZERO;
         self.clock.reset();
         self.motion.telemetry.measuring = None;
-        self.update_pad();
+        self.refresh_sticks(self.stick_time, true);
+        let flick = &self.profile.gyro.motion.flick;
+        self.flick_snapshot_blocked = self.stick_value(flick.stick).length() >= flick.deadzone;
+        self.eval_controls(false, 0.);
+        Some(result)
     }
 
     fn advance_aim(&mut self, dt: f32) {
@@ -1700,7 +1752,7 @@ impl Engine {
         self.advance_aim(dt);
         self.advance_touch(now_ns, false);
         let options = &self.profile.stick_mouse;
-        if !options.enabled || !dt.is_finite() || dt <= 0.0 || dt > 0.05 {
+        if self.measuring.is_some() || !options.enabled {
             return &self.frame;
         }
         self.stick_mouse_graph.eval(&self.signals, dt);

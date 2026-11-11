@@ -215,3 +215,12 @@
 
 .buttonIcon { fill: var(--bg-panel, var(--bg-input)); stroke: var(--text-strong); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
 .buttonIconActive { stroke: var(--accent); }
+
+.bindingCount { pointer-events: none; }
+.bindingCountInteractive { cursor: pointer; pointer-events: all; }
+.bindingCount rect { fill: var(--accent-primary, var(--accent)); stroke: var(--bg-2); stroke-width: 1.4; vector-effect: non-scaling-stroke; }
+.bindingCount text {
+  fill: var(--btn-primary-text, #fff); font: 700 35px system-ui, sans-serif; font-variant-numeric: tabular-nums;
+  text-anchor: middle; dominant-baseline: central; user-select: none; pointer-events: none;
+}
+.bindingCountInteractive:hover rect, .bindingCount[data-selected='true'] rect { stroke: var(--text-strong); }

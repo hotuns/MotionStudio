@@ -1,0 +1,29 @@
+.surface {
+  box-sizing: border-box;
+  height: 100dvh;
+  overflow: auto;
+  padding: 16px;
+  background: var(--bg-2);
+  color: var(--text-strong);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.header { display: flex; gap: 10px; justify-content: space-between; align-items: flex-start; }
+.header h1 { margin: 0; font-size: 18px; }
+.header p { margin: 3px 0 0; color: var(--text-muted); }
+.header button { flex: none; }
+.hotkeys { display: flex; flex-wrap: wrap; gap: 6px 12px; color: var(--text-muted); font-size: 12px; }
+.hotkeys:not(:empty) { margin-top: 8px; }
+.hotkeys kbd { opacity: 1; }
+.readout, .notice {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid var(--border-1);
+  border-radius: 8px;
+  background: var(--bg-1);
+}
+.readout p { margin: 0 0 4px; }
+.readout strong { font-size: 29px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.readout span { margin-inline-start: 8px; color: var(--text-muted); }
+.surface :global(.studio-muted) { margin-top: 14px; }

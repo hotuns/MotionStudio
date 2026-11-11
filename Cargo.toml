@@ -23,7 +23,17 @@ puffin = "0.20"
 [profile.dev]
 opt-level = 1
 
+# Rebuild the desktop binary without reusing incremental LLVM objects on MSVC.
+[profile.dev.package.motion-studio]
+incremental = false
+
 [profile.release]
 lto = false
 codegen-units = 16
 strip = "debuginfo"
+
+# Avoid the MSVC rustc heap-corruption crash during parallel optimized desktop
+# code generation. The separate input engine retains the release settings above.
+[profile.release.package.motion-studio]
+opt-level = 1
+codegen-units = 1

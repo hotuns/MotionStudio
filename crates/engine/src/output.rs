@@ -40,6 +40,7 @@ pub struct GamepadStatus {
 pub struct OutputStats {
     pub queued: usize,
     pub coalesced_motion: u64,
+    pub direct_motion_reports: u64,
     pub mouse_reports: u64,
     pub keyboard_reports: u64,
     pub wait_total_us: u64,
@@ -68,13 +69,19 @@ pub trait Sink {
     fn stats(&self) -> OutputStats {
         OutputStats::default()
     }
-    /// Asynchronous backends report written motion from their delivery thread.
+    /// Backends with their own delivery path report motion when written.
     fn mouse_trace(&self) -> Option<Vec<MouseTracePoint>> {
         None
     }
     fn button(&mut self, name: &str, down: bool) -> Result<()>;
     fn mouse(&mut self, dx: i32, dy: i32) -> Result<()>;
+    fn idle_mouse(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn gamepad(&mut self, pad: PadState) -> Result<()>;
+    fn idle_gamepad(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn scroll(&mut self, _horizontal: i32, _vertical: i32) -> Result<()> {
         bail!("This output sink does not support scrolling")
     }
@@ -110,8 +117,14 @@ impl<T: Sink + ?Sized> Sink for Box<T> {
     fn mouse(&mut self, dx: i32, dy: i32) -> Result<()> {
         (**self).mouse(dx, dy)
     }
+    fn idle_mouse(&mut self) -> Result<()> {
+        (**self).idle_mouse()
+    }
     fn gamepad(&mut self, pad: PadState) -> Result<()> {
         (**self).gamepad(pad)
+    }
+    fn idle_gamepad(&mut self) -> Result<()> {
+        (**self).idle_gamepad()
     }
 }
 
@@ -137,7 +150,9 @@ impl Sink for ObserveSink {
 pub struct Dispatcher<S: Sink> {
     sink: S,
     held: BTreeSet<String>,
-    residual: [f64; 2],
+    mouse_pending: [f64; 2],
+    scheduled: bool,
+    pending_pad: Option<PadState>,
     pad: Option<PadState>,
     pad_uncertain: bool,
     mouse_trace: Option<MouseTrace>,
@@ -161,7 +176,9 @@ impl<S: Sink> Dispatcher<S> {
         Self {
             sink,
             held: BTreeSet::new(),
-            residual: [0.0; 2],
+            mouse_pending: [0.0; 2],
+            scheduled: false,
+            pending_pad: None,
             pad: None,
             pad_uncertain: false,
             mouse_trace,
@@ -171,10 +188,19 @@ impl<S: Sink> Dispatcher<S> {
             pad_reports: 0,
         }
     }
+    pub fn with_scheduled_output(mut self) -> Self {
+        self.scheduled = true;
+        self
+    }
     pub fn apply(&mut self, frame: &Frame) -> Result<()> {
         self.sink.poll()?;
         if frame.scroll.iter().any(|v| v.unsigned_abs() > 1024) {
             bail!("Oversized scroll output");
+        }
+        // Drain motion from before the edge while the old modifiers/buttons
+        // still apply. Discrete inputs do not wait for the next motion tick.
+        if self.scheduled && (self.held != frame.held || frame.scroll != [0; 2]) {
+            self.mouse_pending = self.send_mouse(self.mouse_pending)?;
         }
         let released = self.held.difference(&frame.held).cloned().collect();
         for key in crate::bindings::button_order(&released, false) {
@@ -192,16 +218,51 @@ impl<S: Sink> Dispatcher<S> {
         if frame.scroll != [0; 2] {
             self.sink.scroll(frame.scroll[0], frame.scroll[1])?;
         }
-        let mut count = [0i32; 2];
-        let mut remainder = [0.0; 2];
-        for axis in 0..2 {
-            let v = self.residual[axis] + frame.mouse_delta[axis];
-            if !v.is_finite() || v.abs() > 1_000_000.0 {
+        let mut pending = self.mouse_pending;
+        for (value, delta) in pending.iter_mut().zip(frame.mouse_delta) {
+            *value += delta;
+            if !value.is_finite() || value.abs() > 1_000_000.0 {
                 bail!("Invalid/oversized mouse displacement; stopping output");
             }
-            count[axis] = v.trunc() as i32;
-            remainder[axis] = v - count[axis] as f64;
         }
+        self.mouse_pending = if self.scheduled {
+            pending
+        } else {
+            self.send_mouse(pending)?
+        };
+        self.pending_pad = frame.pad;
+        // Keep short button taps and trigger edges even if they begin and end
+        // between output slots. Only continuous analog state can be replaced.
+        if !self.scheduled || has_pad_edge(self.pad, frame.pad) {
+            self.flush_pad()?;
+        }
+        Ok(())
+    }
+    fn flush_pad(&mut self) -> Result<bool> {
+        if self.pending_pad != self.pad || self.pad_uncertain {
+            // A failed first report may already have reached the device.
+            self.pad_uncertain = true;
+            self.sink.gamepad(self.pending_pad.unwrap_or_default())?;
+            self.pad_uncertain = false;
+            self.pad_reports += 1;
+            self.pad = self.pending_pad;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+    pub fn flush_output(&mut self) -> Result<()> {
+        if self.mouse_pending.iter().all(|value| value.abs() < 1.0) {
+            self.sink.idle_mouse()?;
+        } else {
+            self.mouse_pending = self.send_mouse(self.mouse_pending)?;
+        }
+        if !self.flush_pad()? {
+            self.sink.idle_gamepad()?;
+        }
+        Ok(())
+    }
+    fn send_mouse(&mut self, mut pending: [f64; 2]) -> Result<[f64; 2]> {
+        let count = pending.map(|value| value.trunc() as i32);
         if count != [0; 2] {
             self.sink.mouse(count[0], count[1])?;
             if let Some(trace) = &mut self.mouse_trace {
@@ -210,20 +271,15 @@ impl<S: Sink> Dispatcher<S> {
             for (total, step) in self.mouse_counts.iter_mut().zip(count) {
                 *total += i64::from(step);
             }
+            for (value, step) in pending.iter_mut().zip(count) {
+                *value -= f64::from(step);
+            }
         }
-        self.residual = remainder;
-        if frame.pad != self.pad || self.pad_uncertain {
-            // A failed first report may already have reached the device.
-            self.pad_uncertain = true;
-            self.sink.gamepad(frame.pad.unwrap_or_default())?;
-            self.pad_uncertain = false;
-            self.pad_reports += 1;
-            self.pad = frame.pad;
-        }
-        Ok(())
+        Ok(pending)
     }
     pub fn reset(&mut self) -> Result<()> {
         self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.pending_pad = self.pad.map(|_| PadState::default());
         if let Some(trace) = &mut self.mouse_trace {
             trace.clear();
         }
@@ -244,6 +300,7 @@ impl<S: Sink> Dispatcher<S> {
             match self.sink.gamepad(PadState::default()) {
                 Ok(()) => {
                     self.pad = Some(PadState::default());
+                    self.pending_pad = self.pad;
                     self.pad_uncertain = false;
                     self.pad_reports += 1;
                 }
@@ -253,7 +310,7 @@ impl<S: Sink> Dispatcher<S> {
                 }
             }
         }
-        self.residual = [0.0; 2];
+        self.mouse_pending = [0.0; 2];
         if !errors.is_empty() {
             bail!("Output release failed: {}", errors.join("; "));
         }
@@ -275,6 +332,18 @@ impl<S: Sink> Dispatcher<S> {
             pad: self.pad,
         }
     }
+}
+fn has_pad_edge(previous: Option<PadState>, next: Option<PadState>) -> bool {
+    let Some(next) = next else {
+        return previous.is_some();
+    };
+    let previous = previous.unwrap_or_default();
+    previous.buttons != next.buttons
+        || previous.touchpad_click != next.touchpad_click
+        || previous.left_trigger_pressed != next.left_trigger_pressed
+        || previous.right_trigger_pressed != next.right_trigger_pressed
+        || (previous.left_trigger == 0) != (next.left_trigger == 0)
+        || (previous.right_trigger == 0) != (next.right_trigger == 0)
 }
 impl<S: Sink> Drop for Dispatcher<S> {
     fn drop(&mut self) {
@@ -343,7 +412,7 @@ mod windows {
             };
             anyhow::ensure!(
                 device.device().is_connected(),
-                "FlexInput 原生 ViGEm 手柄创建失败，请检查 ViGEmBus 状态"
+                "创建 ViGEm 虚拟手柄失败，请检查 ViGEmBus 状态"
             );
             device.device().reset_outputs();
             device.flush_checked()?;

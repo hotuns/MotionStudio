@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -23,6 +23,8 @@ pub struct RunConfig {
     pub output_backend: crate::output::OutputBackend,
     #[serde(default)]
     pub gamepad_backend: crate::output::GamepadBackend,
+    #[serde(default)]
+    pub mouse_display_sync: bool,
     #[serde(default)]
     pub bias: [f32; 3],
     #[serde(default)]
@@ -71,8 +73,13 @@ pub enum Command {
     },
     BeginMeasure {
         axis: String,
+        #[serde(default)]
+        expected_revision: Option<u64>,
     },
-    EndMeasure,
+    EndMeasure {
+        #[serde(default)]
+        expected_revision: Option<u64>,
+    },
     ResetPose,
     ResetFilters,
     Shutdown,
@@ -89,6 +96,16 @@ pub struct Stats {
     pub mouse_counts: [i64; 2],
     #[serde(default)]
     pub output: crate::output::OutputStats,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DisplaySyncStatus {
+    pub live: bool,
+    pub frame_hz: u32,
+    pub reports_per_frame: u32,
+    #[serde(default)]
+    pub vrr: bool,
+    #[serde(default)]
+    pub fallback_hz: u32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
@@ -108,6 +125,8 @@ pub struct Status {
     pub output_backend: Option<crate::output::OutputBackend>,
     #[serde(default)]
     pub output_gamepad: Option<crate::output::GamepadStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse_display_sync: Option<DisplaySyncStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_preview: Option<crate::output::OutputPreview>,
     #[serde(default)]
@@ -163,6 +182,7 @@ impl Default for Status {
             visibility: Default::default(),
             output_backend: None,
             output_gamepad: None,
+            mouse_display_sync: None,
             output_preview: None,
             feedback: Default::default(),
             revision: 0,
@@ -209,6 +229,8 @@ pub enum Event {
         id: u64,
         ok: bool,
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        measurement: Option<crate::motion::GameAngleMeasurement>,
     },
     Status {
         status: Box<Status>,

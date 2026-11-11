@@ -1,13 +1,10 @@
 //! Ordinary desktop notification surface. No game hooks or focus activation.
-use motion_core::storage::{OverlayPosition, Settings};
+use motion_core::storage::Settings;
 use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Clone, Debug)]
 struct Notice {
-    heading: &'static str,
     name: String,
-    reason: String,
-    position: OverlayPosition,
     duration: std::time::Duration,
 }
 fn label(value: &str) -> String {
@@ -36,7 +33,7 @@ impl Overlay {
         });
         overlay
     }
-    pub fn show(&self, settings: &Settings, name: &str, reason: &str) -> Result<(), String> {
+    pub fn show(&self, settings: &Settings, name: &str) -> Result<(), String> {
         if !settings.overlay_enabled {
             return Ok(());
         }
@@ -51,26 +48,7 @@ impl Overlay {
         // stale profile names behind the configuration that is actually active.
         slot.dismiss = false;
         slot.pending = Some(Notice {
-            heading: if settings.language == motion_core::storage::Language::En {
-                "Motion Studio · Profile changed"
-            } else {
-                "Motion Studio · 配置已切换"
-            },
             name: label(name),
-            reason: label(if settings.language == motion_core::storage::Language::En {
-                match reason {
-                    "快捷键切换" => "Keyboard shortcut",
-                    "手柄快捷键切换" => "Controller shortcut",
-                    "光标显示 · 自动切换" => "Cursor visible · Automatic switch",
-                    "光标隐藏 · 自动切换" => "Cursor hidden · Automatic switch",
-                    "手动切换" => "Manual switch",
-                    "配置提示预览" => "Notification preview",
-                    _ => reason,
-                }
-            } else {
-                reason
-            }),
-            position: settings.overlay_position,
             duration: std::time::Duration::from_millis(u64::from(
                 settings.overlay_duration_ms.clamp(1000, 8000),
             )),
@@ -93,21 +71,10 @@ impl Overlay {
         }
     }
 }
-fn position(work: [i32; 4], size: [i32; 2], margin: i32, corner: OverlayPosition) -> [i32; 2] {
-    use OverlayPosition::*;
-    let x = if matches!(corner, TopRight | BottomRight) {
-        work[2] - size[0] - margin
-    } else {
-        work[0] + margin
-    };
-    let y = if matches!(corner, BottomLeft | BottomRight) {
-        work[3] - size[1] - margin
-    } else {
-        work[1] + margin
-    };
+fn position(work: [i32; 4], size: [i32; 2], margin: i32) -> [i32; 2] {
     [
-        x.max(work[0]).min((work[2] - size[0]).max(work[0])),
-        y.max(work[1]).min((work[3] - size[1]).max(work[1])),
+        (work[2] - size[0] - margin).max(work[0]),
+        (work[3] - size[1] - margin).max(work[1]),
     ]
 }
 
@@ -127,6 +94,7 @@ mod native {
     const EX_STYLE: u32 =
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT;
     const COLOR_BG: u32 = 0x00231d18;
+    const NAME_PADDING: i32 = 12;
     struct Paint {
         notice: Option<Notice>,
         scale: f64,
@@ -137,22 +105,14 @@ mod native {
     fn px(value: i32, scale: f64) -> i32 {
         (f64::from(value) * scale).round() as i32
     }
-    unsafe fn text(
-        dc: HDC,
-        value: &str,
-        mut rect: RECT,
-        size: i32,
-        weight: i32,
-        color: u32,
-        scale: f64,
-    ) {
+    unsafe fn draw_name(dc: HDC, value: &str, rect: &mut RECT, scale: f64, flags: u32) {
         let face = wide("Microsoft YaHei UI");
         let font = CreateFontW(
-            -px(size, scale),
+            -px(14, scale),
             0,
             0,
             0,
-            weight,
+            600,
             0,
             0,
             0,
@@ -164,18 +124,33 @@ mod native {
             face.as_ptr(),
         );
         let old = SelectObject(dc, font);
-        SetTextColor(dc, color);
+        SetTextColor(dc, 0x00faf6f1);
         SetBkMode(dc, TRANSPARENT as i32);
         let text = wide(value);
         DrawTextW(
             dc,
             text.as_ptr(),
             (text.len() - 1) as i32,
-            &mut rect,
-            DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX,
+            rect,
+            DT_SINGLELINE | DT_NOPREFIX | flags,
         );
         SelectObject(dc, old);
         DeleteObject(font);
+    }
+    unsafe fn notice_size(hwnd: HWND, name: &str, work: RECT, scale: f64) -> [i32; 2] {
+        let mut area: RECT = zeroed();
+        let dc = GetDC(hwnd);
+        let width = if dc.is_null() {
+            px(280, scale)
+        } else {
+            draw_name(dc, name, &mut area, scale, DT_CALCRECT);
+            ReleaseDC(hwnd, dc);
+            area.right + 2 * px(NAME_PADDING, scale)
+        };
+        [
+            width.min(px(280, scale)).min(work.right - work.left).max(1),
+            px(32, scale).min(work.bottom - work.top).max(1),
+        ]
     }
     unsafe extern "system" fn wndproc(
         hwnd: HWND,
@@ -200,28 +175,21 @@ mod native {
                 let brush = CreateSolidBrush(COLOR_BG);
                 FillRect(dc, &rect, brush);
                 DeleteObject(brush);
-                if let Some(context) = context.as_ref() {
-                    if let Some(notice) = &context.notice {
-                        let s = context.scale;
-                        let accent = RECT {
-                            left: 0,
-                            top: 0,
-                            right: px(4, s),
-                            bottom: rect.bottom,
-                        };
-                        let brush = CreateSolidBrush(0x00d3c941);
-                        FillRect(dc, &accent, brush);
-                        DeleteObject(brush);
-                        let area = |top, bottom| RECT {
-                            left: px(22, s),
-                            top: px(top, s),
-                            right: rect.right - px(20, s),
-                            bottom: px(bottom, s),
-                        };
-                        text(dc, notice.heading, area(12, 34), 12, 400, 0x00c5b9aa, s);
-                        text(dc, &notice.name, area(34, 70), 21, 600, 0x00faf6f1, s);
-                        text(dc, &notice.reason, area(74, 100), 13, 400, 0x00e0d4c4, s);
-                    }
+                if let Some(Paint {
+                    notice: Some(notice),
+                    scale,
+                }) = context.as_ref()
+                {
+                    let padding = px(NAME_PADDING, *scale).min(rect.right / 3);
+                    rect.left += padding;
+                    rect.right -= padding;
+                    draw_name(
+                        dc,
+                        &notice.name,
+                        &mut rect,
+                        *scale,
+                        DT_VCENTER | DT_END_ELLIPSIS,
+                    );
                 }
                 EndPaint(hwnd, &paint);
                 0
@@ -295,15 +263,11 @@ mod native {
                     let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y);
                     paint.scale = f64::from(x.max(96)) / 96.;
                     let work = info.rcWork;
-                    let size = [
-                        px(380, paint.scale).min(work.right - work.left),
-                        px(112, paint.scale).min(work.bottom - work.top),
-                    ];
+                    let size = notice_size(hwnd, &notice.name, work, paint.scale);
                     let point = position(
                         [work.left, work.top, work.right, work.bottom],
                         size,
-                        px(24, paint.scale),
-                        notice.position,
+                        px(14, paint.scale),
                     );
                     deadline = Some(Instant::now() + notice.duration);
                     paint.notice = Some(notice);
@@ -312,8 +276,8 @@ mod native {
                         0,
                         size[0] + 1,
                         size[1] + 1,
-                        px(16, paint.scale),
-                        px(16, paint.scale),
+                        px(12, paint.scale),
+                        px(12, paint.scale),
                     );
                     if SetWindowRgn(hwnd, region, 0) == 0 {
                         DeleteObject(region);
@@ -393,72 +357,40 @@ mod native {
 mod tests {
     use super::*;
     #[test]
-    fn english_native_notice_keeps_user_names_and_localizes_the_switch_reason() {
+    fn native_notice_keeps_user_names_and_respects_display_time() {
         let overlay = Overlay(Arc::new((Mutex::new(Slot::default()), Condvar::new())));
         let settings = Settings {
             language: motion_core::storage::Language::En,
+            overlay_duration_ms: 4000,
             ..Default::default()
         };
-        overlay
-            .show(&settings, "鼠标", "光标隐藏 · 自动切换")
-            .unwrap();
+        overlay.show(&settings, "鼠标 & 体感").unwrap();
         let state = overlay.0 .0.lock().unwrap();
         let notice = state.pending.as_ref().unwrap();
-        assert_eq!(notice.name, "鼠标");
-        assert_eq!(notice.heading, "Motion Studio · Profile changed");
-        assert_eq!(notice.reason, "Cursor hidden · Automatic switch");
-        drop(state);
-        overlay.show(&settings, "鼠标", "手柄快捷键切换").unwrap();
-        let state = overlay.0 .0.lock().unwrap();
-        let notice = state.pending.as_ref().unwrap();
-        assert_eq!(notice.name, "鼠标");
-        assert_eq!(notice.reason, "Controller shortcut");
+        assert_eq!(notice.name, "鼠标 & 体感");
+        assert_eq!(notice.duration.as_millis(), 4000);
     }
     #[test]
     fn rapid_switches_replace_notice_and_disabling_discards_it() {
         let overlay = Overlay(Arc::new((Mutex::new(Slot::default()), Condvar::new())));
         let mut settings = Settings::default();
-        overlay.show(&settings, "旧配置", "快捷键").unwrap();
-        overlay.show(&settings, "新配置", "光标隐藏").unwrap();
+        overlay.show(&settings, "旧配置").unwrap();
+        overlay.show(&settings, "新配置").unwrap();
         assert_eq!(
             overlay.0 .0.lock().unwrap().pending.as_ref().unwrap().name,
             "新配置"
         );
         overlay.dismiss();
         settings.overlay_enabled = false;
-        overlay.show(&settings, "不能弹出", "自动切换").unwrap();
+        overlay.show(&settings, "不能弹出").unwrap();
         assert!(overlay.0 .0.lock().unwrap().pending.is_none());
         overlay.shutdown();
     }
     #[test]
-    fn corners_handle_secondary_monitor_negative_origins_and_tiny_work_areas() {
-        assert_eq!(
-            position(
-                [-1920, 0, 0, 1080],
-                [380, 112],
-                24,
-                OverlayPosition::TopRight
-            ),
-            [-404, 24]
-        );
-        assert_eq!(
-            position(
-                [-1920, 0, 0, 1080],
-                [380, 112],
-                24,
-                OverlayPosition::BottomLeft
-            ),
-            [-1896, 944]
-        );
-        assert_eq!(
-            position(
-                [0, 0, 200, 100],
-                [380, 112],
-                24,
-                OverlayPosition::BottomRight
-            ),
-            [0, 0]
-        );
+    fn bottom_right_handles_secondary_monitors_and_tiny_work_areas() {
+        assert_eq!(position([-1920, 0, 0, 1040], [180, 32], 14), [-194, 994]);
+        assert_eq!(position([1920, -1080, 3840, 0], [180, 32], 14), [3646, -46]);
+        assert_eq!(position([0, 0, 120, 32], [120, 32], 14), [0, 0]);
     }
     #[test]
     fn long_unicode_names_and_control_characters_cannot_change_notice_structure() {

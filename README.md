@@ -8,6 +8,8 @@ Motion Studio is the successor to JSM Studio. It is a Windows controller mapper 
 
 在 [GitHub Releases](https://github.com/hotuns/MotionStudio/releases) 下载 Windows 预览版的安装包或便携版。发行页附 SHA-256 校验值和已知限制。
 
+支持在线更新的版本可在「设置与组件 → 软件更新」检查、下载并更新。安装版原位升级，免安装版保留旧目录并打开新版。0.15.2 及更早版本需要先手动升级一次。详见[软件更新与发布](docs/software-updates.md)。
+
 从 [JSM Studio](https://github.com/hotuns/JSM_Studio) 迁移时，在「游戏配置」或「配置库」选择「导入 JSM 配置」，打开旧版导出的 TXT，核对转换报告，再创建新的 Studio 配置。两款应用各自保存本机数据，试用时请一次只启动一个映射会话。复杂的轻按／长按绑定和部分高级 JSM 命令需要按报告核验或补配。详见 [JSM 导入与兼容范围](docs/jsm-import.md)。
 
 ## 功能概览

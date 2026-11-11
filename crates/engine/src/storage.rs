@@ -28,9 +28,11 @@ pub struct Settings {
     pub device_path: String,
     pub output_backend: crate::output::OutputBackend,
     pub gamepad_backend: crate::output::GamepadBackend,
+    pub mouse_display_sync: bool,
     pub auto_hide: bool,
     pub overlay_enabled: bool,
     pub overlay_duration_ms: u32,
+    // Retained for compatibility with settings saved by older versions.
     pub overlay_position: OverlayPosition,
     pub language: Language,
     pub cursor_enabled: bool,
@@ -51,10 +53,11 @@ impl Default for Settings {
             device_path: String::new(),
             output_backend: Default::default(),
             gamepad_backend: Default::default(),
+            mouse_display_sync: false,
             auto_hide: true,
             overlay_enabled: true,
             overlay_duration_ms: 2500,
-            overlay_position: OverlayPosition::TopRight,
+            overlay_position: OverlayPosition::default(),
             language: Language::ZhCn,
             cursor_enabled: false,
             cursor_debounce_ms: 250,
@@ -73,9 +76,9 @@ impl Default for Settings {
 #[serde(rename_all = "snake_case")]
 pub enum OverlayPosition {
     TopLeft,
-    #[default]
     TopRight,
     BottomLeft,
+    #[default]
     BottomRight,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

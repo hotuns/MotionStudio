@@ -1,5 +1,6 @@
-import {useState} from 'react';
+import {useState, type ReactNode} from 'react';
 import type { ComponentStatus, OutputBackend, GamepadBackend, Snapshot } from '../types';
+import {t} from '../i18n';
 import { gamepadNames } from './Controls';
 import {VirtualOutputStatus} from './VirtualOutputStatus';
 import styles from './SettingsPage.module.css';
@@ -16,6 +17,7 @@ const driverNames: Record<string, string> = {
 
 export type ComponentAction = 'allow' | 'hide' | 'show' | 'restore';
 type Props = {
+  softwareUpdate: ReactNode;
   components: ComponentStatus | null;
   snapshot: Snapshot | null;
   dataDir: string;
@@ -27,6 +29,8 @@ type Props = {
   onBackend: (backend: OutputBackend) => void;
   gamepadBackend: GamepadBackend;
   onGamepadBackend: (backend:GamepadBackend)=>void;
+  mouseDisplaySync: boolean;
+  onMouseDisplaySync: (enabled: boolean) => void;
   autoHide: boolean;
   onAutoHide: (enabled: boolean) => void;
   onOpen: (location: string) => void;
@@ -41,23 +45,39 @@ type Props = {
 export function SystemPage(props: Props) {
   const { components, snapshot, busy } = props;
   const visibility = snapshot?.status.visibility;
+  const displaySync = snapshot?.status.mouse_display_sync;
   const [showOutput,setShowOutput]=useState(false);
   const automaticBusy = !!visibility?.requested || !!visibility?.active;
   return <div className={styles.page}>
+    {props.softwareUpdate}
     <section className={styles.section}>
       <div className={styles.heading}><div><h2>输出后端</h2><p>此设置保存在本机，所有游戏配置共用。</p></div></div>
       <label className={styles.field}>键鼠输出后端
         <select aria-label="输出后端" value={props.backend} disabled={busy || props.outputActive}
           onChange={event => props.onBackend(event.target.value as OutputBackend)}>
-          <option value="hid_maestro">HIDMaestro · FlexInput 原生 HID 输出</option>
+          <option value="hid_maestro">HIDMaestro · HID 键鼠输出</option>
           <option value="legacy">SendInput / ViGEm · 兼容模式</option>
         </select>
       </label>
-      <p>组合键、双向滚轮、鼠标侧键和体感鼠标使用键鼠后端。虚拟手柄可单独选择 FlexInput 原生输出实现。</p>
+      <p>组合键、滚轮、鼠标侧键和体感鼠标共用此后端。</p>
+      <label className={styles.check}>
+        <input type="checkbox" checked={props.mouseDisplaySync} disabled={busy || props.outputActive}
+          onChange={event => props.onMouseDisplaySync(event.target.checked)}/>
+        输出跟随显示刷新
+      </label>
+      <p>连续鼠标位移和虚拟手柄轴值跟随前台窗口所在的显示器，每帧安排 4 个输出时隙。等待显示时钟时，按显示器的标称刷新率安排固定节拍。</p>
+      {props.mouseDisplaySync && snapshot?.status.emitting && <p role="status">
+        {displaySync?.live
+          ? <>{t('已同步到 {0} Hz · 每帧 {1} 次').replace('{0}', String(displaySync.frame_hz)).replace('{1}', String(displaySync.reports_per_frame))}
+            {displaySync.vrr && <> · <span>跟随可变刷新率</span></>}</>
+          : displaySync?.fallback_hz
+            ? t('等待显示同步 · 当前固定 {0} Hz').replace('{0}', String(displaySync.fallback_hz))
+            : '等待显示同步'}
+      </p>}
       <label className={styles.field}>虚拟手柄后端
         <select aria-label="虚拟手柄后端" value={props.backend==='legacy'?'vigem':props.gamepadBackend} disabled={busy||props.outputActive||props.backend==='legacy'} onChange={event=>props.onGamepadBackend(event.target.value as GamepadBackend)}>
-          <option value="vigem">ViGEm · FlexInput 原生 Xbox／DS4（推荐）</option>
-          <option value="hid_maestro">HIDMaestro · FlexInput 原生 HID 手柄</option>
+          <option value="vigem">ViGEm · 虚拟 Xbox／DS4（推荐）</option>
+          <option value="hid_maestro">HIDMaestro · HID 虚拟手柄</option>
         </select>
       </label>
       <p>ViGEm 提供标准 Xbox／DS4 虚拟手柄，需安装 ViGEmBus。可以同时使用 HIDMaestro 键鼠输出。</p>
@@ -79,7 +99,7 @@ export function SystemPage(props: Props) {
         return <div className={styles.driver} key={kind}>
           <div className={styles.heading}><h3>{kind === 'hidmaestro' ? 'HIDMaestro' : hidhide ? 'HidHide' : 'ViGEmBus'}</h3>
             <span className={styles.badge} data-ready={state?.status === 'running'}>{state ? driverNames[state.status] ?? state.status : '等待检测'}</span></div>
-          <p>{kind === 'hidmaestro' ? 'FlexInput 使用的虚拟 HID 驱动。支持键盘、鼠标、Xbox 360 和 DualShock 4。安装时会在本机生成专用签名证书，并由 Windows 请求管理员授权。' : hidhide ? '向游戏隐藏实体手柄，减少重复输入。' : 'FlexInput 原生 ViGEm 手柄后端需要此驱动，可与 HIDMaestro 键鼠同时使用。'}</p>
+          <p>{kind === 'hidmaestro' ? '提供虚拟键盘、鼠标、Xbox 360 和 DualShock 4。安装时会在本机生成签名证书，Windows 会请求管理员授权。' : hidhide ? '向游戏隐藏实体手柄，减少重复输入。' : '安装此驱动后可使用 ViGEm 虚拟手柄。'}</p>
           <div className={styles.actions}>
             <button type="button" className="primary-btn" disabled={busy || props.outputActive || state?.status !== 'missing'} onClick={() => props.onInstall(kind)}>
               {state?.status === 'missing' ? '安装内置组件' : '安装状态已检测'}
