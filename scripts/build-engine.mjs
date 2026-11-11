@@ -9,6 +9,7 @@ const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const {version}=JSON.parse(readFileSync(resolve(root,'package.json'),'utf8'));
 const sha=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
 const sdl=resolve(root,'src-tauri/resources/SDL3.dll');
+const sdlManifest=JSON.parse(readFileSync(resolve(root,'vendor/sdl3/manifest.json'),'utf8'));
 const release=process.argv.includes('--release');
 const graph=spawnSync('cargo',['tree','--locked','-p','motion-engine','--edges','normal','--prefix','none'],{cwd:root,encoding:'utf8',windowsHide:true});
 if(graph.status!==0)throw new Error(graph.stderr||'Unable to inspect engine dependencies');
@@ -63,7 +64,8 @@ const manifest=JSON.stringify({
   gamepadOutputs:{crate:'flexinput-virtual',devices:['VirtualXInput','VirtualDS4','HidMaestroDevice'],defaultBackend:'vigem',checkedReadiness:true},
   peripheralRouting:{feedback:'native poll_outputs -> selected SDL DeviceBackend::send',touchpad:'native eval_graph_tick / route_touchpad'},
   hidmaestro:{sdkVersion:'2.0.1',driverVersion:'2.0.0.2201',client:'FlexInput c69f53ad',payloads:JSON.parse(readFileSync(resolve(root,'vendor/flexinput/manifest.json'),'utf8')).files.filter(f=>/^crates\/hidmaestro\/driver\/.*\.(dll|inf)$/.test(f.path)).map(f=>({name:f.path.split('/').at(-1),sha256:f.vendoredSha256}))},
-  sdlVersion:'3.4.18',sdlPatch:'Flydigi device 150 gyro axes only: (-oldZ, -oldX, -oldY)',
+  sdlVersion:sdlManifest.version,sdlPatch:null,
+  sdlSource:{repository:sdlManifest.repository,tag:sdlManifest.tag,commit:sdlManifest.commit,modified:sdlManifest.modified},
   files:[{name:'motion-engine.exe',sha256:engineHash},{name:'SDL3.dll',sha256:sha(sdl)}],
 },null,2)+'\n';
 const manifestStaging=manifestPath+'.'+randomUUID()+'.tmp';

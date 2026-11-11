@@ -10,6 +10,20 @@ use std::sync::OnceLock;
 /// Horizontal coordinate, reference value, processed value.
 type Point = [f32; 3];
 
+pub fn flick_release(strength: f32) -> Result<Vec<Point>> {
+    crate::motion_config::range("Flick 缓出强度", strength, 0., 1.)?;
+    Ok((0..=100)
+        .map(|index| {
+            let progress = index as f32 / 100.;
+            [
+                index as f32,
+                index as f32,
+                100. * flexinput_engine::eval::flick_release_progress(progress, strength),
+            ]
+        })
+        .collect())
+}
+
 #[derive(Serialize)]
 pub struct StabilityPreview {
     pub smoothing: Vec<Point>,

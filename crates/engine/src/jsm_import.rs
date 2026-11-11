@@ -995,6 +995,9 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 Stick::Right
             };
             f.enabled = s.value == "FLICK";
+            if f.enabled {
+                f.release_ease = 1.0;
+            }
             f.stick_aim = s.value == "AIM";
             f.output = AimOutput::Mouse;
             f.max_dps = values[0];

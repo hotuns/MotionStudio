@@ -172,5 +172,15 @@
   "按住连续滚动": "Scroll continuously while held",
   "滚动间隔": "Scroll interval",
   "每次触发滚动 1 格，松开后可再次触发。": "Scroll one notch per activation. Release to activate again.",
-  "通用手柄预览": "Generic controller preview"
+  "通用手柄预览": "Generic controller preview",
+  "转角缓出强度": "Flick ease-out strength",
+  "转角缓出强度滑块": "Flick ease-out strength slider",
+  "Flick 缓出强度": "Flick ease-out strength",
+  "0% 匀速释放，100% 使用 JSM 缓出。强度越高，起步越快、随后减速。": "0% releases at a constant rate. 100% uses JSM ease-out. Higher strength starts faster and then slows down.",
+  "匀速参考": "Linear reference",
+  "当前释放曲线": "Current release curve",
+  "Flick 转角释放": "Flick angle release",
+  "时间进度（%）": "Time progress (%)",
+  "已完成转角（%）": "Angle completed (%)",
+  "曲线控制初始转身的转角进度。完成时间设为 0 时立即输出全部转角。": "The curve controls the initial turn's angle progress. A duration of 0 outputs the full angle immediately."
 }

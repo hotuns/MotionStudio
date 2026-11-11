@@ -3,7 +3,7 @@ import { Range, SettingsGroup as Group, Toggle } from './Controls';
 import {OptionPicker} from './OptionPicker';
 import {padChoices} from './binding-choices';
 import { CurveEditor } from './CurveEditor';
-import { ResponseCurve, useStabilityPreview } from './StabilityCurves';
+import { FlickReleaseCurve, ResponseCurve, useStabilityPreview } from './StabilityCurves';
 import styles from './MotionControls.module.css';
 
 export type MotionUpdate=(change:(profile:Profile)=>void)=>void;
@@ -186,6 +186,13 @@ export function FlickStickSettings({profile, update}: Props) {
       <ControlInput label="按住启用（不设置则常开）" value={m.flick.enable_input} onChange={v=>flickChange('enable_input',v)}/>
       <Choice label="原始摇杆输出" value={m.flick.suppress} options={[["full","使用时屏蔽"],["deadzone","只屏蔽外圈"],["off","保留原始输出"]]} onChange={v=>flickChange('suppress',v)}/>
       <Numbers object={m.flick} specs={[["deadzone","快推转身阈值",0.05,0.99,0.01],["smooth_ms","转身完成时间",0,2000,1," ms"],["forward_deadzone","正前方死角",0,180,1,"°"],["stabilise_ms","绕圈方向稳定",0,1000,1," ms"],["speed_gate_ms","快速推杆判定时间",0,2000,1," ms"]]} onChange={(k,v)=>flickChange(k,v)}/>
+      {m.flick.enabled && <>
+        <Range label="转角缓出强度" value={(m.flick.release_ease ?? 0) * 100} min={0} max={100} step={1} unit="%"
+          onChange={value=>flickChange('release_ease', value / 100)}
+          help="0% 匀速释放，100% 使用 JSM 缓出。强度越高，起步越快、随后减速。"/>
+        <FlickReleaseCurve strength={m.flick.release_ease ?? 0}/>
+        <p className={styles.hint}>曲线控制初始转身的转角进度。完成时间设为 0 时立即输出全部转角。</p>
+      </>}
       <Toggle label="慢推锁定为连续瞄准" value={m.flick.slow_lock} onChange={v=>flickChange('slow_lock',v)}/>
       {m.flick.stick_aim&&<Numbers object={m.flick} specs={[["aim_sensitivity","摇杆瞄准倍率",0.01,100,0.1,"×"],["max_dps","摇杆最大转速",1,4000,1," °/s"],["vertical_ratio","摇杆纵向比例",0.01,10,0.05,"×"]]} onChange={(k,v)=>flickChange(k,v)}/>}
 

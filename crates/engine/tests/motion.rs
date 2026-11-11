@@ -321,6 +321,37 @@ fn flick_90_degrees_is_paid_out_once_and_suppresses_the_original_stick() {
 }
 
 #[test]
+fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_directions() {
+    for strength in [0., 0.5, 1.] {
+        for (value, direction) in [(32767, 1.), (-32768, -1.)] {
+            let mut p = profile();
+            p.gyro.motion.flick.enabled = true;
+            p.gyro.motion.flick.stick_aim = true;
+            p.gyro.motion.flick.release_ease = strength;
+            let mut engine = Engine::new(p).unwrap();
+            axis(&mut engine, 2, value);
+            let mut elapsed = 0.0_f32;
+            let mut total = 0.0;
+            for dt in [0.002, 0.005, 0.013, 0.020, 0.011, 0.019, 0.031] {
+                elapsed += dt;
+                let delta = engine.advance(dt, (elapsed * 1e9) as u64).mouse_delta[0];
+                assert!(delta * direction >= -0.0001, "reverse step {delta}");
+                total += delta;
+                let progress = (elapsed / 0.1).min(1.);
+                let expected =
+                    f64::from(progress + strength * progress * (1. - progress)) * 900. * direction;
+                assert!(
+                    (total - expected).abs() < 0.002,
+                    "{strength}: {total} vs {expected}"
+                );
+            }
+            assert!((total - 900. * direction).abs() < 0.002);
+            assert_eq!(engine.advance(0.01, 120_000_000).mouse_delta, [0.; 2]);
+        }
+    }
+}
+
+#[test]
 fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
     let mut p = profile();
     gamepad(&mut p);
@@ -328,6 +359,7 @@ fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
     p.gyro.motion.flick.enabled = true;
     p.gyro.motion.flick.output = AimOutput::RightStick;
     p.gyro.motion.flick.smooth_ms = 10.;
+    p.gyro.motion.flick.release_ease = 1.;
     let mut e = Engine::new(p).unwrap();
     axis(&mut e, 2, 32767);
     let mut degrees = 0.;
@@ -513,6 +545,7 @@ fn profiles_round_trip_advanced_settings_and_reject_invalid_or_conflicting_value
     p.gyro.motion.bindings = vec![MotionBinding::default()];
     p.gyro.motion.turns = vec![TurnBinding::default()];
     p.gyro.acceleration.curve = Curve::Custom;
+    p.gyro.motion.flick.release_ease = 0.65;
     let text = toml::to_string_pretty(&p).unwrap();
     let restored: Profile = toml::from_str(&text).unwrap();
     restored.validate().unwrap();
@@ -528,6 +561,26 @@ fn profiles_round_trip_advanced_settings_and_reject_invalid_or_conflicting_value
     p.gyro.motion.edge.mode = EdgeMode::Off;
     p.gyro.motion.flick.enabled = true;
     assert!(p.validate().is_err());
+}
+
+#[test]
+fn flick_release_curve_defaults_layers_and_validation() {
+    let mut p = profile();
+    assert_eq!(p.gyro.motion.flick.release_ease, 0.);
+    p.layers.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "aim", "name": "Aim", "input": "south",
+            "settings": {"gyro": {"motion": {"flick": {"release_ease": 1.}}}}
+        }))
+        .unwrap(),
+    );
+    p.validate().unwrap();
+    let resolved = motion_core::layers::resolve(&p, &[0]).unwrap();
+    assert_eq!(resolved.gyro.motion.flick.release_ease, 1.);
+    for strength in [-0.1, 1.1, f32::NAN, f32::INFINITY] {
+        p.gyro.motion.flick.release_ease = strength;
+        assert!(p.validate().is_err());
+    }
 }
 
 #[test]

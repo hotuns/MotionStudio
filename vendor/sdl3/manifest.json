@@ -1,0 +1,37 @@
+{
+  "repository": "https://github.com/libsdl-org/SDL",
+  "version": "3.4.18",
+  "tag": "release-3.4.18",
+  "commit": "829a65d769d935c4852f8159e964312c0957260a",
+  "modified": false,
+  "archives": [
+    {
+      "name": "SDL3-3.4.18-win32-x64.zip",
+      "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18-win32-x64.zip",
+      "size": 1165205,
+      "sha256": "75c2c0fc74e7d1206aaedc22893a35887332f4f85f5c8b74fddc10d177985f2c"
+    },
+    {
+      "name": "SDL3-devel-3.4.18-VC.zip",
+      "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip",
+      "size": 16902234,
+      "sha256": "78d84602ae616cfe26b33a73b7d3b9b6b56e8a6650e53d92c9c6ca938f747acd"
+    }
+  ],
+  "files": [
+    {
+      "path": "src-tauri/resources/SDL3.dll",
+      "archive": "SDL3-3.4.18-win32-x64.zip",
+      "entry": "SDL3.dll",
+      "size": 2848256,
+      "sha256": "2b4b128d8d510cc2d442693cf848c050d700d43dc667afe9e5fd82b0570d667e"
+    },
+    {
+      "path": "vendor/sdl3/SDL3.lib",
+      "archive": "SDL3-devel-3.4.18-VC.zip",
+      "entry": "SDL3-3.4.18/lib/x64/SDL3.lib",
+      "size": 283572,
+      "sha256": "c60802d826fe9a724f824ecdeac1f422bdf53a53705ef32eb12dd73e5d566e2c"
+    }
+  ]
+}

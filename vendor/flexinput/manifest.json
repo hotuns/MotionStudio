@@ -177,8 +177,9 @@
     {
       "path": "crates/engine/src/eval/curves.rs",
       "upstreamSha256": "4bbe7f8180198d0059d239d9ff52c239478a30c9148f8c37a0f4ed88f5274c98",
-      "vendoredSha256": "4bbe7f8180198d0059d239d9ff52c239478a30c9148f8c37a0f4ed88f5274c98",
-      "modified": false
+      "vendoredSha256": "88990ddae3423abe31bed085e9c1d5b02756fa728786fe922fa735f0a98ec131",
+      "modified": true,
+      "notes": "Extract the original JSM quadratic Flick easing and expose a bounded linear/ease-out blend for RWS and the Studio preview."
     },
     {
       "path": "crates/engine/src/eval/device_cal.rs",
@@ -221,9 +222,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/aim.rs",
       "upstreamSha256": "481997db60aea3944217a537c89f4a238225b59706912062d273def7851aa299",
-      "vendoredSha256": "7dfd348406df3376f2e227c09b6bc41f926f3bc908dcf919e10ff76e54f71220",
+      "vendoredSha256": "c69218924b84f70da44eeadf4dc7b5e5a7e9cc8584f511f6756c28e6bc908567",
       "modified": true,
-      "notes": "Headless gyro sample timing with the original per-sample math and filter order."
+      "notes": "Headless gyro sample timing with the original per-sample math and filter order. Both Flick sites now call the shared original easing expression in eval/curves.rs."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/analog.rs",
@@ -376,8 +377,9 @@
     {
       "path": "crates/engine/src/eval/modules/rws.rs",
       "upstreamSha256": "fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96",
-      "vendoredSha256": "fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96",
-      "modified": false
+      "vendoredSha256": "b7303889c7eaa82328276874553ed1e65ac82496966510a1a3d225746c5103a1",
+      "modified": true,
+      "notes": "Add optional flick_release_ease (default 0) for the initial Flick. Preserve total angle and duration with two cumulative-progress state slots. Tracking, companion aim, gesture and sensor paths retain their existing algorithms."
     },
     {
       "path": "crates/engine/src/eval/modules/shared.rs",
@@ -727,10 +729,10 @@
     },
     {
       "path": "crates/devices/build.rs",
-      "vendoredSha256": "9891705b5bab71034989c5aafbd83d68d1075ef4261607eb33c90eb78bac36fa",
+      "vendoredSha256": "779bcb41a2223ea5392090f866300feac5ca720d1f47449b0c1a2d76f86092e8",
       "added": true,
       "modified": true,
-      "patch": "Studio headless API/build entry or raw timestamped event extension over the original SdlBackend; no alternative device protocol parser."
+      "patch": "Studio headless API/build entry over the pinned SdlBackend; link the official shared SDL3 import library from vendor/sdl3, track it for relinking, and retain delayed imports. No alternative device protocol parser."
     },
     {
       "path": "crates/devices/Cargo.toml",

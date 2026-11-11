@@ -293,6 +293,9 @@ const GESTURE_OUT: f32 = 0.1;
 //   [19] bound turn (deg) still owed to a stick output — what a full-deflection
 //        tick couldn't carry, paid out on the ticks after
 const TURN_STICK_CARRY: usize = 19;
+// Initial angle and duration for an optionally eased initial Flick release.
+const FLK_TOTAL_DEG: usize = 20;
+const FLK_TOTAL_S: usize = 21;
 
 /// Where RWS Aim's display-only measured angle lands in `last_out`: right after
 /// the node's pins. Nodes saved before the Flick pin have two pins, newer ones
@@ -344,6 +347,7 @@ pub(crate) fn compute_rws(
     let (flick_on, stick_aim) = rws_stick_uses(inputs, params);
     let flick_deadzone = pf("flick_deadzone", 0.85);
     let flick_smooth_ms = pf("flick_smooth_ms", 100.0);
+    let flick_release_ease = pf("flick_release_ease", 0.0).clamp(0.0, 1.0);
     let flick_fwd_dz = pf("flick_fwd_dz_deg", 0.0).clamp(0.0, 180.0);
     let flick_stab_s = pf("flick_stabilise_ms", 0.0).clamp(0.0, 1000.0) / 1000.0;
     let flick_output = rws_flick_mode(params);
@@ -440,7 +444,7 @@ pub(crate) fn compute_rws(
     let allow_flick = !(gated && slow_lock && state.aux_f32[GST] == GST_STEERING);
 
     let flick_deg = if flick_on && !measuring {
-        compute_flick(inputs, state, flick_deadzone, flick_smooth_ms, flick_fwd_dz, flick_stab_s, allow_flick, dt)
+        compute_flick(inputs, state, flick_deadzone, flick_smooth_ms, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt)
     } else {
         reset_flick(state);
         0.0
@@ -633,12 +637,13 @@ fn compute_flick(
     state: &mut NodeState,
     deadzone: f32,
     smooth_ms: f32,
+    release_ease: f32,
     fwd_dz_deg: f32,
     stab_s: f32,
     allow_engage: bool,
     dt: f32,
 ) -> f32 {
-    while state.aux_f32.len() <= FLK_STAB_OUT {
+    while state.aux_f32.len() <= FLK_TOTAL_S {
         state.aux_f32.push(0.0);
     }
     let stick = match inputs.get(1).and_then(|s| *s) {
@@ -703,6 +708,8 @@ fn compute_flick(
             if smooth_ms > 0.5 {
                 state.aux_f32[FLK_PENDING_DEG] = flick_deg;
                 state.aux_f32[FLK_PAYOUT_S] = smooth_ms / 1000.0;
+                state.aux_f32[FLK_TOTAL_DEG] = flick_deg;
+                state.aux_f32[FLK_TOTAL_S] = smooth_ms / 1000.0;
             } else {
                 out += flick_deg;
             }
@@ -738,10 +745,20 @@ fn compute_flick(
     if state.aux_f32[FLK_PAYOUT_S] > 0.0 {
         let t = state.aux_f32[FLK_PAYOUT_S];
         let remaining = state.aux_f32[FLK_PENDING_DEG];
-        let emit = if t <= dt { remaining } else { remaining * (dt / t) };
+        let left = (t - dt).max(0.0);
+        let emit = if t <= dt {
+            remaining
+        } else if release_ease > 0.0 {
+            let progress = 1.0 - left / state.aux_f32[FLK_TOTAL_S];
+            let next_remaining = state.aux_f32[FLK_TOTAL_DEG]
+                * (1.0 - crate::eval::flick_release_progress(progress, release_ease));
+            remaining - next_remaining
+        } else {
+            remaining * (dt / t)
+        };
         out += emit;
         state.aux_f32[FLK_PENDING_DEG] = remaining - emit;
-        state.aux_f32[FLK_PAYOUT_S] = (t - dt).max(0.0);
+        state.aux_f32[FLK_PAYOUT_S] = left;
     }
 
     // Pay out accumulated TRACKING rotation over a short window so poll-rate
@@ -835,6 +852,7 @@ fn reset_flick(state: &mut NodeState) {
     for &i in &[
         FLK_ENGAGED, FLK_PENDING_DEG, FLK_PAYOUT_S, FLK_BELOW_S, FLK_TRACK_PENDING, FLK_STICK_CARRY,
         FLK_STAB_RAW, FLK_STAB_OUT,
+        FLK_TOTAL_DEG, FLK_TOTAL_S,
     ] {
         if let Some(v) = state.aux_f32.get_mut(i) {
             *v = 0.0;

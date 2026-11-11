@@ -65,6 +65,35 @@ export function useStabilityPreview(gyro: Gyro, deviceNoise?: number) {
   return { curves, failed: failedRequest === request };
 }
 
+export function FlickReleaseCurve({strength}: {strength: number}) {
+  const [points, setPoints] = useState<Point[]>();
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let current = true;
+    const timer = window.setTimeout(() => {
+      void invoke<Point[]>('preview_flick_release', {strength}).then(result => {
+        if (current) {
+          setPoints(result);
+          setFailed(false);
+        }
+      }).catch(() => {
+        if (current) setFailed(true);
+      });
+    }, 45);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [strength]);
+
+  return <>
+    <div className={styles.curveLegend}><span>匀速参考</span><span>当前释放曲线</span></div>
+    <ResponseCurve title="Flick 转角释放" points={points} xLabel="时间进度（%）" yLabel="已完成转角（%）"/>
+    {failed && <p role="status" className="studio-muted">曲线暂未更新，请检查当前参数。</p>}
+  </>;
+}
+
 export const ResponseCurve = memo(function ResponseCurve({ title, points, xLabel, yLabel }: {
   title: string;
   points?: Point[];

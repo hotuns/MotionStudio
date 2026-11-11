@@ -22,13 +22,17 @@ for(const entry of manifest.files){
   if(!file.startsWith(vendorRoot+'/')&&!file.startsWith(vendorRoot+'\\'))throw new Error('Invalid vendor path');
   if(sha(file)!==entry.vendoredSha256)throw new Error('Vendored source integrity check failed: '+entry.path);
 }
-const sdl=resolve(root,'src-tauri/resources/SDL3.dll');
-if(sha(sdl)!=='911f4f6747d40e3070aa4b454b72d515a1de9310804d794c57bc3a84698f984c')throw new Error('SDL DLL integrity check failed');
-if(sha(resolve(root,'vendor/sdl-patches/SDL3.lib'))!=='06f305d73771f0212fc409d8b487e7a0aa72ae9af98a62faa6f3e6db02ab0978')throw new Error('SDL import-library integrity check failed');
+const sdlManifest=JSON.parse(readFileSync(resolve(root,'vendor/sdl3/manifest.json'),'utf8'));
+if(sdlManifest.modified!==false)throw new Error('SDL must be an unmodified official release');
+for(const path of ['src-tauri/resources/SDL3.dll','vendor/sdl3/SDL3.lib']){
+  const entry=sdlManifest.files.find(file=>file.path===path);
+  const file=resolve(root,path);
+  if(!entry||statSync(file).size!==entry.size||sha(file)!==entry.sha256)throw new Error('Official SDL integrity check failed: '+path);
+}
 const drivers=JSON.parse(readFileSync(resolve(root,'src-tauri/drivers/manifest.json'),'utf8'));
 for(const entry of Object.values(drivers.installers)){
   const file=resolve(root,'src-tauri/drivers',entry.file);
   if(statSync(file).size!==entry.size||sha(file)!==entry.sha256)throw new Error('Driver installer integrity check failed: '+entry.file);
 }
 if(sha(resolve(root,'licenses/HIDMaestro-MIT.txt'))!==sha(resolve(vendorRoot,'crates/hidmaestro/driver/LICENSE')))throw new Error('HIDMaestro license is missing or changed');
-console.log('Verified '+manifest.files.length+' vendored files including HIDMaestro payloads, patched SDL and 2 official installers.');
+console.log('Verified '+manifest.files.length+' vendored files including HIDMaestro payloads, official SDL and 2 official installers.');

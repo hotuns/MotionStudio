@@ -576,6 +576,13 @@ async fn preview_motion_stability(
     .await
 }
 #[tauri::command]
+async fn preview_flick_release(strength: f32) -> Result<Vec<[f32; 3]>, String> {
+    background(move || {
+        motion_core::motion::stability_preview::flick_release(strength).map_err(text)
+    })
+    .await
+}
+#[tauri::command]
 async fn save_sensor_calibration(
     state: State<'_, AppState>,
     device_path: String,
@@ -804,6 +811,7 @@ fn main() {
             motion_action,
             preview_motion_filter,
             preview_motion_stability,
+            preview_flick_release,
             save_sensor_calibration,
             restore_backup,
             component_status,

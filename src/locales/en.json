@@ -1932,5 +1932,15 @@
   "请等待当前操作完成。": "Wait for the current operation to finish.",
   "无法停止映射，请恢复引擎后重试更新。": "Couldn't stop mapping. Restart the engine and try the update again.",
   "更新安装程序未能启动，请重试。": "Couldn't launch the update installer. Try again.",
-  "无法解压免安装更新，请确认磁盘空间和目录写入权限。": "Couldn't extract the portable update. Check available disk space and folder permissions."
+  "无法解压免安装更新，请确认磁盘空间和目录写入权限。": "Couldn't extract the portable update. Check available disk space and folder permissions.",
+  "转角缓出强度": "Flick ease-out strength",
+  "转角缓出强度滑块": "Flick ease-out strength slider",
+  "Flick 缓出强度": "Flick ease-out strength",
+  "0% 匀速释放，100% 使用 JSM 缓出。强度越高，起步越快、随后减速。": "0% releases at a constant rate. 100% uses JSM ease-out. Higher strength starts faster and then slows down.",
+  "匀速参考": "Linear reference",
+  "当前释放曲线": "Current release curve",
+  "Flick 转角释放": "Flick angle release",
+  "时间进度（%）": "Time progress (%)",
+  "已完成转角（%）": "Angle completed (%)",
+  "曲线控制初始转身的转角进度。完成时间设为 0 时立即输出全部转角。": "The curve controls the initial turn's angle progress. A duration of 0 outputs the full angle immediately."
 }

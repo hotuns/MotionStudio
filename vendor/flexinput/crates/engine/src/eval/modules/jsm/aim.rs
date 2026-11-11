@@ -384,8 +384,7 @@ impl Aim {
                 }
             };
             percent = percent.min(1.0);
-            let ease = |p: f32| 1.0 - (1.0 - p) * (1.0 - p);
-            px += (ease(percent) - ease(f.done)) * f.deg * cal;
+            px += (crate::eval::ease_out_quad(percent) - crate::eval::ease_out_quad(f.done)) * f.deg * cal;
             f.done = percent;
             percent < 1.0
         });
@@ -912,10 +911,9 @@ impl Aim {
         if percent >= 1.0 {
             f.paying_out = false;
         }
-        let ease = |p: f32| 1.0 - (1.0 - p) * (1.0 - p);
-        let was = ease(f.done);
+        let was = crate::eval::ease_out_quad(f.done);
         f.done = percent;
-        cam += (ease(percent) - was) * f.delta * cal * -(180.0 / PI);
+        cam += (crate::eval::ease_out_quad(percent) - was) * f.delta * cal * -(180.0 / PI);
         cam
     }
 

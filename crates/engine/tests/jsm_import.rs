@@ -11,6 +11,14 @@ fn convert(text: &str) -> motion_core::jsm_import::JsmImport {
     p
 }
 #[test]
+fn imported_flick_uses_jsm_release_curve_and_retains_its_duration() {
+    let p = convert("GYRO_SENS=2\nRIGHT_STICK_MODE=FLICK\nFLICK_TIME=0.15");
+    assert!(p.profile.gyro.motion.flick.enabled);
+    assert_eq!(p.profile.gyro.motion.flick.release_ease, 1.);
+    assert_eq!(p.profile.gyro.motion.flick.smooth_ms, 150.);
+}
+
+#[test]
 fn per_side_stick_deadzone_commands_feed_native_source_settings() {
     let p = convert("LEFT_STICK_DEADZONE_INNER = 0.18\nRIGHT_STICK_DEADZONE_INNER = 0.23");
     assert_eq!(p.profile.input.deadzone_left, Some(0.18));

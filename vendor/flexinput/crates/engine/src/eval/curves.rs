@@ -4,6 +4,17 @@
 
 use super::*;
 
+/// The original JSM Flick's cumulative quadratic ease-out.
+pub fn ease_out_quad(progress: f32) -> f32 {
+    1.0 - (1.0 - progress) * (1.0 - progress)
+}
+
+/// Blend linear release with JSM's easing for the RWS Flick and its preview.
+pub fn flick_release_progress(progress: f32, strength: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    progress + (ease_out_quad(progress) - progress) * strength.clamp(0.0, 1.0)
+}
+
 pub fn sample_curve(pts: &[[f32; 2]], x: f32, biases: &[f32]) -> f32 {
     match pts.len() {
         0 => x,

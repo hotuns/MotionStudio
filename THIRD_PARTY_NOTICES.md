@@ -8,7 +8,7 @@ Motion Studio is an independent application. The project contains adapted open-s
 | 3D Controller Overlay | https://github.com/larfingshnew/3d-controller-overlay via FlexInput c69f53ad | Xbox One, Xbox 360, DualSense, DualShock 4 and Switch Pro model parts packed as GLB. MIT, licenses/3D-Controller-Overlay-MIT.txt |
 | three.js | https://github.com/mrdoob/three.js/tree/r187 | WebView controller rendering and model import. MIT, licenses/Three-MIT.txt |
 | HIDMaestro | https://github.com/hifihedgehog/HIDMaestro/releases/tag/v2.0.1 | Embedded unmodified x64 DLLs/INFs and model data via pinned FlexInput; driver 2.0.0.2201; MIT, licenses/HIDMaestro-MIT.txt. Machine-local signing occurs only on explicit installation. |
-| SDL | https://github.com/libsdl-org/SDL/tree/release-3.4.18 | SDL3.dll with Flydigi gyro axis correction; zlib, licenses/SDL.txt; patches in vendor/sdl-patches |
+| SDL | https://github.com/libsdl-org/SDL/tree/829a65d769d935c4852f8159e964312c0957260a | Unmodified official SDL 3.4.18 Windows x64 DLL and MSVC import library; zlib, licenses/SDL.txt; provenance and retired Apex 6 Pro workaround in vendor/sdl3 |
 | sdl3-rs / sdl3-sys | 0.20.0 / 0.7.1+SDL-3.4.16, pinned in Cargo.lock | Rust bindings to the single shared SDL 3.4.18 runtime; MIT / zlib, licenses/sdl3-rs-MIT.txt and licenses/sdl3-sys-zlib.txt. No second SDL source/static runtime is embedded. |
 | hidapi | 2.6.7, pinned in Cargo.lock | Dependency of the vendored input providers; MIT, licenses/hidapi-MIT.txt |
 | Rhai | https://github.com/rhaiscript/rhai, 1.27.0 pinned in Cargo.lock | Optional numeric motion-script runtime; MIT OR Apache-2.0, licenses/Rhai-MIT.txt and licenses/Rhai-Apache-2.0.txt. No file/module or input/output-device API is exposed to scripts. |

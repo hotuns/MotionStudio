@@ -6,7 +6,7 @@
 
 输入层使用 FlexInput SDL3 设备模块，逐条读取陀螺仪和加速度计事件。SDL 陀螺仪使用 rad/s，加速度计使用包含重力的 m/s²。两类传感器时间戳分别保留，不用加速度计事件重复积分陀螺仪。算法层统一换算到 FlexInput 的角速度和加速度坐标。加速度事件超过 50 ms 未更新时，不再驱动依赖重力的功能。没有加速度计的设备可以继续使用本地角速度瞄准。
 
-SDL 轴为右、上、后。对应 FlexInput 陀螺仪 forward/right/down = (-SDL Z, SDL X, -SDL Y)，加速度 forward/left/up = (-SDL Z, -SDL X, SDL Y)。标准重力为 9.80665 m/s²。SDL 对 Flydigi device 150 的已有陀螺仪修正保留，加速度和厂商轴向均不额外修正。来源：[SDL_SensorType](https://wiki.libsdl.org/SDL3/SDL_SensorType)、[SDL_GamepadSensorEvent](https://wiki.libsdl.org/SDL3/SDL_GamepadSensorEvent)。真实设备握持和轴向需由使用者验证。
+SDL 轴为右、上、后。对应 FlexInput 陀螺仪 forward/right/down = (-SDL Z, SDL X, -SDL Y)，加速度 forward/left/up = (-SDL Z, -SDL X, SDL Y)。标准重力为 9.80665 m/s²。当前使用未经修改的官方 SDL；Apex 6 Pro 固件修复后已撤掉 Flydigi device 150 的自定义陀螺仪换轴，加速度和厂商轴向均不额外修正。来源：[SDL_SensorType](https://wiki.libsdl.org/SDL3/SDL_SensorType)、[SDL_GamepadSensorEvent](https://wiki.libsdl.org/SDL3/SDL_GamepadSensorEvent)。真实设备握持和轴向需由使用者验证。
 
 ## 行为与坐标
 
@@ -31,6 +31,10 @@ Trackball 用最近 125 ms 的时间加权角速度开始惯性运动，按住�
 边缘转向通过姿态角度确定出界。可选择随角度提速、保留出界速度或两者结合。过渡宽度控制接管强度，保留手腕份额决定边缘处的直接操作权。用姿态归零键确定中立位，回拉可制动。
 
 Flick Stick 快推选择朝向，沿摇杆外圈转动镜头。可设置正前方死角、完成时间、方向稳定、快速推杆时间与慢推锁定。配套摇杆瞄准提供连续转速控制，输出可选鼠标、虚拟右摇杆或两者。默认屏蔽对应实体摇杆的自动映射，也可改为外圈屏蔽或保留。Flick 和定角转身的虚拟摇杆输出受满杆转速限制，来不及完成的转角后续继续输出；按住暂停会取消尚未完成的转角。
+
+在「游戏配置 → 摇杆 → Flick Stick 与摇杆瞄准」启用 Flick 后，可调整「转角缓出强度」。0% 匀速释放，100% 使用 JSM 的二次缓出，中间值混合两种曲线。图中横轴为时间进度，纵轴为已完成的转角比例，虚线是匀速参考。强度越高，初始转身越快，随后逐渐减速。完成时间为 0 时立即输出全部转角。虚拟摇杆受游戏最大转速限制时，实际完成时间可能更长。
+
+强度以 `gyro.motion.flick.release_ease` 保存，范围为 0–1，支持按住配置层覆盖。旧 Studio 文件缺少此字段时采用 0。新导入的 JSM Flick 配置采用 1，以保留 JSM 的释放曲线。
 
 ## 动作
 

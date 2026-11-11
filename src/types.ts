@@ -26,7 +26,7 @@ export type MotionConfig={
   angle_snap:number;angle_snap_ease:boolean;brake_strength:number;brake_threshold:number;cutoff_dps:number;recovery_ms:number;noise_gate:number;
   edge:{mode:'off'|'ramp'|'momentum'|'both';zone:number;blend:number;ramp:number;max_dps:number;momentum:number;decay_s:number;gyro_keep:number;horizontal_only:boolean};
   rotation:{stick:'right'|'left';sensitivity:number;deadzone:number;smooth_ms:number;relative:boolean;return_ms:number;takeover:boolean;takeover_dps:number;outer:number};
-  flick:{enabled:boolean;stick:'right'|'left';output:AimOutput;enable_input:string|null;deadzone:number;smooth_ms:number;forward_deadzone:number;stabilise_ms:number;speed_gate_ms:number;slow_lock:boolean;suppress:'full'|'deadzone'|'off';stick_aim:boolean;aim_sensitivity:number;max_dps:number;vertical_ratio:number};
+  flick:{enabled:boolean;stick:'right'|'left';output:AimOutput;enable_input:string|null;deadzone:number;smooth_ms:number;release_ease:number;forward_deadzone:number;stabilise_ms:number;speed_gate_ms:number;slow_lock:boolean;suppress:'full'|'deadzone'|'off';stick_aim:boolean;aim_sensitivity:number;max_dps:number;vertical_ratio:number};
   trackball:{horizontal_input:string|null;vertical_input:string|null;decay:number};bindings:MotionBinding[];turns:TurnBinding[];custom_filters?:CustomFilter[];
 };
 export type Gyro = {
