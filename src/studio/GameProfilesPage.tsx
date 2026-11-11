@@ -13,6 +13,8 @@ import {StudioIcon} from './StudioIcon';
 type Props = Omit<ActionMappingsProps, 'touchOnly' | 'onClearTouch'> & {
   tab: GameTab;
   layerMode: boolean;
+  editingLayerKey: string;
+  layerControls?: ReactNode;
   motion: ReactNode;
   onTab: (tab: GameTab) => void;
   onEditBase: () => void;
@@ -39,36 +41,44 @@ export function GameProfilesPage(props: Props) {
   return <div className={styles.page}>
     <section className={styles.profileHeader} aria-label="游戏配置与输出">
       <div className={styles.gameHeader}>
-        <div className={styles.gameInfo}>
-          <small>当前游戏配置</small>
+        <label className={styles.gameInfo}>
+          <span>配置名称</span>
           <input className={styles.gameName} aria-label="配置名称" maxLength={100} value={profile.name}
             disabled={blocked || layerMode || !!capture || measuring}
             onChange={event=>onUpdate(draft=>{draft.name=event.target.value;})}/>
-          <p>{virtual ? '标准手柄按键和摇杆自动映射，可添加键鼠动作。' : '用手柄操作游戏中的键盘与鼠标动作。'}</p>
+        </label>
+        <div className={styles.gameOutput}>
+          <label htmlFor={outputModeId}>输出方式</label>
+          <select id={outputModeId} className={styles.outputSelect} value={profile.virtual_gamepad}
+            disabled={blocked || layerMode || !!capture || measuring}
+            onChange={event=>{
+              const target = event.currentTarget.value as GamepadTarget;
+              onUpdate(draft=>{
+                draft.virtual_gamepad=target;
+                if(target!=='none') draft.gamepad_bindings ??= [];
+              });
+            }}>
+            <option value="none">键盘与鼠标</option>
+            <option value="xbox_360">虚拟 Xbox 360</option>
+            <option value="dualshock_4">虚拟 DualShock 4（PS4）</option>
+          </select>
         </div>
-        <div className={styles.gameControls}>
-          <div className={styles.gameOutput}>
-            <label htmlFor={outputModeId}>输出方式</label>
-            <select id={outputModeId} className={styles.outputSelect} value={profile.virtual_gamepad}
-              disabled={blocked || layerMode || !!capture || measuring}
-              onChange={event=>{
-                const target = event.currentTarget.value as GamepadTarget;
-                onUpdate(draft=>{draft.virtual_gamepad=target;});
-              }}>
-              <option value="none">键盘与鼠标</option>
-              <option value="xbox_360">虚拟 Xbox 360</option>
-              <option value="dualshock_4">虚拟 DualShock 4（PS4）</option>
-            </select>
-            <button type="button" className="secondary-btn" disabled={blocked || !!capture || measuring}
-              onClick={()=>setFeedbackOpen(true)}>震动与灯光</button>
+        <details className={styles.profileTools}>
+          <summary><StudioIcon name="more" size={16}/><span>配置工具</span></summary>
+          <div className={styles.toolsMenu} onClick={event=>{
+            if ((event.target as Element).closest('button')) event.currentTarget.closest('details')?.removeAttribute('open');
+          }}>
+            <button type="button" disabled={blocked || !!capture || measuring} onClick={()=>setFeedbackOpen(true)}>震动与灯光</button>
+            <button type="button" disabled={blocked || measuring} onClick={props.onImportJsm}>导入 JSM 配置</button>
+            <button type="button" disabled={blocked || measuring} onClick={props.onExport}>导出配置</button>
+            <button type="button" disabled={measuring} onClick={()=>props.onNavigate('profiles')}>配置库</button>
+            <button type="button" onClick={props.onOpenFolder}>配置文件夹</button>
           </div>
-          <div className={styles.profileTools}>
-            <button type="button" className="secondary-btn" disabled={blocked || measuring} onClick={props.onImportJsm}>导入 JSM 配置</button>
-            <button type="button" className="secondary-btn" disabled={blocked || measuring} onClick={props.onExport}>导出配置</button>
-            <button type="button" className="secondary-btn" disabled={measuring} onClick={()=>props.onNavigate('profiles')}>配置库</button>
-            <button type="button" className="secondary-btn" onClick={props.onOpenFolder}>配置文件夹</button>
-          </div>
-        </div>
+        </details>
+      </div>
+      <div className={styles.profileContext}>
+        <p>{virtual ? '在动作映射中编辑虚拟手柄按键，可填入标准布局。' : '用手柄操作游戏中的键盘与鼠标动作。'}</p>
+        {props.layerControls && <div className={styles.layerTools}>{props.layerControls}</div>}
       </div>
       {feedbackOpen&&<Dialog title="游戏震动与灯光" onClose={()=>setFeedbackOpen(false)}
         actions={<button type="button" className="primary-btn" onClick={()=>setFeedbackOpen(false)}>完成</button>}>
@@ -86,7 +96,7 @@ export function GameProfilesPage(props: Props) {
         <StudioIcon name={item.icon} size={16}/><span>{item.label}</span>
       </button>)}
     </nav>
-    <div data-pad-zone="game-panel" className={styles.tabPanel}>
+    <div key={props.editingLayerKey} data-pad-zone="game-panel" className={styles.tabPanel}>
       {tab==='actions' ? <ActionMappings profile={profile} device={device} status={status} blocked={blocked}
         capture={capture} onCapture={props.onCapture} onCancelCapture={props.onCancelCapture} onAssignEscape={props.onAssignEscape}
         onUpdate={onUpdate} onEdit={props.onEdit} onBatch={props.onBatch} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :
@@ -99,7 +109,7 @@ export function GameProfilesPage(props: Props) {
             <div className="studio-actions">
               <button type="button" className="secondary-btn" onClick={()=>{setTouchOnly(true);onTab('actions');}}>查看触控绑定</button>
             </div>
-            {profile.virtual_gamepad==='dualshock_4' && <p className={styles.hint}>虚拟 DualShock 4 会自动映射实体手柄的触摸板按键。</p>}
+            {profile.virtual_gamepad==='dualshock_4' && <p className={styles.hint}>虚拟 DualShock 4 的触摸板按键可在动作映射中绑定。</p>}
           </section>}
           {tab==='motion' && props.motion}
         </fieldset>}

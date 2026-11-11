@@ -1,12 +1,16 @@
 import {useEffect,useRef,useState} from 'react';
-import {chordParts,outputLabel,type Action,type Device,type Profile,type Status} from '../types';
+import {chordParts,outputLabel,type Action,type Device,type GamepadBinding,type Profile,type Status} from '../types';
 import {t} from '../i18n';
 import Controller from './Controller';
-import {gamepadNames} from './Controls';
 import {triggerNames} from './BindingFields';
 import {padInputLabel} from './binding-choices';
 import {modifierOutputs} from '../keyboard';
+import {isAnalogGamepadBinding} from '../mapping-triggers';
 import {MotionActionEditor,motionActionLabels,newMotionAction,type MotionAction} from './MotionActionEditor';
+import {
+  fillStandardGamepadBindings, GamepadBindingEditor, gamepadControlLabel, isAnalogGamepadOutput,
+  maxGamepadBindings, virtualGamepadControls,
+} from './GamepadBindingEditor';
 import styles from './GameProfilesPage.module.css';
 
 export type CaptureKind = 'key' | 'pad';
@@ -28,7 +32,7 @@ export type ActionMappingsProps = {
   onEdit: (index: number | null, preset?: Partial<Action>) => void;
 };
 
-type MappingAction = {kind: 'binding'; value: Action} | MotionAction;
+type MappingAction = {kind: 'binding'; value: Action} | {kind: 'gamepad'; value: GamepadBinding} | MotionAction;
 type MappingRow = {action: MappingAction; index: number; input: string; output: string; tag: string};
 type InputGroup = {input: string; rows: MappingRow[]};
 
@@ -47,6 +51,7 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
   const [selected,setSelected] = useState<number | null>(null);
   const [removing,setRemoving] = useState<string | null>(null);
   const [extra,setExtra] = useState<{action: MotionAction; index: number | null} | null>(null);
+  const [gamepadEdit,setGamepadEdit] = useState<{value: GamepadBinding; index: number | null} | null>(null);
   const actionList = useRef<HTMLElement>(null);
   const clearFilter = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -64,12 +69,19 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
   const search = query.trim().toLowerCase();
   const matches = (...values: string[]) => values.some(value=>value.toLowerCase().includes(search));
   const split = (device?.touchpads ?? 0) >= 2;
-  const inputLabel = (parts: string[]) => parts.map(part => t(padInputLabel(part, split))).join(' + ');
   const controlLabel = (control: string) => t(control === 'left_stick' ? '左摇杆' :
     control === 'right_stick' ? '右摇杆' : control === 'touchpad' ? '触摸板' : padInputLabel(control, split));
+  const inputLabel = (parts: string[]) => parts.map(part => part === 'left_stick' || part === 'right_stick'
+    ? controlLabel(part) : t(padInputLabel(part, split))).join(' + ');
   const touches = (part: string) => physicalControl(part) === 'touchpad' || (split && part === 'misc2');
   const motion = profile.gyro.motion;
+  const gamepadBindings = profile.gamepad_bindings ?? [];
+  const gamepadOutputs = virtualGamepadControls(profile.virtual_gamepad);
+  const canFillGamepad = fillStandardGamepadBindings(profile.virtual_gamepad, gamepadBindings).length
+    > gamepadBindings.length;
   const actions: {action: MappingAction; index: number}[] = [
+    ...gamepadBindings.flatMap((value,index)=>gamepadOutputs.includes(value.output)
+      ? [{action:{kind:'gamepad' as const,value},index}] : []),
     ...profile.actions.map((value,index)=>({action:{kind:'binding' as const,value},index})),
     ...motion.turns.map((value,index)=>({action:{kind:'turn' as const,value},index})),
     ...motion.bindings.map((value,index)=>({action:{kind:'motion' as const,value},index})),
@@ -83,11 +95,16 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
     for (const control of controls) bindingCounts.set(control, (bindingCounts.get(control) ?? 0) + 1);
     if ((touchOnly && !parts.some(touches)) || (controlFilter && !controls.has(controlFilter))) continue;
 
-    const labels = action.kind === 'binding'
+    const labels = action.kind === 'gamepad' ? {
+      input: inputLabel(parts),
+      output: gamepadControlLabel(action.value.output, profile.virtual_gamepad),
+      tag: isAnalogGamepadBinding(action.value) ? '模拟量' : triggerNames[action.value.trigger??'down'],
+    } : action.kind === 'binding'
       ? {input: parts.length ? inputLabel(parts) : t('待绑定手柄'), output: outputLabel(action.value.output), tag: triggerNames[action.value.trigger ?? 'down']}
       : motionActionLabels(action);
     const input = action.kind === 'turn' ? inputLabel(parts) : labels.input;
-    if (!matches(action.value.name, input, action.value.input, labels.output, labels.tag, t(labels.tag))) continue;
+    const name = action.kind === 'gamepad' ? t('虚拟手柄映射') : action.value.name;
+    if (!matches(name, input, action.value.input, labels.output, labels.tag, t(labels.tag))) continue;
     const key = action.kind === 'motion' ? 'motion:' + action.value.input : 'pad:' + parts.sort().join('+');
     const row = {action,index,input,output:labels.output,tag:labels.tag};
     const group = groups.get(key);
@@ -100,6 +117,13 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
   const locked = blocked || !!capture;
   const edit = (index: number) => { setSelected(index); onEdit(index); };
   const addMotion = (kind: MotionAction['kind']) => { setQuery(''); setExtra({action:newMotionAction(kind),index:null}); };
+  function addGamepad() {
+    const input = controlFilter ?? (touchOnly ? 'touchpad' : '');
+    const reserved = isAnalogGamepadOutput(input) && gamepadBindings.some(binding => binding.output === input);
+    const output = gamepadOutputs.includes(input) && !reserved ? input : '';
+    setQuery('');
+    setGamepadEdit({value:{input,output}, index:null});
+  }
   function selectControl(control: string) {
     setControlFilter(current => current === control ? null : control);
     setQuery('');
@@ -118,6 +142,25 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
     </>}</div>;
 
   function renderRow({action,index,input,output,tag}: MappingRow) {
+    if (action.kind === 'gamepad') {
+      const name = t('虚拟手柄映射');
+      const open = () => setGamepadEdit({value:action.value,index});
+      return <tr key={'gamepad:'+index}>
+        <td><div className={styles.actionName}>
+          <button type="button" disabled={locked} onClick={open}>{name}</button>
+        </div></td>
+        <td><button type="button" className={styles.bindingButton} disabled={locked} onClick={open}><kbd>{output}</kbd></button></td>
+        <td><div className={styles.inputBinding}>
+          <button type="button" className={styles.bindingButton} disabled={locked} onClick={open}>{input}</button>
+          <span className={styles.triggerBadge}>{tag}</span>
+          {action.value.turbo_ms!=null&&<span className={styles.triggerBadge}>连发</span>}
+          {action.value.allow_simultaneous&&<span className={styles.triggerBadge}>同时触发</span>}
+        </div></td>
+        <td>{rowActions('gamepad:'+index, name, open, () => {
+          onUpdate(draft => { draft.gamepad_bindings?.splice(index, 1); });
+        })}</td>
+      </tr>;
+    }
     const {value,kind} = action;
     if (kind === 'binding') return <tr key={'binding:'+index} data-selected={selected === index}>
       <td><div className={styles.actionName}>
@@ -130,6 +173,7 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
         <button type="button" className={styles.bindingButton} disabled={locked} aria-label={'录入手柄 ' + value.name}
           onClick={() => { setSelected(index); onCapture('pad', index); }}>{input}</button>
         {value.input&&<span className={styles.triggerBadge} data-trigger={value.trigger??'down'}>{tag}</span>}
+        {value.allow_simultaneous&&<span className={styles.triggerBadge}>同时触发</span>}
       </div></td>
       <td>{rowActions('binding:'+index, value.name, ()=>edit(index), ()=>{
         onUpdate(draft=>{draft.actions.splice(index,1);});
@@ -190,6 +234,18 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
           <button type="button" className="secondary-btn" disabled={locked} onClick={()=>onBatch(true)}>悬浮窗录入</button>
           <button type="button" className="secondary-btn" disabled={blocked||!!capture||profile.actions.length>=128}
             onClick={()=>{setQuery('');setControlFilter(null);onEdit(null,touchOnly?{input:'touchpad'}:undefined);}}>添加动作</button>
+          {virtual&&<>
+            <button type="button" className="secondary-btn" disabled={locked||gamepadBindings.length>=maxGamepadBindings}
+              onClick={addGamepad}>添加手柄映射</button>
+            {!touchOnly&&<button type="button" className="secondary-btn" disabled={locked||!canFillGamepad}
+              onClick={()=>{
+                onUpdate(draft=>{
+                  draft.gamepad_bindings = fillStandardGamepadBindings(draft.virtual_gamepad, draft.gamepad_bindings ?? []);
+                });
+                setQuery('');
+                setControlFilter(null);
+              }}>填入标准布局</button>}
+          </>}
           {!touchOnly&&<>
             <button type="button" className="secondary-btn" disabled={blocked||!!capture||profile.gyro.motion.bindings.length>=64}
               onClick={()=>addMotion('motion')}>添加体感动作</button>
@@ -214,10 +270,22 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
         </table>
         {!groups.size && <p className={styles.hint + ' studio-table-empty'}>
           {search ? '没有匹配的动作。' : controlFilter ? '这个控件还没有自定义动作。' : touchOnly ? '可以添加触摸板点按动作。' :
-            virtual ? gamepadNames[profile.virtual_gamepad] + ' 自动映射已就绪，可添加额外键鼠动作。' : '添加第一个动作，例如“跳跃 → 空格 → A”。'}
+            virtual ? '添加手柄映射，或填入标准布局。' : '添加第一个动作，例如“跳跃 → 空格 → A”。'}
         </p>}
       </div>
     </section>
+    {gamepadEdit&&virtual&&<GamepadBindingEditor profile={profile}
+      value={gamepadEdit.value} index={gamepadEdit.index} bindings={gamepadBindings}
+      target={profile.virtual_gamepad} split={split} locked={locked}
+      onClose={()=>setGamepadEdit(null)}
+      onSave={binding=>{
+        onUpdate(draft=>{
+          const bindings = draft.gamepad_bindings ??= [];
+          if(gamepadEdit.index===null) bindings.push(binding);
+          else bindings[gamepadEdit.index]=binding;
+        });
+        setGamepadEdit(null);
+      }}/>}
     {extra&&<MotionActionEditor action={extra.action} blocked={blocked} onClose={()=>setExtra(null)}
       onSave={action=>{
         onUpdate(draft=>{

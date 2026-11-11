@@ -34,8 +34,8 @@ export function TouchpadSettings({profile,device,status,update}:Props){
   <p className={styles.hint}>保存后应用。启用或切换时手指已在触摸板上，会等待全部抬起再开始，避免误点击。动作列表中的触摸板按键映射仍会执行。</p></>}
   <details><summary>实时触摸预览</summary>
    <p className={styles.hint}>{device?.touchpads?'当前接口已报告触摸板，预览保留原始触点。':'当前接口未报告触摸板。可以先保存设置，连接支持触摸坐标的接口后使用。'}</p>
-   <div className={styles.grid}>{Array.from({length:count},(_,pad)=><svg key={pad} viewBox="0 0 320 180" role="img" aria-label={pad===0?'触摸板 1 预览':'触摸板 2 预览'} style={{width:'100%',maxWidth:480,background:'var(--bg-input)',border:'1px solid var(--border-1)',borderRadius:12}}>
-    {[0,1].map(finger=>{const contact=status?.touches?.[pad]?.[finger];return contact?.active?<g key={finger}><circle cx={16+contact.x*288} cy={16+contact.y*148} r={10} fill="var(--accent)"/><text x={16+contact.x*288} y={20+contact.y*148} textAnchor="middle" fill="white" fontSize="12">{finger+1}</text></g>:null;})}
+   <div className={styles.grid}>{Array.from({length:count},(_,pad)=><svg key={pad} viewBox="0 0 320 180" role="img" aria-label={pad===0?'触摸板 1 预览':'触摸板 2 预览'} style={{width:'100%',maxWidth:480,background:'var(--bg-input)',border:'1px solid var(--panel-border)',borderRadius:'var(--section-radius)'}}>
+    {[0,1].map(finger=>{const contact=status?.touches?.[pad]?.[finger];return contact?.active?<g key={finger}><circle cx={16+contact.x*288} cy={16+contact.y*148} r={10} fill="var(--accent)"/><text x={16+contact.x*288} y={20+contact.y*148} textAnchor="middle" fill="var(--btn-primary-text)" fontSize="12">{finger+1}</text></g>:null;})}
    </svg>)}</div>
   </details>
  </section>;

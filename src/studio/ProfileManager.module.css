@@ -1,47 +1,86 @@
-.profileCard { display: flex; flex-direction: column; gap: 20px; }
-.profileLibrary { display: flex; flex-direction: column; gap: 18px; }
-.profileLibraryHeader { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.libraryPage { display: grid; gap: var(--section-gap); }
+.libraryToolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.libraryToolbar > button { min-height: 32px; font-size: 12px; }
+.fileTools, .itemTools { position: relative; flex-shrink: 0; }
+.fileTools summary, .itemTools summary { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 6px 9px; border: 1px solid var(--panel-border); border-radius: var(--control-radius); background: var(--bg-2); color: var(--text-mid); cursor: pointer; list-style: none; font-size: 12px; }
+.fileTools summary::-webkit-details-marker, .itemTools summary::-webkit-details-marker { display: none; }
+.fileTools summary:hover, .itemTools summary:hover, .fileTools[open] summary, .itemTools[open] summary { background: var(--bg-btn-hover); }
+.fileTools summary:focus-visible, .itemTools summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.operationMenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 10; min-width: 180px; padding: 6px; border: 1px solid var(--panel-border); border-radius: var(--panel-radius); background: var(--bg-2); box-shadow: var(--popover-shadow); }
+.operationMenu button { display: block; width: 100%; min-height: 32px; padding: 7px 10px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text-strong); text-align: left; cursor: pointer; white-space: nowrap; font-size: 12px; }
+.operationMenu button:hover:not(:disabled) { background: var(--bg-btn-hover); }
+.operationMenu button:disabled { opacity: .45; cursor: default; }
+.operationMenu .deleteAction { color: var(--danger-text); border-top: 1px solid var(--panel-border); margin-top: 4px; }
+.profileCard { display: flex; flex-direction: column; gap: var(--section-gap); min-width: 0; padding: var(--panel-padding); border: 1px solid var(--panel-border); border-radius: var(--panel-radius); background: var(--bg-2); box-shadow: var(--panel-shadow); }
+.profileLibrary { display: flex; flex-direction: column; gap: var(--section-gap); min-width: 0; }
+.libraryHint { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.profileLibraryHeader { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
 .profileLibraryHeader h3 { margin: 0; font-size: 15px; font-weight: 600; }
-.profileLibraryHeader p { margin: 7px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
+.profileLibraryHeader p { margin: 4px 0 0; font-size: 12px; line-height: 1.6; color: var(--text-muted); }
 .profileLibraryLoading { font-size: 12px; color: var(--text-muted); }
-.profileLibraryActionsRow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 18px; border-bottom: 1px solid var(--border-1); }
+.profileLibraryActionsRow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--panel-border); }
 .profileLibraryActionsRow > button:last-child { margin-left: auto; }
 .profileLibraryActionsRow button { font-size: 12px; }
-.profileSearch { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border-1); border-radius: 7px; padding: 9px 12px; background: var(--bg-input); color: var(--text-muted); }
+.profileSearch { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 36px; border: 1px solid var(--panel-border); border-radius: var(--control-radius); padding: 7px 10px; background: var(--bg-input); color: var(--text-muted); }
 .profileSearch input { flex: 1; width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text-strong); font-size: 12px; }
+.profileSearch svg, .profileSearch span { flex-shrink: 0; }
 .profileSearch span { font-size: 11px; color: var(--text-muted); }
-.profileSearch:focus-within { border-color: var(--accent); }
-.profileLibraryList { display: flex; flex-direction: column; gap: 10px; list-style: none; margin: 0; padding: 0; }
-.profileLibraryItem { display: flex; justify-content: space-between; align-items: center; gap: 15px; padding: 17px; border: 1px solid var(--border-1); border-radius: 8px; background: var(--bg-2); }
-.profileLibraryItemActive { border-color: color-mix(in srgb, var(--accent) 35%, var(--border-1)); background: color-mix(in srgb, var(--accent) 3%, var(--bg-2)); }
-.profileLibraryName { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
-.profileIcon { color: var(--text-muted); display: flex; }.profileLibraryItemActive .profileIcon { color: var(--accent); }
+.profileSearch:focus-within { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 2px; }
+.profileLibraryList { display: flex; flex-direction: column; gap: 0; list-style: none; margin: 0; padding: 0; border: 1px solid var(--panel-border); border-radius: var(--section-radius); }
+.profileLibraryList:empty { display: none; }
+.profileLibraryItem { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px; border-bottom: 1px solid var(--panel-border); background: var(--bg-2); }
+.profileLibraryItem:first-child { border-top-left-radius: var(--section-radius); border-top-right-radius: var(--section-radius); }
+.profileLibraryItem:last-child { border-bottom: 0; border-bottom-left-radius: var(--section-radius); border-bottom-right-radius: var(--section-radius); }
+.profileLibraryItem:hover { background: var(--bg-1); }
+.profileLibraryItemActive, .profileLibraryItemActive:hover { box-shadow: inset 2px 0 var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--bg-2)); }
+.profileLibraryName { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 8px; flex: 1; min-width: 0; }
+.listHeading, .localItem { display: grid; grid-template-columns: minmax(0, 1fr) 160px 120px; column-gap: 16px; align-items: center; }
+.listHeading { padding: 0 13px; margin-bottom: -8px; color: var(--text-muted); font-size: 11px; }
+.listHeading > :last-child { text-align: right; }
+.localItem .profileLibraryButtons { flex-wrap: nowrap; justify-content: flex-end; }
+.outputType { color: var(--text-muted); font-size: 12px; }
+.profileIcon { color: var(--text-muted); display: flex; flex-shrink: 0; }
+.profileLibraryItemActive .profileIcon { color: var(--accent); }
 .profileNameText { font-size: 13px; font-weight: 550; overflow-wrap: anywhere; }
-.profileLibraryName input { min-width: 60px; width: 240px; max-width: 100%; padding: 7px 10px; color: var(--text-strong); background: var(--bg-input); border: 1px solid var(--border-strong); border-radius: 5px; font-size: 12px; }
-.profileLibraryActiveBadge { color: var(--accent); font-size: 11px; white-space: nowrap; border-radius: 4px; background: color-mix(in srgb, var(--accent) 9%, transparent); padding: 3px 7px; }
-.profileLibraryButtons { display: flex; flex-wrap: wrap; gap: 7px; }.profileLibraryButtons button { font-size: 12px; padding: 6px 10px; }.profileLibraryButtons :global(.danger-btn) { background: transparent; border-color: transparent; color: var(--text-muted); }.profileLibraryButtons :global(.danger-btn:hover) { color: var(--danger-text); background: var(--danger-bg); }
-.profileLibraryEmpty { padding: 30px; text-align: center; border: 1px dashed var(--border-1); color: var(--text-muted); font-size: 12px; border-radius: 8px; margin: 0; }
-.profileFlags { display: flex; align-items: center; }.profileWarning, .profileNotApplied { color: var(--text-muted); font-size: 12px; }
-.libraryViews { display: flex; flex-wrap: wrap; gap: 6px; margin-right: auto; }
-.libraryViews button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
-.pickerViews { margin-bottom: 12px; }
+.profileLibraryName input { min-width: 60px; width: 240px; max-width: 100%; padding: 6px 9px; color: var(--text-strong); background: var(--bg-input); border: 1px solid var(--accent); border-radius: var(--control-radius); font-size: 12px; }
+.profileLibraryActiveBadge { color: var(--accent); font-size: 11px; white-space: nowrap; border-radius: 5px; background: color-mix(in srgb, var(--accent) 9%, transparent); padding: 2px 6px; }
+.profileLibraryButtons { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.profileLibraryButtons button { font-size: 12px; padding: 6px 9px; }
+.profileLibraryButtons :global(.danger-btn) { background: transparent; border-color: transparent; color: var(--text-muted); }
+.profileLibraryButtons :global(.danger-btn:hover) { color: var(--danger-text); background: var(--danger-bg); }
+.profileLibraryEmpty { padding: 32px 16px; text-align: center; border: 1px solid var(--panel-border); border-radius: var(--section-radius); background: var(--bg-1); color: var(--text-muted); font-size: 12px; margin: 0; }
+.profileFlags { display: flex; align-items: center; }
+.profileWarning, .profileNotApplied { color: var(--text-muted); font-size: 12px; }
+.libraryViews { display: flex; flex-wrap: wrap; gap: 3px; padding: 4px; margin-right: auto; border: 1px solid var(--panel-border); border-radius: var(--section-radius); background: var(--bg-1); }
+.libraryViews button { border-color: transparent; background: transparent; color: var(--text-muted); }
+.libraryViews button:hover:not(:disabled) { border-color: transparent; background: var(--bg-btn-hover); }
+.libraryViews button[aria-pressed='true'] { border-color: var(--panel-border); background: var(--bg-2); color: var(--text-strong); box-shadow: var(--panel-shadow); }
+.pickerViews { margin-bottom: 16px; }
 .communityFilters { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; gap: 10px; }
 .communityInfo { flex: 1; min-width: 0; }
 .communityInfo > p { margin: 7px 0 0; overflow-wrap: anywhere; }
-.communityMeta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 7px; color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; }
+.communityMeta { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 7px; color: var(--text-muted); font-size: 11px; overflow-wrap: anywhere; }
 .communityMeta code { color: var(--accent); }
-.codeField { display: grid; gap: 8px; font-size: 13px; }
+.codeField { display: grid; gap: 8px; font-size: 12px; }
 .codeField button { justify-self: start; }
-.codeField textarea { min-height: 84px; resize: vertical; padding: 10px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-input); color: var(--text-strong); font: 13px ui-monospace, monospace; overflow-wrap: anywhere; }
-.shareName { margin: 8px 0 12px; font-size: 16px; overflow-wrap: anywhere; }
+.codeField textarea { min-height: 84px; resize: vertical; padding: 10px; border: 1px solid var(--panel-border); border-radius: var(--control-radius); background: var(--bg-input); color: var(--text-strong); font: 12px/1.6 ui-monospace, monospace; overflow-wrap: anywhere; }
+.shareName { margin: 8px 0 12px; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .shareSource p { margin: 8px 0; overflow-wrap: anywhere; }
-.shareSummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
-.shareSummary > div { padding: 9px 11px; background: var(--bg-1); border: 1px solid var(--border-1); border-radius: 6px; overflow-wrap: anywhere; }
-.shareSummary dt { color: var(--text-muted); font-size: 12px; }
-.shareSummary dd { margin: 4px 0 0; font-size: 13px; }
-.shareBindings { margin: 12px 0; }
-.shareBindings summary { cursor: pointer; font-size: 13px; }
+.shareSummary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+.shareSummary > div { padding: 12px; background: var(--bg-1); border: 1px solid var(--panel-border); border-radius: var(--section-radius); overflow-wrap: anywhere; }
+.shareSummary dt { color: var(--text-muted); font-size: 11px; }
+.shareSummary dd { margin: 5px 0 0; font-size: 13px; }
+.shareBindings { margin: 16px 0; }
+.shareBindings summary { cursor: pointer; font-size: 12px; color: var(--text-mid); }
 .shareBindings ul { display: grid; gap: 6px; padding: 0; list-style: none; }
-.shareBindings li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 8px 0; border-bottom: 1px solid var(--border-1); font-size: 12px; overflow-wrap: anywhere; }
+.shareBindings li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; padding: 9px 0; border-bottom: 1px solid var(--panel-border); font-size: 12px; overflow-wrap: anywhere; }
 @media (max-width: 1000px) { .profileLibraryItem { flex-wrap: wrap; }.profileLibraryButtons { margin-left: auto; } }
-@media (max-width: 600px) { .profileLibraryName { flex-wrap: wrap; }.profileLibraryActionsRow > button:last-child { margin-left: 0; }.communityFilters { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 600px) {
+  .profileLibraryName { flex-wrap: wrap; }
+  .profileLibraryActionsRow > button:last-child { margin-left: 0; }
+  .communityFilters { grid-template-columns: minmax(0, 1fr); }
+  .listHeading, .localItem { grid-template-columns: minmax(0, 1fr) 100px; column-gap: 10px; }
+  .listHeading > :nth-child(2) { display: none; }
+  .localItem .outputType { grid-column: 1; grid-row: 2; margin-top: 5px; }
+  .localItem .profileLibraryButtons { grid-column: 2; grid-row: 1 / 3; }
+}

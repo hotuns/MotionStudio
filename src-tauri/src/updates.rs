@@ -311,6 +311,8 @@ mod tests {
         let manifest: Value =
             serde_json::from_slice(&fs::read(release.join("latest.json")).unwrap()).unwrap();
         assert_eq!(manifest["version"], version);
+        let platforms = manifest["platforms"].as_object().unwrap();
+        assert_eq!(platforms.len(), 1);
         let config: tauri::Config =
             serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
@@ -320,50 +322,31 @@ mod tests {
             .plugin(tauri_plugin_updater::Builder::new().build())
             .build(context)
             .unwrap();
-        for mode in [Mode::Installed, Mode::Portable] {
-            let updater = app.updater_builder().target(mode.target()).build().unwrap();
-            let candidate = updater.restore_update(manifest.clone()).unwrap().unwrap();
-            assert_eq!(candidate.download_url.as_str(), mode.asset_url(version));
-            let name = candidate
-                .download_url
-                .path_segments()
-                .unwrap()
-                .next_back()
-                .unwrap();
-            let mut bytes = fs::read(release.join(name)).unwrap();
-            candidate.verify(&bytes).unwrap();
+        let mode = Mode::Installed;
+        let updater = app.updater_builder().target(mode.target()).build().unwrap();
+        let candidate = updater.restore_update(manifest.clone()).unwrap().unwrap();
+        assert_eq!(candidate.download_url.as_str(), mode.asset_url(version));
+        let name = candidate
+            .download_url
+            .path_segments()
+            .unwrap()
+            .next_back()
+            .unwrap();
+        let mut bytes = fs::read(release.join(name)).unwrap();
+        candidate.verify(&bytes).unwrap();
 
-            let mut mislabeled = manifest.clone();
-            mislabeled["version"] = json!("999.0.0");
-            let wrong_version = updater.restore_update(mislabeled).unwrap().unwrap();
-            assert!(matches!(
-                wrong_version.verify(&bytes),
-                Err(tauri_plugin_updater::Error::SignedVersionMismatch { .. })
-            ));
-            let mut older = manifest.clone();
-            older["version"] = json!("0.15.1");
-            assert!(updater.restore_update(older).unwrap().is_none());
+        let mut mislabeled = manifest.clone();
+        mislabeled["version"] = json!("999.0.0");
+        let wrong_version = updater.restore_update(mislabeled).unwrap().unwrap();
+        assert!(matches!(
+            wrong_version.verify(&bytes),
+            Err(tauri_plugin_updater::Error::SignedVersionMismatch { .. })
+        ));
+        let mut older = manifest;
+        older["version"] = json!("0.15.1");
+        assert!(updater.restore_update(older).unwrap().is_none());
 
-            if mode == Mode::Portable {
-                let parent = tempfile::tempdir().unwrap();
-                let staging = portable::stage(&bytes, parent.path()).unwrap();
-                let exe = portable::publish(staging, version).unwrap();
-                assert_eq!(
-                    fs::read(&exe).unwrap(),
-                    fs::read(
-                        release
-                            .join(format!("MotionStudio-{version}-windows-x64"))
-                            .join("Motion Studio.exe")
-                    )
-                    .unwrap()
-                );
-                assert!(fs::read(&exe)
-                    .unwrap()
-                    .windows(b"__TAURI_BUNDLE_TYPE_VAR_UNK".len())
-                    .any(|window| window == b"__TAURI_BUNDLE_TYPE_VAR_UNK"));
-            }
-            bytes[0] ^= 1;
-            assert!(candidate.verify(&bytes).is_err());
-        }
+        bytes[0] ^= 1;
+        assert!(candidate.verify(&bytes).is_err());
     }
 }

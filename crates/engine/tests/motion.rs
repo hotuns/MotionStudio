@@ -322,7 +322,7 @@ fn flick_90_degrees_is_paid_out_once_and_suppresses_the_original_stick() {
 
 #[test]
 fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_directions() {
-    for strength in [0., 0.5, 1.] {
+    for (strength, exponent) in [(0., 1), (0.5, 2), (1., 3)] {
         for (value, direction) in [(32767, 1.), (-32768, -1.)] {
             let mut p = profile();
             p.gyro.motion.flick.enabled = true;
@@ -338,8 +338,7 @@ fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_direc
                 assert!(delta * direction >= -0.0001, "reverse step {delta}");
                 total += delta;
                 let progress = (elapsed / 0.1).min(1.);
-                let expected =
-                    f64::from(progress + strength * progress * (1. - progress)) * 900. * direction;
+                let expected = f64::from(1. - (1. - progress).powi(exponent)) * 900. * direction;
                 assert!(
                     (total - expected).abs() < 0.002,
                     "{strength}: {total} vs {expected}"
@@ -357,7 +356,6 @@ fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
     gamepad(&mut p);
     p.gyro.stick_full_scale_dps = 90.;
     p.gyro.motion.flick.enabled = true;
-    p.gyro.motion.flick.output = AimOutput::RightStick;
     p.gyro.motion.flick.smooth_ms = 10.;
     p.gyro.motion.flick.release_ease = 1.;
     let mut e = Engine::new(p).unwrap();
@@ -566,7 +564,7 @@ fn profiles_round_trip_advanced_settings_and_reject_invalid_or_conflicting_value
 #[test]
 fn flick_release_curve_defaults_layers_and_validation() {
     let mut p = profile();
-    assert_eq!(p.gyro.motion.flick.release_ease, 0.);
+    assert_eq!(p.gyro.motion.flick.release_ease, 0.5);
     p.layers.push(
         serde_json::from_value(serde_json::json!({
             "id": "aim", "name": "Aim", "input": "south",
@@ -577,7 +575,12 @@ fn flick_release_curve_defaults_layers_and_validation() {
     p.validate().unwrap();
     let resolved = motion_core::layers::resolve(&p, &[0]).unwrap();
     assert_eq!(resolved.gyro.motion.flick.release_ease, 1.);
-    for strength in [-0.1, 1.1, f32::NAN, f32::INFINITY] {
+    for strength in [
+        -0.1,
+        flexinput_engine::eval::MAX_FLICK_RELEASE_EASE + 0.1,
+        f32::NAN,
+        f32::INFINITY,
+    ] {
         p.gyro.motion.flick.release_ease = strength;
         assert!(p.validate().is_err());
     }
@@ -623,7 +626,6 @@ fn a_flick_shares_stick_capacity_with_gyro_without_losing_degrees() {
     let mut p = profile();
     gamepad(&mut p);
     p.gyro.motion.flick.enabled = true;
-    p.gyro.motion.flick.output = AimOutput::RightStick;
     let mut e = Engine::new(p).unwrap();
     axis(&mut e, 2, 32767);
     let mut extra = 0.;

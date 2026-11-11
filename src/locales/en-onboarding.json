@@ -1,0 +1,17 @@
+{
+  "上下或左右反了？": "Vertical or horizontal movement reversed?",
+  "灵敏度与防抖": "Sensitivity and stabilization",
+  "转得太慢就调高，容易转过头就调低。": "Increase it if turning feels too slow. Decrease it if you often overshoot.",
+  "准星微抖时试试「均衡」，仍有抖动就选「更稳」。": "Try Balanced if the crosshair jitters. If it still jitters, choose Steadier.",
+  "转角对不上？": "Turn angle feels off?",
+  "快速上手": "Quick start",
+  "检查手柄输入": "Check controller input",
+  "上一步": "Back",
+  "下一步": "Next",
+  "上手步骤": "Quick start steps",
+  "请选择可用的实体手柄": "Select an available physical controller",
+  "尚未选择配置": "No profile selected",
+  "先选择游戏配置，再到「设备与输入」开始观察。": "Choose a game profile, then start monitoring in Devices and input.",
+  "确认手柄和配置后，点击顶栏的「启动映射」，再进入游戏。": "Once the controller and profile are ready, click Start mapping in the toolbar, then switch to your game.",
+  "需要调整按键或摇杆时，打开游戏配置。": "Open Game profiles to adjust buttons or sticks."
+}

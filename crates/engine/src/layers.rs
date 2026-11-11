@@ -1,7 +1,7 @@
 //! Hold layers merge bounded configuration patches over one physical session.
 use crate::profile::{Action, Profile};
 use anyhow::{ensure, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -13,7 +13,7 @@ pub struct Layer {
     pub activation_threshold: f32,
     #[serde(default = "default_hysteresis")]
     pub activation_hysteresis: f32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_settings")]
     pub settings: Map<String, Value>,
     #[serde(default)]
     pub actions: Vec<Action>,
@@ -26,6 +26,32 @@ fn default_threshold() -> f32 {
 fn default_hysteresis() -> f32 {
     0.1
 }
+fn deserialize_settings<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Map<String, Value>, D::Error> {
+    let mut settings = Map::<String, Value>::deserialize(deserializer)?;
+    let Some(Value::Object(gyro)) = settings.get_mut("gyro") else {
+        return Ok(settings);
+    };
+    let Some(Value::Object(motion)) = gyro.get_mut("motion") else {
+        return Ok(settings);
+    };
+    let Some(Value::Object(flick)) = motion.get_mut("flick") else {
+        return Ok(settings);
+    };
+    // Flick follows gyro.output. Drop obsolete layer overrides and empty groups.
+    if flick.remove("output").is_some() && flick.is_empty() {
+        motion.remove("flick");
+        if motion.is_empty() {
+            gyro.remove("motion");
+        }
+        if gyro.is_empty() {
+            settings.remove("gyro");
+        }
+    }
+    Ok(settings)
+}
+
 pub fn merge(target: &mut Value, patch: &Value) {
     if patch
         .as_object()
@@ -104,6 +130,7 @@ pub fn validate(base: &Profile) -> Result<()> {
             layer.settings.keys().all(|k| matches!(
                 k.as_str(),
                 "gyro"
+                    | "gamepad_bindings"
                     | "input"
                     | "feedback"
                     | "touchpad"
@@ -113,6 +140,13 @@ pub fn validate(base: &Profile) -> Result<()> {
                     | "stick_rebound_ms"
             )),
             "配置层只能覆盖体感、摇杆和动作，不能改变输出设备"
+        );
+        ensure!(
+            layer
+                .settings
+                .get("gamepad_bindings")
+                .is_none_or(Value::is_array),
+            "配置层的手柄映射需为列表"
         );
         ensure!(
             layer.disabled_inputs.len() <= 128

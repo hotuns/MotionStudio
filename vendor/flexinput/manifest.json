@@ -151,10 +151,10 @@
     {
       "path": "crates/engine/src/eval/activation.rs",
       "upstreamSha256": "df3820738330d9e85339b0e5e4a032dd9b296fa5b73102dd6263df0e4118aa85",
-      "vendoredSha256": "32cf02b766157f6668d6249dd3e2a6aed8315b0852185b1298686b912e185217",
+      "vendoredSha256": "fe6f79436d608bbb8fe2a456d16b63d2dc20ad94abd240133b10c330cb6cec0c",
       "modified": true,
       "upstreamGitBlob": "01478509933679693a2fac094d479bd3babe10d3",
-      "patch": "Expose an opaque PressGate over the original press-mode and turbo state machines. Correct double-press state 3 so a held second press does not expire with the recognition window. No separate Studio timing algorithm."
+      "patch": "Expose timestamped PressGate sampling over native double recognition, long output, pulse and turbo logic. Coordinate same-condition short, long and double recognition before ordinary outputs, with exact deadlines and release catch-up. Retain the double-press state 3 fix so a recognized second press stays held."
     },
     {
       "path": "crates/engine/src/eval/combiner_motion.rs",
@@ -177,9 +177,9 @@
     {
       "path": "crates/engine/src/eval/curves.rs",
       "upstreamSha256": "4bbe7f8180198d0059d239d9ff52c239478a30c9148f8c37a0f4ed88f5274c98",
-      "vendoredSha256": "88990ddae3423abe31bed085e9c1d5b02756fa728786fe922fa735f0a98ec131",
+      "vendoredSha256": "9626ca1b2d9d002225a5cb4c9f7900a2d9a33a27218b4d3354e62649a90ca199",
       "modified": true,
-      "notes": "Extract the original JSM quadratic Flick easing and expose a bounded linear/ease-out blend for RWS and the Studio preview."
+      "notes": "Extract the original JSM quadratic Flick easing. Map normalized strengths 0–1 to linear at 0, JSM quadratic at 0.5 and cubic ease-out at 1 for RWS and its preview. Blend linear/quadratic below 0.5 and use power ease-out above 0.5. Expose the shared strength limit."
     },
     {
       "path": "crates/engine/src/eval/device_cal.rs",
@@ -229,9 +229,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/analog.rs",
       "upstreamSha256": "5507641cfc818588a30cced635ce178ab98581bfaaaa59b33f4646f6c9ab4895",
-      "vendoredSha256": "3bfb7492203160afc99917ebc02b59436bd5827e3408e54d2fde83df20c4280b",
+      "vendoredSha256": "0f204d5910c5db3a05449fe390e94e6ce799599e72219cf69260f25ef838d2a6",
       "modified": true,
-      "notes": "Add a trigger-only headless entry point that calls the original analog state machine."
+      "notes": "Add a trigger-only headless entry point that calls the original analog state machine. Extract the unchanged NoMouse overlapping direction predicate for both native JSM and Studio callers."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/bind.rs",
@@ -297,9 +297,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/mod.rs",
       "upstreamSha256": "e317c5c110afcdbaa630e0ea9006b0c3bc3a0a944495997e5fe3afdd2907797e",
-      "vendoredSha256": "fbe17b56496610e068e61a8719f5915e6404d9cabd6f914c93f5566376dd1649",
+      "vendoredSha256": "90355c9a9551bc3aec153b6daa99ae027003213015bb652f520cf3bc16a3b467",
       "modified": true,
-      "notes": "Expose source naming, the existing curves, headless gyro timing and the trigger-only entry point."
+      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point and shared NoMouse stick direction predicate."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/motion.rs",
@@ -358,9 +358,9 @@
     {
       "path": "crates/engine/src/eval/modules/mod.rs",
       "upstreamSha256": "09db165887dde2c343b4b8f461af4f22acb0c747aa378cec8d77615aa8d7e2ce",
-      "vendoredSha256": "3bf7b0743f3f59108ddfb7c0a5a797516cb4edeb59ee3cade660d2ce79819302",
+      "vendoredSha256": "40c70e37ebb69f7f2652cfcbcf6f160a8c05c187af342d7ec424edf45d496b84",
       "modified": true,
-      "notes": "Compile JSM Config and expose its parser and trigger-only entry point in the headless evaluator."
+      "notes": "Compile JSM Config and expose its parser, trigger-only entry point and shared NoMouse direction predicate in the headless evaluator."
     },
     {
       "path": "crates/engine/src/eval/modules/remapper.rs",
@@ -377,9 +377,9 @@
     {
       "path": "crates/engine/src/eval/modules/rws.rs",
       "upstreamSha256": "fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96",
-      "vendoredSha256": "b7303889c7eaa82328276874553ed1e65ac82496966510a1a3d225746c5103a1",
+      "vendoredSha256": "c3bd9c9ce6d2471274ffc66b704746adc2183797ed462347b251f554ad0c487a",
       "modified": true,
-      "notes": "Add optional flick_release_ease (default 0) for the initial Flick. Preserve total angle and duration with two cumulative-progress state slots. Tracking, companion aim, gesture and sensor paths retain their existing algorithms."
+      "notes": "Add optional flick_release_ease (default 0 for upstream callers, range 0–1) for the initial Flick. Strength 0.5 reproduces JSM quadratic easing. Preserve total angle and duration with two cumulative-progress state slots. Tracking, companion aim, gesture and sensor paths retain their existing algorithms."
     },
     {
       "path": "crates/engine/src/eval/modules/shared.rs",

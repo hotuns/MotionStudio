@@ -153,7 +153,7 @@
   "短按最长时间": "Maximum short press time",
   "触发持续时间": "Activation duration",
   "长按触发后保持，直到松开": "Hold after long press activates, until released",
-  "普通按住立即生效。短按在松开后确认；双击在第二次按下时生效，保持到松开。同一输入可添加多种触发，短按与长按可避免同时触发普通按住动作。": "Regular hold activates immediately. Short press is confirmed on release; double press starts on the second press and lasts until release. An input can have multiple activators. Use short and long press together to avoid also firing a regular hold binding.",
+  "同一输入同时绑定普通动作和长按时，提前松开触发普通动作，达到长按时间触发长按。双击在第二次按下时生效，保持到松开。": "When an input has both a regular and a long-press action, releasing early fires the regular action. Reaching the threshold fires the long-press action. Double press activates on the second press and lasts until release.",
   "手柄输入 · 同时按住": "Controller input · Hold together",
   "手柄输入 {0}{1}": "Controller input {0}{1}",
   "手柄输入": "Controller input",
@@ -176,11 +176,14 @@
   "转角缓出强度": "Flick ease-out strength",
   "转角缓出强度滑块": "Flick ease-out strength slider",
   "Flick 缓出强度": "Flick ease-out strength",
-  "0% 匀速释放，100% 使用 JSM 缓出。强度越高，起步越快、随后减速。": "0% releases at a constant rate. 100% uses JSM ease-out. Higher strength starts faster and then slows down.",
+  "0% 匀速释放，50% 使用 JSM 缓出（默认）。高于 50% 起步更快，100% 使用三次缓出。": "0% releases at a constant rate. 50% uses JSM ease-out (default). Above 50%, the turn starts faster. 100% uses cubic ease-out.",
   "匀速参考": "Linear reference",
   "当前释放曲线": "Current release curve",
   "Flick 转角释放": "Flick angle release",
   "时间进度（%）": "Time progress (%)",
   "已完成转角（%）": "Angle completed (%)",
-  "曲线控制初始转身的转角进度。完成时间设为 0 时立即输出全部转角。": "The curve controls the initial turn's angle progress. A duration of 0 outputs the full angle immediately."
+  "曲线控制初始转身的转角进度。完成时间设为 0 时立即输出全部转角。": "The curve controls the initial turn's angle progress. A duration of 0 outputs the full angle immediately.",
+  "无法创建校准窗口控件（{0}）": "Could not create the calibration window controls ({0}).",
+  "无法设置校准窗口按钮": "Could not configure the calibration window buttons.",
+  "无法安装校准窗口处理程序": "Could not install the calibration window handler."
 }

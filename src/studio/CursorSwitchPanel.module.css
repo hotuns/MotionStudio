@@ -1,34 +1,41 @@
-.panel { border: 1px solid var(--border-1); border-radius: 10px; padding: 18px; margin-bottom: 18px; background: var(--bg-1); }
+.panel { min-width: 0; border: 1px solid var(--panel-border); border-radius: var(--panel-radius); padding: var(--panel-padding); margin: 0 0 var(--section-gap); background: var(--bg-2); box-shadow: var(--panel-shadow); }
 .heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
-.heading h4 { margin: 0 0 8px; font-size: 15px; color: var(--text-strong); }
+.heading > div { min-width: 0; }
+.heading h4 { margin: 0 0 5px; font-size: 15px; font-weight: 600; color: var(--text-strong); }
 .heading p, .hint { color: var(--text-muted); font-size: 12px; line-height: 1.7; margin: 6px 0; }
 .toggle { display: flex; align-items: center; gap: 8px; white-space: nowrap; color: var(--text-strong); font-size: 12px; }
 .toggle input { accent-color: var(--accent); }
-.controls { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; margin: 16px 0; }
+.controls { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin: 16px 0; }
 .controls > label, .controls > .field { flex: 1 1 180px; }
 .controls > label, .field { min-width: 0; display: grid; gap: 8px; color: var(--text-mid); font-size: 12px; }
-.controls select { width: 100%; padding: 9px; color: var(--text-strong); background: var(--bg-input); border: 1px solid var(--border-1); border-radius: 6px; }
-.controls button { min-height: 35px; font-size: 12px; }
-.target { margin: 14px 0; }
+.controls select, .controls > label > input:not([type='checkbox']):not([type='radio']):not([type='range']) { width: 100%; min-width: 0; min-height: 34px; padding: 7px 10px; color: var(--text-strong); background: var(--bg-input); border: 1px solid var(--panel-border); border-radius: var(--control-radius); }
+.controls button { min-height: 34px; font-size: 12px; }
+.target { margin: 16px 0; }
 .target .field { max-width: 420px; }
-.shortcutGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 12px; align-items: start; margin: 14px 0; }
-.card { display: grid; gap: 10px; min-width: 0; padding: 14px; border: 1px solid var(--border-1); border-radius: 8px; background: var(--bg-panel, var(--bg-2)); font-size: 12px; }
-.card h5 { margin: 0; font-size: 13px; }
+.shortcutGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 12px; align-items: start; margin: 16px 0; }
+.card { display: grid; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--panel-border); border-radius: var(--section-radius); background: var(--bg-1); font-size: 12px; }
+.card h5 { margin: 0; font-size: 13px; font-weight: 600; }
 .card .heading { align-items: center; gap: 8px; }
 .card .heading > span { color: var(--text-muted); }
-.card kbd { max-width: 65%; overflow-wrap: anywhere; }
+.card kbd { max-width: 65%; white-space: normal; overflow-wrap: anywhere; }
 .card fieldset { min-width: 0; border: 0; margin: 0; padding: 0; }
 .card p { margin: 0; }
 .card > button { justify-self: start; }
 .card > button[aria-haspopup='dialog'] { justify-self: stretch; }
 .recordMode { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
-.recordMode button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+.recordMode button[aria-pressed='true'] { border-color: color-mix(in srgb, var(--accent) 40%, var(--panel-border)); background: color-mix(in srgb, var(--accent) 7%, var(--bg-2)); color: var(--accent); }
 .shortcutActions { display: flex; flex-wrap: wrap; gap: 8px; }
-.status { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--text-mid); font-size: 12px; padding: 12px 0; border-top: 1px solid var(--border-1); }
-.error { color: #c45b4c; font-size: 12px; overflow-wrap: anywhere; }
+.status { display: flex; flex-wrap: wrap; gap: 8px 18px; color: var(--text-mid); font-size: 12px; padding: 14px 0 0; margin-top: 16px; border-top: 1px solid var(--panel-border); }
+.error { color: var(--danger-text); font-size: 12px; overflow-wrap: anywhere; }
 .overlayControls > label { flex: 0 1 180px; }
-.overlayPreview { width: max-content; max-width: min(280px, 100%); margin-left: auto; padding: 6px 12px; border-radius: 6px; background: #181d23; color: #f1f6fa; box-sizing: border-box; }
+.overlayPreview { width: max-content; max-width: min(280px, 100%); margin-left: auto; padding: 8px 12px; border-radius: var(--section-radius); background: #181d23; color: #f1f6fa; box-sizing: border-box; }
 .overlayPreview strong { display: block; font-size: 14px; font-weight: 600; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .delayInput { display: flex; align-items: center; gap: 8px; }
-.delayInput input { width: 110px; min-height: 36px; border: 1px solid var(--border-1); border-radius: 6px; padding: 7px 10px; background: var(--bg-input); color: var(--text-strong); }
+.delayInput input { width: 110px; min-height: 34px; border: 1px solid var(--panel-border); border-radius: var(--control-radius); padding: 7px 10px; background: var(--bg-input); color: var(--text-strong); }
 .delayInput span { font-size: 12px; color: var(--text-muted); }
+.controls select:focus-visible, .controls > label > input:focus-visible, .delayInput input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 600px) {
+  .heading { flex-wrap: wrap; gap: 10px; }
+  .card { padding: 14px; }
+  .overlayPreview { margin-left: 0; }
+}

@@ -2,12 +2,12 @@
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 25rem), 1fr));
   align-items: start;
-  gap: 16px;
+  gap: var(--section-gap);
 }
 
 .column {
   display: grid;
-  gap: 16px;
+  gap: var(--section-gap);
   min-width: 0;
 }
 
@@ -27,7 +27,7 @@
 .sensorGrid {
   display: grid;
   gap: 12px;
-  margin-top: 10px;
+  margin-top: 12px;
 }
 
 .noiseGrid {
@@ -40,9 +40,9 @@
 
 .sensorGrid .axis {
   padding: 0 12px 12px;
-  border: 1px solid var(--border-1);
-  border-radius: 8px;
-  background: var(--bg-2);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--section-radius);
+  background: var(--bg-1);
 }
 
 .columns :global(.studio-range-heading) {
@@ -57,5 +57,5 @@
 .axis :global(.studio-range) {
   margin-top: 10px;
 }
-.body { margin-top: 14px; }
+.body { margin-top: var(--section-gap); }
 

@@ -1,7 +1,8 @@
 //! One-way, offline JSM translation into editable Studio profiles.
 use crate::{
     bindings::{input_chord, output_chord},
-    motion_config::{AimOutput, Space, Stick},
+    controller_input::StickDirections,
+    motion_config::{Space, Stick},
     profile::{Action, GamepadTarget, GyroOutput, Profile},
 };
 use anyhow::{bail, ensure, Context, Result};
@@ -559,13 +560,18 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 .is_some_and(|s| matches!(s.value.as_str(), "X_RT" | "PS_R2"));
         if let Some(target) = target.filter(|t| *t == GamepadTarget::None || complete) {
             p.virtual_gamepad = target;
-            mark(&mut lines, s.index, "converted", "使用标准虚拟手柄自动映射");
+            let message = if target == GamepadTarget::None {
+                "已选择键鼠输出"
+            } else {
+                "已填入标准虚拟手柄布局"
+            };
+            mark(&mut lines, s.index, "converted", message);
         } else {
             mark(
                 &mut lines,
                 s.index,
                 "skipped",
-                "仅支持完整的标准 Xbox／DS4 布局；部分或自定义虚拟按键不能用整体自动映射代替",
+                "导入支持完整的标准 Xbox／DS4 布局。可在动作映射中手动绑定自定义键位",
             );
         }
     }
@@ -899,7 +905,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "STICK_DEADZONE_INNER" => {
                     p.stick_deadzone = scalar(v)?;
                     p.stick_mouse.deadzone = p.stick_deadzone;
-                    Some("统一用于按键方向与摇杆鼠标；原 JSM 的十字／斜向门限可能不同")
+                    Some("统一用于方向映射与摇杆鼠标；外死区与特殊死区需核验")
                 }
                 "LEFT_STICK_DEADZONE_INNER" | "RIGHT_STICK_DEADZONE_INNER" => {
                     let value = scalar(v)?;
@@ -976,7 +982,14 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
     for s in sticks {
         apply(&mut p, &mut lines, s, |p| {
             match s.value.as_str() {
-                "NO_MOUSE" => return Ok(None),
+                "NO_MOUSE" => {
+                    if s.key.starts_with("LEFT") {
+                        p.input.lstick_directions = StickDirections::EightWay;
+                    } else {
+                        p.input.rstick_directions = StickDirections::EightWay;
+                    }
+                    return Ok(None);
+                }
                 "LEFT_STICK" | "RIGHT_STICK" if p.virtual_gamepad != GamepadTarget::None => {
                     return Ok(None)
                 }
@@ -996,10 +1009,9 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             };
             f.enabled = s.value == "FLICK";
             if f.enabled {
-                f.release_ease = 1.0;
+                f.release_ease = 0.5;
             }
             f.stick_aim = s.value == "AIM";
-            f.output = AimOutput::Mouse;
             f.max_dps = values[0];
             f.vertical_ratio = values[1] / values[0];
             if !p.gyro.enabled {
@@ -1127,7 +1139,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 &mut lines,
                 s.index,
                 "converted",
-                "由标准虚拟手柄自动映射提供",
+                "已包含在标准虚拟手柄布局中",
             );
             continue;
         }
@@ -1151,9 +1163,23 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             .get(&(s.key.clone(), s.value.clone()))
             .cloned()
             .unwrap_or_else(|| format!("{} → {}", s.key, s.value));
+        let mut directional = false;
+        for part in input.split('+') {
+            if let Some((side, direction)) = part.split_once("_stick_") {
+                if matches!(direction, "up" | "down" | "left" | "right") {
+                    directional = true;
+                    if side == "left" {
+                        p.input.lstick_directions = StickDirections::EightWay;
+                    } else {
+                        p.input.rstick_directions = StickDirections::EightWay;
+                    }
+                }
+            }
+        }
         p.actions.push(Action {
             name,
-            threshold: 0.5,
+            // Native NO_MOUSE directions activate immediately beyond the input deadzone.
+            threshold: if directional { 0. } else { 0.5 },
             input: input.clone(),
             output: value,
             repeat_ms: None,
@@ -1161,13 +1187,16 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             trigger_ms: 250,
             sustain: true,
             turbo_ms: None,
+            allow_simultaneous: false,
         });
         let note = if full_disabled {
             full_note
         } else if approximate {
             "已转为同时按住组合；原 JSM 的按下顺序／同时按压时间窗未保留"
+        } else if directional {
+            "已采用 JSM 八向重叠判定；斜向同时输出相邻两键，输入死区与其他摇杆模式需核验"
         } else if input.contains("stick_") {
-            "已转为摇杆方向阈值；JSM 的斜向判定与死区可能不同"
+            "已转为摇杆区域输入；区域边界需核验"
         } else if input == "touchpad" {
             "CAPTURE 已转为触摸板点按；其他手柄的 Capture 键请改选对应扩展键"
         } else {
@@ -1184,6 +1213,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             note,
         );
     }
+    p.materialize_gamepad_bindings();
     p.validate().context("转换后的配置校验失败")?;
     if lines.is_empty() {
         bail!("没有找到 JSM 配置命令");

@@ -165,6 +165,8 @@ pub struct Profile {
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_gamepad_target")]
     pub virtual_gamepad: GamepadTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gamepad_bindings: Option<Vec<crate::gamepad_bindings::GamepadBinding>>,
     #[serde(default = "default_deadzone")]
     pub stick_deadzone: f32,
     #[serde(default)]
@@ -396,11 +398,13 @@ pub struct Action {
     pub sustain: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turbo_ms: Option<u32>,
+    #[serde(default)]
+    pub allow_simultaneous: bool,
 }
-fn default_trigger_ms() -> u32 {
+pub(crate) fn default_trigger_ms() -> u32 {
     250
 }
-fn default_sustain() -> bool {
+pub(crate) fn default_sustain() -> bool {
     true
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -426,8 +430,22 @@ impl Trigger {
         }
     }
 }
-fn default_threshold() -> f32 {
+pub(crate) fn default_threshold() -> f32 {
     0.5
+}
+
+pub(crate) fn validate_activation(
+    threshold: f32,
+    trigger_ms: u32,
+    turbo_ms: Option<u32>,
+) -> Result<()> {
+    if !(10..=5000).contains(&trigger_ms) || turbo_ms.is_some_and(|v| !(20..=2000).contains(&v)) {
+        bail!("动作触发时间需为 10–5000 ms，连发周期需为 20–2000 ms");
+    }
+    if !threshold.is_finite() || !(0.0..1.0).contains(&threshold) {
+        bail!("动作触发阈值必须在 0–1 之间（不含 1）");
+    }
+    Ok(())
 }
 
 pub fn valid_key(key: &str) -> bool {
@@ -437,10 +455,19 @@ pub fn valid_output(output: &str) -> bool {
     crate::bindings::output_chord(output).is_some()
 }
 impl Profile {
+    pub fn materialize_gamepad_bindings(&mut self) {
+        if self.virtual_gamepad != GamepadTarget::None && self.gamepad_bindings.is_none() {
+            self.gamepad_bindings = Some(crate::gamepad_bindings::standard_bindings(
+                self.virtual_gamepad,
+            ));
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("Read profile {}", path.display()))?;
-        let profile: Self = toml::from_str(&text).context("Invalid profile TOML")?;
+        let mut profile: Self = toml::from_str(&text).context("Invalid profile TOML")?;
+        profile.materialize_gamepad_bindings();
         profile.validate()?;
         Ok(profile)
     }
@@ -455,6 +482,7 @@ impl Profile {
             bail!("配置名需为 1–100 个字符");
         }
         self.input.validate()?;
+        crate::gamepad_bindings::validate(self.gamepad_bindings.as_deref().unwrap_or_default())?;
         self.trigger_stages.validate()?;
         self.feedback.validate()?;
         self.touchpad.validate()?;
@@ -482,19 +510,12 @@ impl Profile {
             bail!("摇杆外圈阈值或回差无效");
         }
         for action in &self.actions {
-            if !(10..=5000).contains(&action.trigger_ms)
-                || action.turbo_ms.is_some_and(|v| !(20..=2000).contains(&v))
-            {
-                bail!("动作触发时间需为 10–5000 ms，连发周期需为 20–2000 ms");
-            }
+            validate_activation(action.threshold, action.trigger_ms, action.turbo_ms)?;
             if action.name.trim().is_empty()
                 || crate::bindings::input_chord(&action.input).is_none()
                 || !valid_output(&action.output)
             {
                 bail!("Invalid action: {:?}; use a supported input and key:SPACE / mouse:left style output", action);
-            }
-            if !action.threshold.is_finite() || !(0.0..1.0).contains(&action.threshold) {
-                bail!("Action threshold must be in [0, 1): {}", action.name);
             }
             if let Some(ms) = action.repeat_ms {
                 if !(20..=2000).contains(&ms)
@@ -535,8 +556,6 @@ impl Profile {
         }
         crate::motion_config::points("体感加速曲线", &g.acceleration.points, 4000., 10.)?;
         let needs_pad = g.motion.mode != crate::motion_config::MotionMode::Pointer
-            || ((g.motion.flick.enabled || g.motion.flick.stick_aim)
-                && g.motion.flick.output != crate::motion_config::AimOutput::Mouse)
             || g.motion
                 .turns
                 .iter()

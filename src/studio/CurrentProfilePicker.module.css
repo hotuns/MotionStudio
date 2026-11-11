@@ -1,0 +1,5 @@
+.dialog { width: min(580px, calc(100vw - 40px)); }
+.sources { display: flex; align-items: center; gap: 3px; padding: 4px; margin: 0 0 16px; border: 1px solid var(--panel-border); border-radius: var(--section-radius); background: var(--bg-1); }
+.sources button { flex: 1; min-height: 32px; border-color: transparent; background: transparent; color: var(--text-muted); box-shadow: none; font-weight: 500; }
+.sources button:hover:not(:disabled) { background: var(--bg-btn-hover); border-color: transparent; }
+.sources button[aria-pressed='true'] { border-color: var(--panel-border); background: var(--bg-2); color: var(--text-strong); box-shadow: 0 1px 3px #00000008; }

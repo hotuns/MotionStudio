@@ -18,6 +18,7 @@ fn action(input: &str, output: &str) -> Action {
         trigger_ms: 250,
         sustain: true,
         turbo_ms: None,
+        allow_simultaneous: false,
     }
 }
 fn profile(actions: Vec<Action>) -> Profile {

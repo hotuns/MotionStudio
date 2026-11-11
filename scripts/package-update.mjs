@@ -1,9 +1,7 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { portableEntries, stagePortable } from './package-portable.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = path => readFileSync(join(root, path), 'utf8');
@@ -29,13 +27,10 @@ if (process.argv.includes('--check-tag')) {
   console.log('Release tag and package versions agree: ' + tag);
   process.exit(0);
 }
-if (!process.env.TAURI_SIGNING_PRIVATE_KEY) throw new Error('Set TAURI_SIGNING_PRIVATE_KEY before packaging the update');
-
 const artifacts = join(root, 'artifacts');
 const output = join(artifacts, 'release-' + tag);
 if (existsSync(output)) throw new Error('Release output already exists: ' + output);
 const setupName = 'MotionStudio-' + version + '-x64-setup.exe';
-const portableName = 'MotionStudio-' + version + '-windows-x64';
 const setupBuild = resolve(root, process.env.CARGO_TARGET_DIR || 'target', 'release/bundle/nsis', 'Motion Studio_' + version + '_x64-setup.exe');
 if (!existsSync(setupBuild + '.sig')) {
   throw new Error('Build a signed NSIS package using src-tauri/tauri.release.conf.json first');
@@ -43,11 +38,6 @@ if (!existsSync(setupBuild + '.sig')) {
 const downloadBase = 'https://github.com/hotuns/MotionStudio/releases/download/' + tag + '/';
 const notesFile = 'docs/releases/' + tag + '.md';
 const notes = existsSync(join(root, notesFile)) ? read(notesFile).trim() : '';
-
-function run(executable, args, errorMessage) {
-  const result = spawnSync(executable, args, { cwd: root, encoding: 'utf8', windowsHide: true });
-  if (result.status !== 0) throw new Error(errorMessage);
-}
 
 function releaseAsset(dir, file) {
   const signature = readFileSync(join(dir, file + '.sig'), 'utf8').trim();
@@ -72,26 +62,15 @@ function removeReleaseDirectory(path) {
 try {
   copyFileSync(setupBuild, join(stage, setupName));
   copyFileSync(setupBuild + '.sig', join(stage, setupName + '.sig'));
-  const portableDir = join(stage, portableName);
-  stagePortable(version, portableDir);
-  const zipName = portableName + '.zip';
-  const zip = join(stage, zipName);
-  run('tar.exe', ['-a', '-cf', zip, '-C', portableDir, ...portableEntries], 'Could not archive the portable package');
-  run(process.execPath, [
-    join(root, 'node_modules/@tauri-apps/cli/tauri.js'), 'signer', 'sign', '--app-version', version, zip,
-  ], 'Could not sign the portable package. Check the updater signing credentials.');
-
   const manifest = {
     version, notes, pub_date: new Date().toISOString(),
     platforms: {
       'windows-x86_64-nsis': releaseAsset(stage, setupName),
-      'windows-x86_64-portable': releaseAsset(stage, zipName),
     },
   };
-  const checksums = [setupName, zipName].map(file =>
-    createHash('sha256').update(readFileSync(join(stage, file))).digest('hex') + '  ' + file);
+  const checksum = createHash('sha256').update(readFileSync(join(stage, setupName))).digest('hex');
   writeFileSync(join(stage, 'latest.json'), JSON.stringify(manifest, null, 2) + '\n');
-  writeFileSync(join(stage, 'SHA256SUMS.txt'), checksums.join('\n') + '\n');
+  writeFileSync(join(stage, 'SHA256SUMS.txt'), `${checksum}  ${setupName}\n`);
   try {
     renameSync(stage, output);
   } catch (error) {

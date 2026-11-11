@@ -5,6 +5,7 @@ pub mod device_selection;
 pub mod engine;
 pub mod feedback;
 pub mod flex_output;
+pub mod gamepad_bindings;
 #[cfg(windows)]
 pub mod hidmaestro;
 pub mod jsm_import;

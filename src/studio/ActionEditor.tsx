@@ -1,5 +1,6 @@
 import {useEffect,useRef,useState} from 'react';
-import {chordParts,inputLabel,outputLabel,mouseOutputs,wheelOutputs,type Action} from '../types';
+import {chordParts,inputLabel,outputLabel,mouseOutputs,wheelOutputs,type Action,type Profile} from '../types';
+import {triggerPeers} from '../mapping-triggers';
 import type {Capture,CaptureKind} from './ActionMappings';
 import {ActionTriggerFields,InputChordFields,OutputChordFields,inputOpposites} from './BindingFields';
 import {Dialog,Range,Toggle} from './Controls';
@@ -10,14 +11,13 @@ const primaryModifiers=['key:CTRL','key:ALT','key:SHIFT'];
 const inputKeys=[['south','A'],['east','B'],['west','X'],['north','Y'],['left_shoulder','LB'],['right_shoulder','RB'],['left_trigger','LT'],['right_trigger','RT'],['left_trigger_soft','LT 轻拉'],['left_trigger_full','LT 全拉'],['right_trigger_soft','RT 轻拉'],['right_trigger_full','RT 全拉'],['dpad_up','↑'],['dpad_down','↓'],['dpad_left','←'],['dpad_right','→'],['left_stick_click','LS'],['right_stick_click','RS'],['back','View'],['start','Menu'],['guide','Home'],['touchpad','触摸板'],['left_stick_outer','左外圈'],['right_stick_outer','右外圈']];
 const keyboardRows=[['ESC',...Array.from({length:11},(_,i)=>'F'+(i+1))],['GRAVE',...'1234567890','MINUS','EQUALS','BACKSPACE'],['TAB',...'QWERTYUIOP','LEFTBRACKET','RIGHTBRACKET','BACKSLASH'],['CAPSLOCK',...'ASDFGHJKL','SEMICOLON','APOSTROPHE','ENTER'],[...'ZXCVBNM','COMMA','PERIOD','SLASH'],['SPACE','LEFT','UP','DOWN','RIGHT','DELETE']];
 const keyText=(key:string)=>({UP:'↑',DOWN:'↓',LEFT:'←',RIGHT:'→',BACKSPACE:'⌫',ENTER:'↵',DELETE:'Del',CAPSLOCK:'Caps'}[key]??outputLabel('key:'+key));
-const hints={down:'按住输入时持续输出，松开后释放。',short:'松开后确认短按。与长按使用相同时间分界，可分配不同动作。',long:'达到长按时间后触发，可保持到松开或只触发一次。',double:'在时间窗内再次按下时触发，第二次按住期间持续输出。',on_press:'每次按下时输出一次，持续时间由下方设置决定。',on_release:'每次松开时输出一次，持续时间由下方设置决定。'};
 type KeyboardSection='main'|'extended'|'numpad';
 const sectionForOutput=(value:string):KeyboardSection=>{
   const parts=chordParts(value),key=keyboardKeys.find(key=>parts.includes('key:'+key.name)&&!key.modifier)??keyboardKeys.find(key=>parts.includes('key:'+key.name));
   return key?.group==='numpad'?'numpad':key?.group==='navigation'||key?.group==='modifier'&&!primaryModifiers.includes('key:'+key.name)||key?.group==='function'&&Number(key.name.slice(1))>12?'extended':'main';
 };
 
-export function ActionEditor({action,isNew,onChange,onClose,onSubmit,capture,onCapture,onCancelCapture,onAssignEscape,busy,error,layerName,navigation=false}:{action:Action;isNew:boolean;onChange:(patch:Partial<Action>)=>void;onClose:()=>void;onSubmit:()=>void;capture:Capture|null;onCapture:(kind:CaptureKind)=>void;onCancelCapture:()=>void;onAssignEscape:()=>void;busy:boolean;error?:string;layerName?:string;navigation?:boolean}) {
+export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubmit,capture,onCapture,onCancelCapture,onAssignEscape,busy,error,layerName,navigation=false}:{action:Action;isNew:boolean;profile?:Profile;index:number|null;onChange:(patch:Partial<Action>)=>void;onClose:()=>void;onSubmit:()=>void;capture:Capture|null;onCapture:(kind:CaptureKind)=>void;onCancelCapture:()=>void;onAssignEscape:()=>void;busy:boolean;error?:string;layerName?:string;navigation?:boolean}) {
   const [inputCombo,setInputCombo]=useState(chordParts(action.input).length>1);
   const [outputCombo,setOutputCombo]=useState(chordParts(action.output).filter(value=>!modifiers.includes(value)).length>1);
   useEffect(()=>{if(chordParts(action.input).length>1)setInputCombo(true);},[action.input]);
@@ -34,7 +34,7 @@ export function ActionEditor({action,isNew,onChange,onClose,onSubmit,capture,onC
     previousCapture.current=capture?.kind;
   },[capture?.kind,action.output]);
   const input=chordParts(action.input),output=chordParts(action.output),locked=busy||!!capture;
-  const mode=action.trigger??'down',hasWheel=output.some(value=>wheelOutputs.includes(value));
+  const hasWheel=output.some(value=>wheelOutputs.includes(value));
   const analog=input.some(value=>/^(left|right)_trigger$|_stick_(up|down|left|right)$/.test(value));
   const validMs=(value:number|undefined|null,min:number,max:number)=>value==null||Number.isInteger(value)&&value>=min&&value<=max;
   const ready=!!action.name.trim()&&input.length>0&&input.length<=4&&output.length>0&&output.length<=4&&Number.isFinite(action.threshold)&&action.threshold>=0&&action.threshold<1&&validMs(action.trigger_ms,10,5000)&&validMs(action.turbo_ms,20,2000)&&validMs(action.repeat_ms,20,2000);
@@ -61,7 +61,7 @@ export function ActionEditor({action,isNew,onChange,onClose,onSubmit,capture,onC
         </button>
         <fieldset className={styles.manual} disabled={locked}>
           <div className={styles.parts} aria-label="已选手柄输入">{input.map(value=><button type="button" key={value} aria-label={'移除输入 '+inputLabel(value)} onClick={()=>onChange({input:input.filter(part=>part!==value).join('+')})}>{inputLabel(value)} <span aria-hidden="true">×</span></button>)}</div>
-          <div className={styles.sectionHeading}>触发方式</div><ActionTriggerFields action={action} onChange={onChange} showHint={false}/><p className={styles.hint}>{hints[mode]}</p>
+          <div className={styles.sectionHeading}>触发方式</div><ActionTriggerFields action={action} onChange={onChange} peers={triggerPeers(profile,'action',index)}/>
           <Toggle label="组合输入" value={inputCombo} onChange={setInputCombo}/>
           <div className={styles.inputKeys}>{inputKeys.map(([value,label])=><button type="button" key={value} aria-label={'选择输入 '+inputLabel(value)} title={inputLabel(value)} aria-pressed={input.includes(value)} disabled={inputCombo&&!input.includes(value)&&(input.length>=4||input.some(part=>inputOpposites[part]===value))} onClick={()=>chooseInput(value)}>{label}</button>)}</div>
           <details className={styles.advanced} open={input.some(value=>!inputKeys.some(([key])=>key===value))||input.length===0}>

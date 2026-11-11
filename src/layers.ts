@@ -26,7 +26,7 @@ export function updateLayer(base:Profile,id:string,change:(profile:Profile)=>voi
   const layer=base.layers?.find(layer=>layer.id===id);
   if(!layer){change(base);return;}
   const before=editingProfile(base,id),after=structuredClone(before);change(after);
-  for(const key of ['gyro','input','feedback','touchpad','stick_mouse','stick_deadzone','stick_zones','stick_rebound_ms'] as const) {
+  for(const key of ['gyro','gamepad_bindings','input','feedback','touchpad','stick_mouse','stick_deadzone','stick_zones','stick_rebound_ms'] as const) {
     const delta=difference(before[key],after[key]);if(delta!==undefined) {
       if(object(delta)&&object(layer.settings[key]))mergePatch(layer.settings[key] as Record<string,unknown>,delta);
       else layer.settings[key]=delta;

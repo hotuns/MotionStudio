@@ -30,7 +30,7 @@ pub use area_mapper::*;
 pub(crate) use automap_curve::*;
 pub(crate) use gyro3dof::*;
 pub(crate) use jsm::*;
-pub use jsm::{JsmAnalogSettings, JsmTriggerMode, JsmTriggerStages, JSM_TRIGGER_REST};
+pub use jsm::{jsm_stick_directions, JsmAnalogSettings, JsmTriggerMode, JsmTriggerStages, JSM_TRIGGER_REST};
 // Read by the UI to compile the config text it is showing.
 pub use jsm::{jsm_at_names, jsm_at_name_spans, jsm_bindings, jsm_catalogue, jsm_compile, jsm_compile_full, jsm_fi_tag,
     jsm_input_names_by_pin,

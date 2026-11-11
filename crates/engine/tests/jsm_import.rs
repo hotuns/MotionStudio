@@ -14,7 +14,7 @@ fn convert(text: &str) -> motion_core::jsm_import::JsmImport {
 fn imported_flick_uses_jsm_release_curve_and_retains_its_duration() {
     let p = convert("GYRO_SENS=2\nRIGHT_STICK_MODE=FLICK\nFLICK_TIME=0.15");
     assert!(p.profile.gyro.motion.flick.enabled);
-    assert_eq!(p.profile.gyro.motion.flick.release_ease, 1.);
+    assert_eq!(p.profile.gyro.motion.flick.release_ease, 0.5);
     assert_eq!(p.profile.gyro.motion.flick.smooth_ms, 150.);
 }
 
@@ -24,6 +24,34 @@ fn per_side_stick_deadzone_commands_feed_native_source_settings() {
     assert_eq!(p.profile.input.deadzone_left, Some(0.18));
     assert_eq!(p.profile.input.deadzone_right, Some(0.23));
     assert_eq!(p.skipped, 0);
+}
+
+#[test]
+fn no_mouse_direction_import_uses_native_overlap_after_input_deadzone() {
+    let report =
+        convert("LEFT_STICK_MODE=NO_MOUSE\nLEFT_STICK_DEADZONE_INNER=0.2\nLUP=W\nLRIGHT=D");
+    assert_eq!(
+        report.profile.input.lstick_directions,
+        motion_core::controller_input::StickDirections::EightWay
+    );
+    assert!(report
+        .profile
+        .actions
+        .iter()
+        .all(|action| action.threshold == 0.));
+    let mut engine = Engine::new(report.profile).unwrap();
+    for (index, value) in [(0, 14000), (1, -14000)] {
+        engine.process(&InputEvent::Axis {
+            time: SampleTime {
+                host_ns: 1,
+                sensor_ns: 1,
+            },
+            index,
+            value,
+        });
+    }
+    assert!(engine.frame.held.contains("key:W"));
+    assert!(engine.frame.held.contains("key:D"));
 }
 #[test]
 fn basic_buttons_wheel_side_buttons_and_studio_names_migrate() {

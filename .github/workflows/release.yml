@@ -24,7 +24,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: node scripts/package-update.mjs --check-tag
       - run: npm ci
-      - name: Build and sign Windows packages
+      - name: Build and sign the Windows installer
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -32,8 +32,9 @@ jobs:
           if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Configure the TAURI_SIGNING_PRIVATE_KEY repository secret first.' }
           npm run build -- --ci --bundles nsis --config src-tauri/tauri.release.conf.json -- --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npm run package:update
-      - name: Verify both signed packages without installing them
+      - name: Prepare installer release assets
+        run: npm run package:update
+      - name: Verify the signed installer without installing it
         run: cargo test --locked --release -p motion-studio updates::tests::signed_release_packages -- --ignored
       - name: Create a draft GitHub release
         env:

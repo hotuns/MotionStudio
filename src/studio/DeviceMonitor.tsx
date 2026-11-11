@@ -56,7 +56,8 @@ export function DeviceMonitor({ device, status }: { device: Device; status?: Sta
   const pressed = buttonNames.filter((_, index) => status?.buttons[index]);
   const accel = status?.motion.accel_fresh ? status.motion.quantities : undefined;
   const planar = <Controller device={device} status={status} />;
-  const mode = status?.ui_navigation ? '手柄操作界面' : status?.state === 'calibrating' ? '正在校准…'
+  const mode = status?.state === 'capturing' || status?.state === 'capture_release' ? status.message || '正在录入按键'
+    : status?.ui_navigation ? '手柄操作界面' : status?.state === 'calibrating' ? '正在校准…'
     : status?.emitting ? '映射运行中' : status?.state === 'idle' ? '手柄已连接 · 映射已停止'
     : status?.state === 'preparing_output' ? '正在准备输出'
     : status ? '正在观察输入' : '开始观察后显示实时输入。';

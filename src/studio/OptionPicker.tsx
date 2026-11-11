@@ -2,7 +2,7 @@ import {useId, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
 import {t} from '../i18n';
 import {Dialog} from './Controls';
-import {StudioIcon} from './StudioIcon';
+import {StudioIcon, type StudioIconName} from './StudioIcon';
 import styles from './OptionPicker.module.css';
 
 export type PickerOption = {
@@ -24,10 +24,13 @@ type OptionListProps = {
   searchLabel?: string;
   searchPlaceholder?: string;
   emptyMessage?: string;
+  layout?: 'grid' | 'list';
+  icon?: StudioIconName;
+  selectedLabel?: string;
 };
 
 export function OptionList({value, groups, onChoose, onClose, searchLabel = '搜索选项',
-  searchPlaceholder = '搜索名称或按键', emptyMessage = '没有匹配的选项。'}: OptionListProps) {
+  searchPlaceholder = '搜索名称或按键', emptyMessage = '没有匹配的选项。', layout = 'grid', icon, selectedLabel}: OptionListProps) {
   const [query, setQuery] = useState('');
   const results = useRef<HTMLDivElement>(null);
   const gamepad = document.documentElement.dataset.gamepad === 'on';
@@ -59,11 +62,16 @@ export function OptionList({value, groups, onChoose, onClose, searchLabel = '搜
     <div ref={results} className={styles.results}>
       {matches.map((group, index) => <section key={index} aria-label={group.label}>
         {group.label && <h3>{group.label}</h3>}
-        <div className={styles.options}>
+        <div className={[styles.options, layout === 'list' ? styles.listOptions : ''].filter(Boolean).join(' ')}>
           {group.options.map(option => <button type="button" className="secondary-btn" key={option.value}
             aria-pressed={option.value === value} autoFocus={gamepad && option.value === value && !option.disabled}
             disabled={option.disabled} onClick={() => onChoose(option.value)}>
-            <span translate="no">{display(option)}</span>
+            {layout === 'list' && icon && <span className={styles.optionIcon}><StudioIcon name={icon} size={18}/></span>}
+            <span className={layout === 'list' ? styles.optionName : undefined} title={display(option)} translate="no">{display(option)}</span>
+            {layout === 'list' && option.value === value && <>
+              {selectedLabel && <span className={styles.selectedLabel}>{selectedLabel}</span>}
+              <StudioIcon name="check" size={17}/>
+            </>}
           </button>)}
         </div>
       </section>)}

@@ -1,7 +1,7 @@
 import {useState} from 'react';
 import {Dialog, Range, Toggle} from './Controls';
 import {inputConfig, inputDeadzone, setInputDeadzone} from '../controller-input';
-import type {ControllerInputConfig, Profile} from '../types';
+import type {ControllerInputConfig, Profile, StickDirections} from '../types';
 import native from '../native-input-defaults.json';
 import styles from './MotionControls.module.css';
 
@@ -20,6 +20,16 @@ export function StickInputSettings({profile, update}: Props) {
         onChange={v=>update(p=>setInputDeadzone(p,'right',v))}/>
     </div>
     <p className={styles.hint}>摇杆鼠标、Flick Stick、方向映射和虚拟摇杆共用这里的输入死区。</p>
+    <div className={styles.groupHeading}><h3>摇杆方向映射</h3></div>
+    <div className={styles.grid}>{(['lstick_directions','rstick_directions'] as const).map((key,index)=>
+      <label className="studio-field" key={key}>{index===0?'左摇杆方向判定':'右摇杆方向判定'}
+        <select value={c[key]??'axis_threshold'} onChange={event=>update(p=>{p.input={...inputConfig(p),[key]:event.target.value as StickDirections};})}>
+          <option value="eight_way">八向重叠（适合 WASD）</option>
+          <option value="axis_threshold">按轴阈值</option>
+        </select>
+      </label>
+    )}</div>
+    <p className={styles.hint}>八向重叠：斜推同时触发相邻两键，例如 W+D；映射阈值按摇杆整体推离中心的幅度判断。按轴阈值：水平和垂直方向分别达到阈值才触发。</p>
     <details>
       <summary>高级摇杆校准</summary>
       <p className={styles.hint}>中心偏移使用右为正、上为正的坐标。补偿随当前配置保存。</p>

@@ -9,10 +9,17 @@ pub fn ease_out_quad(progress: f32) -> f32 {
     1.0 - (1.0 - progress) * (1.0 - progress)
 }
 
-/// Blend linear release with JSM's easing for the RWS Flick and its preview.
+pub const MAX_FLICK_RELEASE_EASE: f32 = 1.0;
+
+/// Normalized strength: 0 is linear, 0.5 is JSM quadratic, and 1 is cubic ease-out.
 pub fn flick_release_progress(progress: f32, strength: f32) -> f32 {
     let progress = progress.clamp(0.0, 1.0);
-    progress + (ease_out_quad(progress) - progress) * strength.clamp(0.0, 1.0)
+    let strength = strength.clamp(0.0, MAX_FLICK_RELEASE_EASE) * 2.0;
+    if strength <= 1.0 {
+        progress + (ease_out_quad(progress) - progress) * strength
+    } else {
+        1.0 - (1.0 - progress).powf(1.0 + strength)
+    }
 }
 
 pub fn sample_curve(pts: &[[f32; 2]], x: f32, biases: &[f32]) -> f32 {

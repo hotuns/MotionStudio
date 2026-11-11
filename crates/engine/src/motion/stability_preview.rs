@@ -11,7 +11,12 @@ use std::sync::OnceLock;
 type Point = [f32; 3];
 
 pub fn flick_release(strength: f32) -> Result<Vec<Point>> {
-    crate::motion_config::range("Flick 缓出强度", strength, 0., 1.)?;
+    crate::motion_config::range(
+        "Flick 缓出强度",
+        strength,
+        0.,
+        flexinput_engine::eval::MAX_FLICK_RELEASE_EASE,
+    )?;
     Ok((0..=100)
         .map(|index| {
             let progress = index as f32 / 100.;

@@ -18,6 +18,7 @@ fn profile() -> Profile {
         schema_version: 1,
         name: "test".into(),
         virtual_gamepad: GamepadTarget::None,
+        gamepad_bindings: None,
         stick_deadzone: 0.0,
         input: Default::default(),
         feedback: Default::default(),
@@ -170,6 +171,7 @@ fn binding(input: &str, output: &str) -> Action {
         trigger_ms: 250,
         sustain: true,
         turbo_ms: None,
+        allow_simultaneous: false,
     }
 }
 

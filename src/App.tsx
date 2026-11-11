@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { StudioShell, type StudioPage } from './studio/StudioShell';
 import { StudioOverview } from './studio/StudioOverview';
+import type { GuideStep } from './studio/QuickStartGuide';
 import { GameProfilesPage } from './studio/GameProfilesPage';
 import { BatchBindings, addedDraftActions, emptyBatchProgress, type BatchProgress, type BatchScope, type BindingWindowState } from './studio/BatchBindings';
 import type { Capture, CaptureKind } from './studio/ActionMappings';
@@ -40,7 +41,7 @@ const templates = [
   ['blank', '空白配置', '从头添加自己的动作'],
   ['keyboard', '键鼠与体感', '左摇杆 WASD，扳机瞄准开火'],
   ['gyro', '只使用体感', '按住左扳机控制鼠标视角'],
-  ['gamepad', '虚拟手柄', '标准按键和摇杆自动映射'],
+  ['gamepad', '虚拟手柄', '预填标准按键、摇杆和扳机'],
   ['gyro-gamepad', '手柄与体感', '按住左扳机，将体感输出到右摇杆'],
   ['cursor', '光标操作', '左摇杆移动，A 确认，B 右键'],
 ] as const;
@@ -51,10 +52,12 @@ type GyroCapture = GyroBindingRecording & {kind:'pad'; index:null; deviceId:numb
 type ActiveCapture = Capture | GyroCapture;
 type CaptureRequest = Capture | Pick<GyroCapture,'kind'|'index'|'gyroField'>;
 
-const uniqueGyroPath = (devices: Snapshot['devices']) => {
-  const candidates = devices.filter(device => device.origin === 'physical' && device.path && device.gamepad && device.gyro && !device.open_error);
-  return candidates.length === 1 ? candidates[0].path : '';
-};
+function suggestedDevicePath(devices: Snapshot['devices']) {
+  const physical = devices.filter(device => device.origin === 'physical' && device.path && device.gamepad && !device.open_error);
+  if (physical.length === 1) return physical[0].path;
+  const gyro = physical.filter(device => device.gyro);
+  return gyro.length === 1 ? gyro[0].path : '';
+}
 
 function batchScope(entry: Entry, layerId: string): BatchScope {
   const actions = editingProfile(entry.profile,layerId).actions;
@@ -80,6 +83,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [draft, setDraft] = useState<Entry | null>(null);
   const [page, setPage] = useState<StudioPage>('overview');
+  const [guideStep, setGuideStep] = useState<GuideStep>('input');
   const [revealDeviceCalibration, setRevealDeviceCalibration] = useState(false);
   const [gameTab, setGameTab] = useState<GameTab>('actions');
   const [editingLayer,setEditingLayer]=useState('');
@@ -175,7 +179,7 @@ export default function App() {
     const remembered = data.settings.device_path;
     const unusable = remembered.toLowerCase().startsWith('xinput#') ||
       data.snapshot.devices.some(device => device.path === remembered && device.origin === 'virtual');
-    setDevicePath(previous => previous || (!unusable && remembered) || uniqueGyroPath(data.snapshot.devices));
+    setDevicePath(previous => previous || (!unusable && remembered) || suggestedDevicePath(data.snapshot.devices));
   }, []);
 
   async function run(task: () => Promise<unknown>, message?: string) {
@@ -240,7 +244,7 @@ export default function App() {
         const data = await invoke<Snapshot>('snapshot');
         if (!disposed&&epoch===snapshotEpoch.current) {
           setSnapshot(data);
-          setDevicePath(path => path || uniqueGyroPath(data.devices));
+          setDevicePath(path => path || suggestedDevicePath(data.devices));
         }
       } catch {
         // The Tauri supervisor reports connection state when it becomes available.
@@ -578,7 +582,7 @@ export default function App() {
     void run(async()=>{
       const id = await invoke<string>('open_binding_window',{
         scope,progress,split:(device?.touchpads ?? 0)>=2,
-        theme:document.documentElement.dataset.theme??'light',
+        theme:document.documentElement.dataset.theme==='light'?'light':'dark',
       });
       setBindingWindowId(id);
     });
@@ -725,11 +729,12 @@ export default function App() {
 
   return <>
     <StudioShell page={page} gameTab={gameTab} onNavigate={navigate} onGameTab={tab=>navigate('games',tab)}
+      controllerNavigation={<GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||!!status?.motion?.measuring}
+        canSave={canSave} canPlay={canObserve&&!locked&&!needsBindings}
+        onSave={()=>{if(dirty&&!locked)void run(saveDraft);}} onPlay={()=>void run(()=>startMapping(true))} onDisable={disableGamepad}/>}
       profiles={entries.map(entry => ({ id: entry.id, name: entry.id === draft?.id ? draft.profile.name : entry.profile.name }))}
       profileId={draft?.id ?? ''} onSelectProfile={id => { const entry = entries.find(item => item.id === id); if (entry) selectProfile(entry); }}
       onChooseCommunity={community => setSharedImport({community})}
-      layerControls={draft&&<LayerToolbar key={draft.id} profile={draft.profile} profileId={draft.id} selected={editingLayer} onSelect={setEditingLayer}
-        blocked={locked||!!capture||!!editor||!!batch||!!status?.motion?.measuring} status={status} onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
       onNewProfile={() => openCreate()} onOpenFolder={() => openLocation('profiles')} onHelp={() => setHelp(true)}
       onImportJsm={openJsmImport} onGamepad={()=>status?.ui_navigation?disableGamepad():enableGamepad()}
       gamepadOn={!!status?.ui_navigation} gamepadAvailable={!!devicePath&&!!snapshot?.engine_ready}
@@ -749,12 +754,16 @@ export default function App() {
       {workspace?.warnings.map((warning, index) => <div className="studio-note studio-error" key={index}>{warning}</div>)}
       {(status?.reload_error || snapshot?.policy_error) && <div className="studio-note studio-error" role="alert">{status?.reload_error || snapshot?.policy_error}</div>}
 
-      {page === 'overview' && <StudioOverview profile={profile} status={status} device={device} deviceCount={deviceCount} onNavigate={navigate} />}
+      {page === 'overview' && <StudioOverview profile={draft?.profile} status={status} device={device} deviceCount={deviceCount}
+        guideStep={guideStep} onGuideStepChange={setGuideStep} onNavigate={navigate} />}
       {!native && <p className="studio-note">请在 Motion Studio 桌面应用中连接引擎和设备。</p>}
       {native && !workspace && page !== 'overview' && <p className="studio-note">正在打开工作区… <button type="button" className="secondary-btn" onClick={() => void run(() => refresh())}>重试</button></p>}
 
       {page === 'games' && workspace && (profile && draft
-        ? <GameProfilesPage key={draft.id+':'+editingLayer} layerMode={!!editingLayer} tab={gameTab} profile={profile} device={device} status={status}
+        ? <GameProfilesPage key={draft.id} editingLayerKey={editingLayer} layerMode={!!editingLayer} tab={gameTab} profile={profile} device={device} status={status}
+            layerControls={<LayerToolbar key={draft.id} profile={draft.profile} profileId={draft.id} selected={editingLayer} onSelect={setEditingLayer}
+              blocked={locked||!!capture||!!editor||!!batch||!!status?.motion?.measuring} status={status}
+              onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
             blocked={locked} capture={actionRecording} onCapture={startCapture} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
             onUpdate={update} onEdit={openEditor} onBatch={openBatch} onTab={tab=>navigate('games',tab)}
             onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={openJsmImport}
@@ -765,7 +774,7 @@ export default function App() {
               onOpenDevice={()=>navigate('controllerStatus','actions',true)} onPreviewOutput={()=>navigate('controllerStatus')} status={status}
               canMeasure={!!status?.emitting&&!!status.device?.gyro&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
               onOpenCalibration={()=>void run(()=>invoke('open_calibration_window',{
-                profileId:draft.id,theme:document.documentElement.dataset.theme??'light',
+                profileId:draft.id,theme:document.documentElement.dataset.theme==='light'?'light':'dark',
               }))}
               onMotionAction={motionAction}/>}
             onExport={() => void run(() => exportProfile(draft))} onOpenFolder={() => openLocation('profiles')} onNavigate={navigate} />
@@ -815,6 +824,8 @@ export default function App() {
         backend={workspace.settings.output_backend ?? 'hid_maestro'} outputActive={active}
         mouseDisplaySync={workspace.settings.mouse_display_sync ?? false}
         onMouseDisplaySync={enabled => void run(() => changeSettings({mouse_display_sync: enabled}), '输出显示同步已保存，下次开始映射时生效')}
+        ioRates={workspace.settings.io_rates ?? {polling_hz: 500, output_hz: 500}}
+        onIoRates={io_rates => void run(() => changeSettings({io_rates}), '输入与输出频率已保存')}
         gamepadBackend={workspace.settings.gamepad_backend??'vigem'}
         onGamepadBackend={backend=>void run(()=>changeSettings({gamepad_backend:backend}),'虚拟手柄后端已保存，下次开始映射时生效')}
         autoHide={workspace.settings.auto_hide !== false}
@@ -832,8 +843,6 @@ export default function App() {
         onDiagnostics={() => void run(exportDiagnostics)} onDevices={() => navigate('controllerStatus')} />}
     </StudioShell>
 
-    <GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||!!status?.motion?.measuring} canSave={canSave} canPlay={canObserve&&!locked&&!needsBindings}
-      onSave={()=>{if(dirty&&!locked)void run(saveDraft);}} onPlay={()=>void run(()=>startMapping(true))} onDisable={disableGamepad}/>
     {importingJsm&&<ImportJsm onClose={()=>setImportingJsm(false)} onImported={async entry=>{
       await refresh(entry.id);
       setImportingJsm(false);
@@ -882,7 +891,7 @@ export default function App() {
           captureLease={!!status?.binding_capture} split={(device?.touchpads ?? 0)>=2}
           error={dialogError} onOpenWindow={progress=>openBatchWindow(batch,progress)}
           onClose={closeBatch} onKeep={keepBatch}/>)}
-    {editor && <ActionEditor key={editingLayer+':'+String(editor.index)} action={editor.action} isNew={editor.index===null}
+    {editor && <ActionEditor key={editingLayer+':'+String(editor.index)} action={editor.action} isNew={editor.index===null} profile={profile} index={editor.index}
       onChange={updateEditor} onClose={closeEditor} onSubmit={finishEditing} error={dialogError} busy={busy}
       capture={actionRecording} onCapture={kind=>startCapture(kind,null)} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
       layerName={draft?.profile.layers?.find(layer=>layer.id===editingLayer)?.name} navigation={!!status?.ui_navigation}/>}
@@ -916,7 +925,7 @@ export default function App() {
         <div><dt><kbd>F12</kbd></dt><dd>停止映射并释放输出</dd></div>
         <div><dt><kbd>方向 / 左摇杆</kbd></dt><dd>移动界面焦点；右摇杆滚动页面</dd></div>
         <div><dt><kbd>A / B</kbd></dt><dd>确认或编辑／返回或取消调整</dd></div>
-        <div><dt><kbd>LB / RB</kbd></dt><dd>切换侧栏、内容、工具栏和底部操作区域</dd></div>
+        <div><dt><kbd>LB / RB</kbd></dt><dd>切换工具栏、内容和底部操作区域</dd></div>
         <div><dt><kbd>X / Y / Menu</kbd></dt><dd>编辑当前控件／保存配置／手柄快捷操作</dd></div>
         <div><dt><kbd>View + Menu</kbd></dt><dd>窗口前台暂停映射并切回界面；手柄界面录入时取消录入</dd></div>
       </dl>

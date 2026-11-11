@@ -1,16 +1,17 @@
 use crate::profile::{
-    input_pin, GamepadTarget, GyroActivationMode, GyroOutput, Profile, StickRegion, StickZones,
-    AXES, BUTTON_PINS, DIRECTIONS, PAD_PINS, ZONES,
+    input_pin, Action, GamepadTarget, GyroActivationMode, GyroOutput, Profile, StickRegion,
+    StickZones, Trigger, AXES, BUTTON_PINS, DIRECTIONS, PAD_PINS, ZONES,
 };
 use crate::timing::{SampleClock, SampleTime, MAX_GAP_NS};
 use crate::{
+    gamepad_bindings as pad_binding,
     motion::{self, GameAngleMeasurement, MotionRuntime},
     motion_config::*,
 };
 use anyhow::{bail, Result};
 use flexinput_core::{imu::BUS_GYRO_DPS, PinMapExt, SigMap, Signal};
 use flexinput_engine::{
-    eval::{sample_curve, TickOutput},
+    eval::{sample_curve, PressCompetition, TickOutput},
     eval_graph_tick,
     graph::SinkTarget,
     NodeSnap, NodeState, ProcessingGraph,
@@ -218,7 +219,99 @@ impl GraphRunner {
     }
 }
 
-fn controls(profile: &Profile) -> GraphRunner {
+fn button_condition(
+    nodes: &mut Vec<NodeSnap>,
+    pins: &[String],
+    inputs: &[&str],
+    threshold: f32,
+) -> usize {
+    let constant = nodes.len();
+    let mut n = node(constant, "module.constant", 1);
+    n.params.insert("value".into(), json!(threshold));
+    nodes.push(n);
+    let mut condition = None;
+    for &input in inputs {
+        let pin = input_pin(input).expect("validated input");
+        let index = pins.iter().position(|p| p == pin).expect("source pin");
+        let compare = nodes.len();
+        let mut n = node(compare, "logic.greater_than", 1);
+        n.input_sources = vec![Some((0, index)), Some((constant, 0))];
+        nodes.push(n);
+        condition = Some(if let Some(previous) = condition {
+            let and = nodes.len();
+            let mut n = node(and, "logic.and", 1);
+            n.input_sources = vec![Some((previous, 0)), Some((compare, 0))];
+            nodes.push(n);
+            and
+        } else {
+            compare
+        });
+    }
+    condition.expect("validated chord")
+}
+
+fn mapped_actions(profile: &Profile) -> Vec<Action> {
+    let mut actions = profile.actions.clone();
+    if profile.virtual_gamepad != GamepadTarget::None {
+        actions.extend(
+            profile
+                .gamepad_bindings
+                .iter()
+                .flatten()
+                .filter(|binding| !binding.is_analog())
+                .filter(|binding| {
+                    binding.output != "touchpad"
+                        || profile.virtual_gamepad == GamepadTarget::DualShock4
+                })
+                .map(|binding| binding.action()),
+        );
+    }
+    actions
+}
+
+fn action_condition(action: &Action) -> Vec<&str> {
+    let mut chord = crate::bindings::input_chord(&action.input).expect("validated chord");
+    chord.sort_unstable();
+    chord
+}
+
+fn analog_condition(chord: &[&str]) -> bool {
+    chord
+        .iter()
+        .any(|pin| AXES.contains(pin) || DIRECTIONS.contains(pin))
+}
+
+fn same_competitors(action: &Action, old: &[Action], new: &[Action]) -> bool {
+    if action.allow_simultaneous {
+        return true;
+    }
+    let chord = action_condition(action);
+    let analog = analog_condition(&chord);
+    let peer = |other: &&Action| {
+        !other.allow_simultaneous
+            && matches!(
+                other.trigger,
+                Trigger::Short | Trigger::Long | Trigger::Double
+            )
+            && (!analog || action.threshold == other.threshold)
+            && action_condition(other) == chord
+    };
+    let old: Vec<_> = old.iter().filter(peer).collect();
+    let mut new: Vec<_> = new.iter().filter(peer).collect();
+    // Reordering rows preserves progress; changing a timed command cancels
+    // the whole pending decision, even if its recognition window is unchanged.
+    old.len() == new.len()
+        && old.into_iter().all(|action| {
+            if let Some(index) = new.iter().position(|other| *other == action) {
+                new.swap_remove(index);
+                true
+            } else {
+                false
+            }
+        })
+}
+
+fn controls(profile: &Profile, actions: &[Action]) -> (GraphRunner, Vec<PressCompetition>) {
     let pins: Vec<String> = BUTTON_PINS
         .iter()
         .chain(AXES)
@@ -229,40 +322,47 @@ fn controls(profile: &Profile) -> GraphRunner {
         .map(|p| p.to_string())
         .collect();
     let mut nodes = vec![source(pins.clone(), 0.)];
-    let chords: Vec<_> = profile
-        .actions
+    let chords: Vec<_> = actions.iter().map(action_condition).collect();
+    let competitions = actions
         .iter()
-        .map(|a| crate::bindings::input_chord(&a.input).expect("validated chord"))
+        .zip(&chords)
+        .map(|(action, chord)| {
+            let analog = analog_condition(chord);
+            let mut competition = PressCompetition::default();
+            for (other, _) in actions.iter().zip(&chords).filter(|(other, inputs)| {
+                *inputs == chord
+                    && (!analog || action.threshold == other.threshold)
+                    && (std::ptr::eq(action, *other)
+                        || (!action.allow_simultaneous && !other.allow_simultaneous))
+            }) {
+                let ms = other.trigger_ms;
+                match other.trigger {
+                    Trigger::Short => {
+                        competition.short_ms =
+                            Some(competition.short_ms.map_or(ms, |old| old.max(ms)))
+                    }
+                    Trigger::Long => {
+                        competition.long_ms =
+                            Some(competition.long_ms.map_or(ms, |old| old.min(ms)))
+                    }
+                    Trigger::Double => {
+                        competition.double_ms =
+                            Some(competition.double_ms.map_or(ms, |old| old.max(ms)))
+                    }
+                    _ => {}
+                }
+            }
+            competition
+        })
         .collect();
-    let mut conditions = vec![];
-    for action in &profile.actions {
-        let constant = nodes.len();
-        let mut n = node(constant, "module.constant", 1);
-        n.params.insert("value".into(), json!(action.threshold));
-        nodes.push(n);
-        let mut condition = None;
-        for input in crate::bindings::input_chord(&action.input).unwrap() {
-            let pin = input_pin(input).unwrap();
-            let index = pins.iter().position(|p| p == pin).unwrap();
-            let compare = nodes.len();
-            let mut n = node(compare, "logic.greater_than", 1);
-            n.input_sources = vec![Some((0, index)), Some((constant, 0))];
-            nodes.push(n);
-            condition = Some(if let Some(previous) = condition {
-                let and = nodes.len();
-                let mut n = node(and, "logic.and", 1);
-                n.input_sources = vec![Some((previous, 0)), Some((compare, 0))];
-                nodes.push(n);
-                and
-            } else {
-                compare
-            });
-        }
-        conditions.push(condition.unwrap());
-    }
+    let conditions: Vec<_> = actions
+        .iter()
+        .zip(&chords)
+        .map(|(action, inputs)| button_condition(&mut nodes, &pins, inputs, action.threshold))
+        .collect();
     let mut action_pins = vec![];
     let mut action_sources = vec![];
-    for (i, _action) in profile.actions.iter().enumerate() {
+    for (i, _action) in actions.iter().enumerate() {
         let mut supersets = None;
         for (other, c) in chords.iter().enumerate() {
             if c.len() > chords[i].len() && chords[i].iter().all(|v| c.contains(v)) {
@@ -309,16 +409,55 @@ fn controls(profile: &Profile) -> GraphRunner {
             pad_pins.push("btn_touchpad".into());
             pad_pins.extend(["btn_lt_dig".into(), "btn_rt_dig".into()]);
         }
+        let mut sources = vec![Vec::new(); pad_pins.len()];
+        let source_pin = |name: &str| {
+            (
+                0,
+                pins.iter().position(|pin| pin == name).expect("source pin"),
+            )
+        };
+        let mut wire = |output: &str, source| {
+            if let Some(index) = pad_pins.iter().position(|pin| pin == output) {
+                sources[index].push(source);
+            }
+        };
+        for binding in profile
+            .gamepad_bindings
+            .iter()
+            .flatten()
+            .filter(|binding| binding.is_analog())
+        {
+            let input = binding.input.trim();
+            let output = binding.output.as_str();
+            if let Some(output_stick) = pad_binding::stick(output) {
+                let input_stick = pad_binding::stick(input).expect("validated stick binding");
+                for (input, output) in pad_binding::stick_pins(input_stick)
+                    .into_iter()
+                    .zip(pad_binding::stick_pins(output_stick))
+                {
+                    wire(output, source_pin(input));
+                }
+                continue;
+            }
+            let output_pin = pad_binding::output_pin(output).expect("validated analog trigger");
+            let output_trigger = pad_binding::trigger_button(output);
+            let from = source_pin(input_pin(input).expect("validated analog trigger"));
+            wire(output_pin, from);
+            if let Some(digital) = output_trigger {
+                // The DS4 digital bit uses the same calibrated signal as its travel.
+                wire(digital, from);
+            }
+        }
         let mut n = node(nodes.len(), "device.sink", 0);
         n.sink_target = Some(SinkTarget {
             device_id: PAD.into(),
             pin_ids: pad_pins,
-            automap_source: Some((SOURCE.into(), pins)),
+            multi_sources: sources,
             ..Default::default()
         });
         nodes.push(n);
     }
-    GraphRunner::new(nodes)
+    (GraphRunner::new(nodes), competitions)
 }
 
 fn gyro_graph(profile: &Profile) -> GraphRunner {
@@ -390,7 +529,9 @@ pub struct Engine {
     motion_held: BTreeSet<String>,
     motion_pad: Vec<(String, f32)>,
     controls_held: BTreeSet<String>,
+    mapped_actions: Vec<Action>,
     action_states: Vec<ActionState>,
+    action_time_ns: u64,
     rotated_stick: Option<(Stick, Vec2)>,
     flick: GraphRunner,
     flick_stick: Vec2,
@@ -417,6 +558,7 @@ struct ActionState {
     repeat_armed: bool,
     elapsed: f32,
     gate: flexinput_engine::eval::PressGate,
+    competition: PressCompetition,
     blocked: bool,
     pending_scroll: [i32; 2],
 }
@@ -448,6 +590,7 @@ fn flick_graph(profile: &Profile) -> GraphRunner {
             "stick_out_dps".into(),
             json!(profile.gyro.stick_full_scale_dps),
         ),
+        // Use the Flick pin as a relative-angle source for the shared output.
         ("flick_output".into(), json!("mouse")),
         ("_rws_flick_out_wired".into(), json!(f.enabled)),
         ("stick_aim_enabled".into(), json!(f.stick_aim)),
@@ -513,7 +656,8 @@ fn stick_mouse_graph(profile: &Profile) -> GraphRunner {
     GraphRunner::new(vec![src, curve, rate, sink])
 }
 impl Engine {
-    pub fn new(profile: Profile) -> Result<Self> {
+    pub fn new(mut profile: Profile) -> Result<Self> {
+        profile.materialize_gamepad_bindings();
         profile.validate()?;
         let mut signals = SigMap::default();
         for pin in BUTTON_PINS {
@@ -526,16 +670,24 @@ impl Engine {
             signals.set_pin(SOURCE, stick, Signal::Vec2(Vec2::ZERO));
         }
         let raw_signals = signals.clone();
+        let mapped_actions = mapped_actions(&profile);
+        let (controls, competitions) = controls(&profile, &mapped_actions);
         let mut this = Self {
             input: NativeInput::new(&profile),
             base_input: NativeInput::new(&profile),
             stick_mouse_graph: stick_mouse_graph(&profile),
             touchpad: crate::touchpad::NativeTouchpad::new(profile.touchpad.clone()),
             raw_signals,
-            controls: controls(&profile),
-            action_states: (0..profile.actions.len())
-                .map(|_| ActionState::default())
+            controls,
+            mapped_actions,
+            action_states: competitions
+                .into_iter()
+                .map(|competition| ActionState {
+                    competition,
+                    ..Default::default()
+                })
                 .collect(),
+            action_time_ns: 0,
             gyro: gyro_graph(&profile),
             motion: MotionRuntime::new(&profile.gyro)?,
             sensor_calibration: SensorCalibration::default(),
@@ -581,7 +733,7 @@ impl Engine {
             }),
         };
         this.refresh_sticks(0., false);
-        this.eval_controls(false, 0.0);
+        this.eval_controls(false, 0);
         Ok(this)
     }
     pub fn graph_node_count(&self) -> usize {
@@ -589,7 +741,8 @@ impl Engine {
     }
     /// Layer changes keep the sample clock, input bus, untouched activators,
     /// pending turns and motion filters. The caller keeps the same dispatcher.
-    pub fn apply_layer(&mut self, profile: Profile) -> Result<()> {
+    pub fn apply_layer(&mut self, mut profile: Profile) -> Result<()> {
+        profile.materialize_gamepad_bindings();
         profile.validate()?;
         let touch_changed = profile.touchpad != self.profile.touchpad;
         if profile.virtual_gamepad != self.profile.virtual_gamepad {
@@ -611,17 +764,52 @@ impl Engine {
         {
             self.stick_mouse_graph = stick_mouse_graph(&profile);
         }
+        let directions_changed = [
+            profile.input.lstick_directions != self.profile.input.lstick_directions,
+            profile.input.rstick_directions != self.profile.input.rstick_directions,
+        ];
         let controls_changed = profile.actions != self.profile.actions
-            || profile.stick_deadzone != self.profile.stick_deadzone;
+            || profile.stick_deadzone != self.profile.stick_deadzone
+            || profile.gamepad_bindings != self.profile.gamepad_bindings
+            || directions_changed.iter().any(|changed| *changed);
         if controls_changed {
-            let mut old_states = std::mem::take(&mut self.action_states);
+            let actions = mapped_actions(&profile);
+            let (controls, competitions) = controls(&profile, &actions);
+            let mut old_states: Vec<_> = std::mem::take(&mut self.action_states)
+                .into_iter()
+                .map(Some)
+                .collect();
             self.frame.scroll = [0; 2];
-            self.action_states = profile
-                .actions
+            self.action_states = actions
                 .iter()
-                .map(|action| {
-                    if let Some(index) = self.profile.actions.iter().position(|old| old == action) {
-                        let state = std::mem::take(&mut old_states[index]);
+                .zip(competitions)
+                .map(|(action, competition)| {
+                    let previous = self
+                        .mapped_actions
+                        .iter()
+                        .enumerate()
+                        .find(|(i, old)| *old == action && old_states[*i].is_some())
+                        .map(|(i, _)| i);
+                    let geometry_changed =
+                        ["left", "right"]
+                            .iter()
+                            .zip(directions_changed)
+                            .any(|(side, changed)| {
+                                changed
+                                    && action.input.split('+').any(|part| {
+                                        part.trim()
+                                            .strip_prefix(&format!("{side}_stick_"))
+                                            .is_some_and(|suffix| {
+                                                matches!(suffix, "left" | "right" | "up" | "down")
+                                            })
+                                    })
+                            });
+                    if let Some(index) = previous.filter(|&index| {
+                        !geometry_changed
+                            && old_states[index].as_ref().unwrap().competition == competition
+                            && same_competitors(action, &self.mapped_actions, &actions)
+                    }) {
+                        let state = old_states[index].take().unwrap();
                         for (value, delta) in self.frame.scroll.iter_mut().zip(state.pending_scroll)
                         {
                             *value += delta;
@@ -631,14 +819,20 @@ impl Engine {
                         ActionState {
                             raw: true,
                             active: true,
-                            blocked: action.trigger != crate::profile::Trigger::Down
-                                || action.turbo_ms.is_some(),
+                            blocked: action.trigger != Trigger::Down
+                                || action.turbo_ms.is_some()
+                                || !competition.is_empty()
+                                || previous.is_some_and(|i| {
+                                    !old_states[i].as_ref().unwrap().competition.is_empty()
+                                }),
+                            competition,
                             ..Default::default()
                         }
                     }
                 })
                 .collect();
-            self.controls = controls(&profile);
+            self.controls = controls;
+            self.mapped_actions = actions;
         }
         if std::mem::discriminant(&profile.gyro.timestamp_source)
             != std::mem::discriminant(&self.profile.gyro.timestamp_source)
@@ -674,9 +868,12 @@ impl Engine {
                 self.input_value(&profile.gyro.activation) > profile.gyro.activation_threshold;
             self.gyro_latched = false;
         }
-        if profile.gyro.output != self.profile.gyro.output {
+        let gyro_output_changed = profile.gyro.output != self.profile.gyro.output;
+        if gyro_output_changed {
             self.gyro = gyro_graph(&profile);
             self.gyro_stick = Vec2::ZERO;
+            self.flick_stick = Vec2::ZERO;
+            self.turn_stick_owed = 0.;
         } else {
             for (key, value) in [
                 ("scale", profile.gyro.counts_per_degree),
@@ -689,16 +886,22 @@ impl Engine {
                     .insert(key.into(), json!(value));
             }
         }
+        let flick_params = &mut self.flick.graph.nodes[1].params;
+        flick_params.insert("scale".into(), json!(profile.gyro.counts_per_degree));
+        flick_params.insert(
+            "stick_out_dps".into(),
+            json!(profile.gyro.stick_full_scale_dps),
+        );
         self.profile = profile;
         self.refresh_sticks(self.stick_time, true);
-        if input_changed {
+        if input_changed || gyro_output_changed {
             self.flick.state.clear();
             self.flick_snapshot_blocked = self
                 .stick_value(self.profile.gyro.motion.flick.stick)
                 .length()
                 >= self.profile.gyro.motion.flick.deadzone;
         }
-        self.eval_controls(true, 0.);
+        self.eval_controls(true, self.action_time_ns);
         if touch_changed {
             self.advance_touch((self.stick_time * 1e9) as u64, true);
         }
@@ -744,16 +947,18 @@ impl Engine {
             } else {
                 self.input.stick(&pin)
             };
-            for (direction, value) in [
-                ("left", -value.x),
-                ("right", value.x),
-                ("down", -value.y),
-                ("up", value.y),
-            ] {
+            let directions = [
+                self.profile.input.lstick_directions,
+                self.profile.input.rstick_directions,
+            ][i];
+            for (direction, value) in ["left", "right", "up", "down"]
+                .into_iter()
+                .zip(directions.values(value))
+            {
                 self.signals.set_pin(
                     SOURCE,
                     &format!("{prefix}_stick_{direction}"),
-                    Signal::Float(value.max(0.)),
+                    Signal::Float(value),
                 );
             }
             let region = stick_region(
@@ -821,6 +1026,7 @@ impl Engine {
     pub fn reset(&mut self) {
         self.touchpad.reset();
         self.stick_time = 0.;
+        self.action_time_ns = 0;
         self.input.reset();
         self.base_input.reset();
         self.stick_mouse_graph.state.clear();
@@ -831,7 +1037,10 @@ impl Engine {
         self.clock.reset();
         self.controls.state.clear();
         for state in &mut self.action_states {
-            *state = ActionState::default();
+            *state = ActionState {
+                competition: state.competition,
+                ..Default::default()
+            };
         }
         self.clear_gyro_motion();
         self.accel = None;
@@ -849,7 +1058,7 @@ impl Engine {
         self.frame.mouse_delta = [0.0; 2];
         self.frame.scroll = [0; 2];
         self.refresh_sticks(0., false);
-        self.eval_controls(false, 0.0);
+        self.eval_controls(false, 0);
     }
     fn update_pad(&mut self) {
         self.frame.pad = self.physical_pad.map(|mut pad| {
@@ -858,31 +1067,30 @@ impl Engine {
                 pad.right_y = 0;
             }
             let f = &self.profile.gyro.motion.flick;
-            if self.flick_active()
+            let suppress_flick = self.flick_active()
                 && (f.suppress == Suppress::Full
                     || (f.suppress == Suppress::Deadzone
-                        && self.stick_value(f.stick).length() >= f.deadzone))
-            {
-                match f.stick {
-                    Stick::Left => {
-                        pad.left_x = 0;
-                        pad.left_y = 0;
-                    }
-                    Stick::Right => {
-                        pad.right_x = 0;
-                        pad.right_y = 0;
-                    }
-                }
-            }
-            if let Some((stick, v)) = self.rotated_stick {
-                match stick {
-                    Stick::Left => {
-                        pad.left_x = axis_to_i16(v.x);
-                        pad.left_y = axis_to_i16(v.y);
-                    }
-                    Stick::Right => {
-                        pad.right_x = axis_to_i16(v.x);
-                        pad.right_y = axis_to_i16(v.y);
+                        && self.stick_value(f.stick).length() >= f.deadzone));
+            if suppress_flick || self.rotated_stick.is_some() {
+                for binding in self.profile.gamepad_bindings.iter().flatten() {
+                    let (Some(input), Some(output)) = (
+                        pad_binding::stick(&binding.input),
+                        pad_binding::stick(&binding.output),
+                    ) else {
+                        continue;
+                    };
+                    let value = self
+                        .rotated_stick
+                        .filter(|(stick, _)| *stick == input)
+                        .map(|(_, value)| value)
+                        .or_else(|| (suppress_flick && input == f.stick).then_some(Vec2::ZERO));
+                    if let Some(value) = value {
+                        for (pin, component) in pad_binding::stick_pins(output)
+                            .into_iter()
+                            .zip([value.x, value.y])
+                        {
+                            pad.set(pin, Signal::Float(component));
+                        }
                     }
                 }
             }
@@ -987,11 +1195,13 @@ impl Engine {
         } else {
             "right_stick"
         });
+        let directions =
+            [base.input.lstick_directions, base.input.rstick_directions][index].values(value);
         match part {
-            "left" => (-value.x).max(0.),
-            "right" => value.x.max(0.),
-            "up" => value.y.max(0.),
-            "down" => (-value.y).max(0.),
+            "left" => directions[0],
+            "right" => directions[1],
+            "up" => directions[2],
+            "down" => directions[3],
             "inner" | "outer" => {
                 let mut geometry = self.zone_layouts[index].clone();
                 let previous_outer = if part == "outer" { active } else { !active };
@@ -1018,12 +1228,18 @@ impl Engine {
             _ => self.input_value(input),
         }
     }
-    fn eval_controls(&mut self, allow_toggle: bool, dt: f32) {
+    fn eval_controls(&mut self, allow_toggle: bool, now_ns: u64) {
+        self.action_time_ns = self.action_time_ns.max(now_ns);
         self.controls.eval(&self.signals, 0.0);
         self.controls_held.clear();
+        if let Some(pad) = &mut self.physical_pad {
+            *pad = PadState::default();
+            for (pin, &value) in self.controls.result.sink_outputs.pins_of(PAD) {
+                pad.set(pin, value);
+            }
+        }
         for (i, (action, state)) in self
-            .profile
-            .actions
+            .mapped_actions
             .iter()
             .zip(&mut self.action_states)
             .enumerate()
@@ -1037,10 +1253,8 @@ impl Engine {
             };
             let condition = get(&i.to_string());
             let raw = get(&format!("raw:{i}"));
-            if action.trigger != crate::profile::Trigger::Down
-                && raw
-                && (!allow_toggle || !condition)
-            {
+            let immediate = action.trigger == Trigger::Down && state.competition.is_empty();
+            if !immediate && raw && (!allow_toggle || !condition) {
                 state.blocked = true;
             }
             let active = if state.blocked {
@@ -1050,30 +1264,44 @@ impl Engine {
                 }
                 false
             } else {
-                state.gate.sample(
+                state.gate.sample_at(
                     condition,
                     action.trigger.as_str(),
-                    action.trigger_ms as f32,
+                    action.trigger_ms,
                     action.sustain,
-                    action.turbo_ms.map(|v| v as f32),
-                    dt,
+                    action.turbo_ms,
+                    state.competition,
+                    self.action_time_ns,
                 )
             };
             if active {
-                for output in crate::bindings::output_chord(&action.output).unwrap() {
-                    if crate::bindings::wheel_delta(output).is_none() {
-                        self.controls_held.insert(output.into());
+                if let Some(pin) = action.output.strip_prefix("pad:") {
+                    if let Some(pad) = &mut self.physical_pad {
+                        pad.set(pin, Signal::Bool(true));
+                        match pin {
+                            "left_trigger" => pad.left_trigger_pressed = true,
+                            "right_trigger" => pad.right_trigger_pressed = true,
+                            _ => {}
+                        }
+                    }
+                } else {
+                    for output in crate::bindings::output_chord(&action.output).unwrap() {
+                        if crate::bindings::wheel_delta(output).is_none() {
+                            self.controls_held.insert(output.into());
+                        }
                     }
                 }
             }
-            let rising =
-                if action.trigger == crate::profile::Trigger::Down && action.turbo_ms.is_none() {
-                    raw && !state.raw
-                } else {
-                    !state.active
-                };
+            let rising = if immediate && action.turbo_ms.is_none() {
+                raw && !state.raw
+            } else {
+                !state.active
+            };
             if active && rising && allow_toggle {
-                for output in crate::bindings::output_chord(&action.output).unwrap() {
+                for output in crate::bindings::output_chord(&action.output)
+                    .into_iter()
+                    .flatten()
+                {
                     if let Some(delta) = crate::bindings::wheel_delta(output) {
                         for (i, d) in delta.into_iter().enumerate() {
                             self.frame.scroll[i] += d;
@@ -1090,12 +1318,6 @@ impl Engine {
             }
             state.raw = raw;
             state.active = active;
-        }
-        if let Some(pad) = &mut self.physical_pad {
-            *pad = PadState::default();
-            for (pin, &value) in self.controls.result.sink_outputs.pins_of(PAD) {
-                pad.set(pin, value);
-            }
         }
         let gyro = &self.profile.gyro;
         let toggle = gyro.activation_mode == GyroActivationMode::Toggle;
@@ -1178,18 +1400,22 @@ impl Engine {
     pub fn process_snapshot(&mut self, event: &InputEvent) -> &Frame {
         self.process_event(event, false)
     }
-    fn process_event(&mut self, event: &InputEvent, allow_toggle: bool) -> &Frame {
+    fn clear_frame_deltas(&mut self) {
         self.frame.mouse_delta = [0.0; 2];
         self.frame.scroll = [0; 2];
         for state in &mut self.action_states {
             state.pending_scroll = [0; 2];
         }
+    }
+    fn process_event(&mut self, event: &InputEvent, allow_toggle: bool) -> &Frame {
+        self.clear_frame_deltas();
+        let now_ns = event.time().host_ns;
         match *event {
             InputEvent::Button { index, down, .. } => {
                 if let Some(pin) = BUTTON_PINS.get(index as usize) {
                     self.raw_signals.set_pin(SOURCE, pin, Signal::Bool(down));
-                    self.refresh_sticks(event.time().host_ns as f64 / 1e9, allow_toggle);
-                    self.eval_controls(allow_toggle, 0.0);
+                    self.refresh_sticks(now_ns as f64 / 1e9, allow_toggle);
+                    self.eval_controls(allow_toggle, now_ns);
                 }
             }
             InputEvent::Axis { index, value, .. } => {
@@ -1205,7 +1431,7 @@ impl Engine {
                     if index < 4 {
                         self.raw_sticks[index as usize / 2][index as usize % 2] = v;
                     }
-                    self.refresh_sticks(event.time().host_ns as f64 / 1e9, allow_toggle);
+                    self.refresh_sticks(now_ns as f64 / 1e9, allow_toggle);
                     let f = &self.profile.gyro.motion.flick;
                     let length = self.stick_value(f.stick).length();
                     if !allow_toggle && f.enabled && length >= f.deadzone {
@@ -1214,7 +1440,7 @@ impl Engine {
                     if allow_toggle && length < f.deadzone * 0.8 {
                         self.flick_snapshot_blocked = false;
                     }
-                    self.eval_controls(allow_toggle, 0.0);
+                    self.eval_controls(allow_toggle, now_ns);
                 }
             }
             InputEvent::Touch {
@@ -1227,8 +1453,8 @@ impl Engine {
             } => {
                 self.touchpad.contact(pad, finger, active, x, y);
                 self.refresh_touch_signals();
-                self.refresh_sticks(event.time().host_ns as f64 / 1e9, allow_toggle);
-                self.eval_controls(allow_toggle, 0.);
+                self.refresh_sticks(now_ns as f64 / 1e9, allow_toggle);
+                self.eval_controls(allow_toggle, now_ns);
             }
             InputEvent::Gyro { time, value } => {
                 self.process_gyro(time, value);
@@ -1259,7 +1485,7 @@ impl Engine {
             event,
             InputEvent::Touch { .. } | InputEvent::Button { .. } | InputEvent::Axis { .. }
         ) {
-            self.advance_touch(event.time().host_ns, !allow_toggle);
+            self.advance_touch(now_ns, !allow_toggle);
         }
         &self.frame
     }
@@ -1563,7 +1789,7 @@ impl Engine {
         );
         self.motion.telemetry.measuring = self.measuring.clone();
         self.refresh_sticks(self.stick_time, true);
-        self.eval_controls(false, 0.);
+        self.eval_controls(false, self.action_time_ns);
         Ok(())
     }
     pub fn is_measuring(&self) -> bool {
@@ -1598,7 +1824,7 @@ impl Engine {
         self.refresh_sticks(self.stick_time, true);
         let flick = &self.profile.gyro.motion.flick;
         self.flick_snapshot_blocked = self.stick_value(flick.stick).length() >= flick.deadzone;
-        self.eval_controls(false, 0.);
+        self.eval_controls(false, self.action_time_ns);
         Some(result)
     }
 
@@ -1627,40 +1853,31 @@ impl Engine {
         self.gyro_signals
             .set_pin(SOURCE, "flick_on", Signal::Bool(on));
         self.flick.eval(&self.gyro_signals, dt);
+        self.flick_stick = Vec2::ZERO;
         if !on {
             self.flick.state.clear();
-        }
-        if on && f.output != AimOutput::RightStick {
-            if let Some(Signal::Vec2(v)) =
-                self.flick.result.sink_outputs.get_pin(GYRO, "flick_mouse")
-            {
-                self.frame.mouse_delta[0] += f64::from(v.x);
-                self.frame.mouse_delta[1] -= f64::from(v.y);
-            }
-        }
-        let flick_degrees = if on {
-            match self.flick.result.sink_outputs.get_pin(GYRO, "flick_angle") {
-                Some(Signal::Vec2(v)) => v.x / self.profile.gyro.counts_per_degree,
+        } else {
+            let outputs = &self.flick.result.sink_outputs;
+            let flick_counts = match outputs.get_pin(GYRO, "flick_angle") {
+                Some(Signal::Vec2(v)) => v.x,
                 _ => 0.,
+            };
+            match self.profile.gyro.output {
+                GyroOutput::Mouse => {
+                    if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_mouse") {
+                        self.frame.mouse_delta[0] += f64::from(v.x);
+                        self.frame.mouse_delta[1] -= f64::from(v.y);
+                    }
+                    self.frame.mouse_delta[0] += f64::from(flick_counts);
+                }
+                GyroOutput::RightStick => {
+                    self.turn_stick_owed += flick_counts / self.profile.gyro.counts_per_degree;
+                    if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_pad") {
+                        self.flick_stick = *v;
+                    }
+                }
             }
-        } else {
-            0.
-        };
-        if f.output != AimOutput::RightStick {
-            self.frame.mouse_delta[0] +=
-                f64::from(flick_degrees * self.profile.gyro.counts_per_degree);
         }
-        if f.output != AimOutput::Mouse {
-            self.turn_stick_owed += flick_degrees;
-        }
-        self.flick_stick = if on && f.output != AimOutput::Mouse {
-            match self.flick.result.sink_outputs.get_pin(GYRO, "flick_pad") {
-                Some(Signal::Vec2(v)) => *v,
-                _ => Vec2::ZERO,
-            }
-        } else {
-            Vec2::ZERO
-        };
         self.turns.retain_mut(|t| {
             let step = if t.seconds <= dt {
                 t.degrees
@@ -1689,14 +1906,45 @@ impl Engine {
         }
     }
 
-    /// Stick-to-mouse is time driven; a held stick continues moving between
-    /// SDL axis-change events. Gyro samples are never integrated from here.
+    fn tick_input(&mut self, now_ns: u64) {
+        self.refresh_sticks(now_ns as f64 / 1e9, true);
+        self.eval_controls(true, now_ns);
+    }
+
+    /// Advance mapping timers through a drained input timestamp. Returns
+    /// whether the frame contains a discrete output change to dispatch now.
+    pub fn advance_input(&mut self, now_ns: u64) -> bool {
+        self.clear_frame_deltas();
+        let previous_held = std::mem::take(&mut self.frame.held);
+        let previous_pad = self.frame.pad;
+        self.tick_input(now_ns);
+        self.frame.held != previous_held
+            || self.frame.pad != previous_pad
+            || self.frame.scroll != [0; 2]
+    }
+
+    /// Combined tick for callers supplying a single input and output clock.
     pub fn advance(&mut self, dt: f32, now_ns: u64) -> &Frame {
-        self.frame.mouse_delta = [0.0; 2];
-        self.frame.scroll = [0; 2];
-        for state in &mut self.action_states {
-            state.pending_scroll = [0; 2];
+        self.clear_frame_deltas();
+        if dt.is_finite() && dt > 0. && dt <= 0.05 {
+            let input_ns = if now_ns == 0 {
+                let elapsed_ns = (f64::from(dt) * 1e9).round() as u64;
+                self.action_time_ns.saturating_add(elapsed_ns)
+            } else {
+                now_ns
+            };
+            self.tick_input(input_ns);
         }
+        self.tick_output(dt, now_ns)
+    }
+
+    /// Advance continuous output without deciding gestures ahead of SDL.
+    pub fn advance_output(&mut self, dt: f32, now_ns: u64) -> &Frame {
+        self.clear_frame_deltas();
+        self.tick_output(dt, now_ns)
+    }
+
+    fn tick_output(&mut self, dt: f32, now_ns: u64) -> &Frame {
         if self
             .last_stick_gyro_ns
             .is_some_and(|last| now_ns.checked_sub(last).is_none_or(|age| age >= MAX_GAP_NS))
@@ -1718,18 +1966,7 @@ impl Engine {
             self.update_pad();
             return &self.frame;
         }
-        {
-            self.refresh_sticks(
-                if now_ns > 0 {
-                    now_ns as f64 / 1e9
-                } else {
-                    self.stick_time + f64::from(dt)
-                },
-                true,
-            );
-        }
-        self.eval_controls(true, dt);
-        for (action, state) in self.profile.actions.iter().zip(&mut self.action_states) {
+        for (action, state) in self.mapped_actions.iter().zip(&mut self.action_states) {
             if !state.active || !state.repeat_armed {
                 continue;
             }

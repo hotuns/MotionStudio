@@ -8,13 +8,227 @@
 
 use super::*;
 
-/// Headless per-action gate over the original Remapper activation state.
+/// Recognition windows shared by bindings with the same input condition.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PressCompetition {
+    pub short_ms: Option<u32>,
+    pub long_ms: Option<u32>,
+    pub double_ms: Option<u32>,
+}
+
+impl PressCompetition {
+    pub fn is_empty(self) -> bool {
+        self.short_ms.is_none() && self.long_ms.is_none() && self.double_ms.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PressClaim { Short, Long, Double }
+
+#[derive(Clone, Copy, Debug)]
+struct CompletedTap {
+    duration_ns: u64,
+    deferred: bool,
+}
+
+#[derive(Default)]
+struct PressDecision {
+    ordinary_held: bool,
+    tap: Option<CompletedTap>,
+    duration_ns: u64,
+    claim: Option<PressClaim>,
+    double_gap_ns: u64,
+    rising: bool,
+}
+
+/// Coordinates native timed activators before ordinary outputs are allowed.
+/// The full Remapper's per-pin hold-back permits same-input timed cards to
+/// coexist; this adapter gives a timestamped Studio condition one winning gesture.
 #[derive(Clone, Debug, Default)]
-pub struct PressGate { slots: [f32; 5] }
+struct PressArbiter {
+    held: bool,
+    started_ns: Option<u64>,
+    live: bool,
+    claim: Option<PressClaim>,
+    pending_tap: Option<CompletedTap>,
+    double_slots: [f32; PRESS_SLOTS_PER_MAPPING],
+    double_started_ns: Option<u64>,
+    double_gap_ns: u64,
+}
+
+impl PressArbiter {
+    fn clear_double(&mut self) {
+        self.double_slots = [0.0; PRESS_SLOTS_PER_MAPPING];
+        self.double_started_ns = None;
+        self.double_gap_ns = 0;
+    }
+
+    fn sample_double(&mut self, held: bool, window_ms: u32, now_ns: u64) -> bool {
+        let previous = self.double_slots[3] as u8;
+        let expired = previous != 3 && self.double_started_ns.is_some_and(|start| {
+            now_ns.saturating_sub(start) > u64::from(window_ms) * 1_000_000
+        });
+        // Keep the native state transitions, supplying an exact deadline
+        // decision instead of accumulating rounded frame durations.
+        self.double_slots[1] = if expired { window_ms as f32 / 1000.0 + 1.0 } else { 0.0 };
+        let fired = apply_press_mode(
+            held, PressMode::Double, window_ms as f32, true, &mut self.double_slots, 0.0,
+        );
+        match self.double_slots[3] as u8 {
+            0 => self.double_started_ns = None,
+            1 if previous == 0 || expired => self.double_started_ns = Some(now_ns),
+            3 if previous != 3 => {
+                self.double_gap_ns = now_ns.saturating_sub(self.double_started_ns.unwrap_or(now_ns));
+            }
+            _ => {}
+        }
+        fired
+    }
+
+    fn sample(&mut self, held: bool, competition: PressCompetition, now_ns: u64) -> PressDecision {
+        let rising = held && !self.held;
+        let falling = !held && self.held;
+        let mut tap = None;
+        if competition.double_ms.zip(self.double_started_ns).is_some_and(|(ms, start)| {
+            now_ns.saturating_sub(start) > u64::from(ms) * 1_000_000
+        }) {
+            // Resolve a completed first tap even when a new press arrives in
+            // the same FIFO drain after its double window has expired.
+            tap = self.pending_tap.take();
+        }
+        if rising {
+            self.started_ns = Some(now_ns);
+            self.live = false;
+        }
+        let duration_ns = self.started_ns.map_or(0, |start| now_ns.saturating_sub(start));
+        let double = self.claim != Some(PressClaim::Long)
+            && competition.double_ms.is_some_and(|ms| self.sample_double(held, ms, now_ns));
+        if self.claim.is_none() {
+            if double {
+                self.claim = Some(PressClaim::Double);
+            } else if self.started_ns.is_some() && competition.long_ms.is_some_and(|ms| {
+                duration_ns >= u64::from(ms) * 1_000_000
+            }) {
+                self.claim = Some(PressClaim::Long);
+            }
+        }
+        if self.claim.is_some() {
+            self.pending_tap = None;
+        }
+        if self.claim == Some(PressClaim::Long) {
+            self.clear_double();
+        }
+        let double_pending = matches!(self.double_slots[3] as u8, 1 | 2);
+        let ordinary_held = held && self.claim.is_none()
+            && competition.long_ms.is_none() && !double_pending
+            && competition.short_ms.is_none_or(|ms| duration_ns > u64::from(ms) * 1_000_000);
+        self.live |= ordinary_held;
+        if falling && self.claim.is_none() {
+            let completed = CompletedTap { duration_ns, deferred: !self.live };
+            if double_pending {
+                self.pending_tap = Some(completed);
+            } else {
+                tap = Some(completed);
+            }
+        }
+        let short_claim = tap.zip(competition.short_ms)
+            .is_some_and(|(tap, ms)| tap.duration_ns <= u64::from(ms) * 1_000_000);
+        let decision = PressDecision {
+            ordinary_held, tap, duration_ns,
+            claim: self.claim.or(short_claim.then_some(PressClaim::Short)),
+            double_gap_ns: self.double_gap_ns, rising,
+        };
+        if falling {
+            self.started_ns = None;
+            self.live = false;
+            if self.claim.take().is_some() {
+                self.clear_double();
+            }
+        }
+        self.held = held;
+        decision
+    }
+}
+
+/// Headless per-action gate over native recognition, pulse and turbo logic.
+#[derive(Clone, Debug, Default)]
+pub struct PressGate {
+    slots: [f32; PRESS_SLOTS_PER_MAPPING],
+    arbiter: PressArbiter,
+    last_ns: Option<u64>,
+    firing: bool,
+}
+
 impl PressGate {
-    pub fn sample(&mut self, held: bool, mode: &str, window_ms: f32, sustain: bool, turbo_ms: Option<f32>, dt: f32) -> bool {
-        let gate = apply_press_mode(held, PressMode::from_str(mode), window_ms, sustain, &mut self.slots, dt);
-        if let Some(period) = turbo_ms { apply_turbo(gate, period, &mut self.slots, dt) } else { gate }
+    /// Sample an ordered input edge or a drained input clock. Competition
+    /// belongs to one chord, including its analog threshold.
+    pub fn sample_at(
+        &mut self,
+        held: bool,
+        mode: &str,
+        window_ms: u32,
+        sustain: bool,
+        turbo_ms: Option<u32>,
+        competition: PressCompetition,
+        now_ns: u64,
+    ) -> bool {
+        let dt = self.last_ns.replace(now_ns).map_or(0.0, |last| {
+            (now_ns.saturating_sub(last) as f64 / 1e9) as f32
+        });
+        let decision = self.arbiter.sample(held, competition, now_ns);
+        let window_ns = u64::from(window_ms) * 1_000_000;
+        let mode = PressMode::from_str(mode);
+        if decision.rising && decision.tap.is_none()
+            && (!competition.is_empty() || matches!(mode, PressMode::Short))
+            && !matches!(mode, PressMode::Long | PressMode::Double)
+        {
+            self.slots[2] = 0.0;
+        }
+        let gate = match mode {
+            PressMode::Long => {
+                let crossed = decision.claim == Some(PressClaim::Long)
+                    && decision.duration_ns >= window_ns;
+                let mut pulse = (self.slots[2] - dt).max(0.0);
+                // If the release is the first sample past the threshold, the
+                // shared output gate emits a pulse instead of dropping the hold.
+                let on = long_press_output(held, crossed, sustain, &mut self.slots[3], &mut pulse);
+                self.slots[2] = pulse;
+                on
+            }
+            PressMode::Double => held && decision.claim == Some(PressClaim::Double)
+                && decision.double_gap_ns <= window_ns,
+            _ => {
+                let tap = decision.tap.filter(|tap| {
+                    if matches!(mode, PressMode::Short) {
+                        decision.claim == Some(PressClaim::Short) && tap.duration_ns <= window_ns
+                    } else {
+                        decision.claim.is_none()
+                    }
+                });
+                let deferred = tap.is_some_and(|tap| tap.deferred);
+                let trigger = match mode {
+                    PressMode::Down | PressMode::Sequence => deferred,
+                    PressMode::OnPress => decision.ordinary_held || deferred,
+                    _ => tap.is_some(),
+                };
+                let pulse_ms = if matches!(mode, PressMode::OnPress | PressMode::OnRelease) {
+                    window_ms as f32
+                } else {
+                    tap.map_or(0.0, |tap| (tap.duration_ns as f64 / 1e6) as f32)
+                };
+                let pulse = apply_press_mode(
+                    trigger, PressMode::OnPress, pulse_ms, sustain, &mut self.slots, dt,
+                );
+                pulse || (matches!(mode, PressMode::Down | PressMode::Sequence) && decision.ordinary_held)
+            }
+        };
+        let phase_dt = if self.firing { dt } else { 0.0 };
+        self.firing = gate;
+        if let Some(period) = turbo_ms {
+            apply_turbo(gate, period as f32, &mut self.slots, phase_dt)
+        } else {
+            gate
+        }
     }
 }
 
@@ -306,17 +520,15 @@ pub(crate) fn apply_press_mode(
                 slots[1] += dt;
             } else {
                 slots[1] = 0.0;
-                slots[3] = 0.0;
             }
             let threshold_crossed = slots[1] >= window_s && window_s > 0.0;
+            let on = long_press_output(
+                raw_held, threshold_crossed, sustain, &mut slots[3], &mut trigger_remaining,
+            );
             if sustain {
                 threshold_crossed
             } else {
-                if threshold_crossed && slots[3] < 0.5 {
-                    slots[3] = 1.0; // armed → fire exactly once per press
-                    trigger_remaining = PRESS_TRIGGER_PULSE_S;
-                }
-                trigger_remaining > 0.0
+                on
             }
         }
         PressMode::Short => {
@@ -395,6 +607,25 @@ pub(crate) fn apply_press_mode(
     slots[0] = if raw_held { 1.0 } else { 0.0 };
     slots[2] = trigger_remaining;
     out
+}
+
+fn long_press_output(
+    held: bool,
+    crossed: bool,
+    sustain: bool,
+    fired: &mut f32,
+    pulse: &mut f32,
+) -> bool {
+    if crossed && *fired < 0.5 {
+        *fired = 1.0;
+        if !sustain || !held {
+            *pulse = PRESS_TRIGGER_PULSE_S;
+        }
+    }
+    if !held {
+        *fired = 0.0;
+    }
+    (held && crossed && sustain) || *pulse > 0.0
 }
 
 /// Post-process the press-mode output with a turbo on/off cycle. When `held`

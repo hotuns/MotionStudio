@@ -13,12 +13,12 @@ export function GamepadNavigation({status,foreground,blocked,onSave,onPlay,onDis
   const [hint,setHint]=useState(''),[edit,setEdit]=useState<Edit|null>(null),[keyboard,setKeyboard]=useState<Keyboard|null>(null),[choice,setChoice]=useState<Choice|null>(null),[quick,setQuick]=useState(false),[caps,setCaps]=useState(false);
   const enabled=!!status?.ui_navigation&&!!status.device&&foreground;
   const latest=useRef({status,blocked,enabled,onSave,onPlay,onDisable,canPlay,canSave});latest.current={status,blocked,enabled,onSave,onPlay,onDisable,canPlay,canSave};
-  const baseline=useRef<number|null>(null),pending=useRef<NavCommand[]>([]),repeat=useRef<{command:NavCommand;next:number}|null>(null),lastFrame=useRef(0),lastDevice=useRef(''),lastZone=useRef('sidebar');
+  const baseline=useRef<number|null>(null),pending=useRef<NavCommand[]>([]),repeat=useRef<{command:NavCommand;next:number}|null>(null),lastFrame=useRef(0),lastDevice=useRef(''),lastZone=useRef('toolbar');
   const restore=(el:HTMLElement)=>requestAnimationFrame(()=>{if(el.isConnected)dom.focus(el);});
   useEffect(()=>{
     document.documentElement.dataset.gamepad=enabled?'on':'off';
     baseline.current=status?.navigation_serial??0;pending.current=[];repeat.current=null;
-    if(enabled){requestAnimationFrame(()=>{const root=dom.scope();if(!dom.targets(root).includes(document.activeElement as HTMLElement))dom.focus(document.querySelector<HTMLElement>('[data-pad-zone="sidebar"] [aria-current="page"]')??dom.targets(root)[0]);});}
+    if(enabled){requestAnimationFrame(()=>{const root=dom.scope();if(!dom.targets(root).includes(document.activeElement as HTMLElement))dom.focus(root.querySelector<HTMLElement>('[data-workbench-home]')??dom.targets(root)[0]);});}
     else{setChoice(null);setKeyboard(null);setQuick(false);setEdit(null);}
     return()=>{delete document.documentElement.dataset.gamepad;};
   },[enabled,status?.device?.path]);
@@ -55,11 +55,18 @@ export function GamepadNavigation({status,foreground,blocked,onSave,onPlay,onDis
     if(command==='back'){
       if(edit){dom.writeValue(edit.element,edit.original);setEdit(null);return;}
       if(root instanceof HTMLDialogElement){const event=new Event('cancel',{cancelable:true});root.dispatchEvent(event);if(!event.defaultPrevented)root.close();return;}
-      document.querySelectorAll('details[open]').forEach(el=>el.removeAttribute('open'));
-      dom.focus(document.querySelector<HTMLElement>('[data-pad-zone="sidebar"] [aria-current="page"]')??undefined);return;
+      const home=root.querySelector<HTMLButtonElement>('[data-workbench-home]')??undefined;
+      const expanded=Array.from(root.querySelectorAll<HTMLDetailsElement>('details[open]'));
+      if(expanded.length){
+        const current=element instanceof HTMLElement?element.closest<HTMLDetailsElement>('details[open]'):null;
+        expanded.forEach(el=>el.removeAttribute('open'));
+        dom.focus(current?.querySelector<HTMLElement>(':scope > summary')??home);return;
+      }
+      if(home?.getAttribute('aria-current')!=='page')home?.click();
+      dom.focus(home);return;
     }
     if(command==='previous_zone'||command==='next_zone'){setEdit(null);dom.changeZone(command==='previous_zone'?-1:1);return;}
-    if(command==='sidebar'){if(!(root instanceof HTMLDialogElement))dom.focus(document.querySelector<HTMLElement>('[data-pad-zone="sidebar"] [aria-current="page"]')??undefined);return;}
+    if(command==='sidebar'){if(!(root instanceof HTMLDialogElement))dom.focus(root.querySelector<HTMLElement>('[data-workbench-home]')??undefined);return;}
     if(command==='save'){if(!(root instanceof HTMLDialogElement)&&latest.current.canSave){setEdit(null);latest.current.onSave();}return;}
     if(command==='menu'){if(!(root instanceof HTMLDialogElement))setQuick(true);return;}
     if(command==='confirm'||command==='edit'){

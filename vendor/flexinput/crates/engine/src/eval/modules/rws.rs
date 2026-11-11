@@ -347,7 +347,7 @@ pub(crate) fn compute_rws(
     let (flick_on, stick_aim) = rws_stick_uses(inputs, params);
     let flick_deadzone = pf("flick_deadzone", 0.85);
     let flick_smooth_ms = pf("flick_smooth_ms", 100.0);
-    let flick_release_ease = pf("flick_release_ease", 0.0).clamp(0.0, 1.0);
+    let flick_release_ease = pf("flick_release_ease", 0.0).clamp(0.0, crate::eval::MAX_FLICK_RELEASE_EASE);
     let flick_fwd_dz = pf("flick_fwd_dz_deg", 0.0).clamp(0.0, 180.0);
     let flick_stab_s = pf("flick_stabilise_ms", 0.0).clamp(0.0, 1000.0) / 1000.0;
     let flick_output = rws_flick_mode(params);

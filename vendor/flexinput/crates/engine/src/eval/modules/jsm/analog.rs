@@ -66,6 +66,13 @@ impl TriggerMode {
     }
 }
 
+/// JSM's overlapping direction sectors, after calibration and deadzones.
+/// Ordered left, right, up, down. A diagonal asserts both adjacent directions.
+pub fn digital_stick_directions(x: f32, y: f32) -> [bool; 4] {
+    let (ax, ay) = (x.abs(), y.abs());
+    [x < -0.5 * ay, x > 0.5 * ay, y > 0.5 * ax, y < -0.5 * ax]
+}
+
 /// The stick modes this module runs, plus one standing for the rest.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum StickMode {
@@ -645,13 +652,8 @@ impl Analog {
         match cfg.mode {
             StickMode::NoMouse => {
                 // JSM's eight sectors: a diagonal lights both of its directions.
-                let (ax, ay) = (x.abs(), y.abs());
-                for (on, dir) in [
-                    (x < -0.5 * ay, Dir::Left),
-                    (x > 0.5 * ay, Dir::Right),
-                    (y > 0.5 * ax, Dir::Up),
-                    (y < -0.5 * ax, Dir::Down),
-                ] {
+                for (on, dir) in digital_stick_directions(x, y).into_iter()
+                    .zip([Dir::Left, Dir::Right, Dir::Up, Dir::Down]) {
                     if on {
                         self.down.insert(btn_for(side, dir));
                         // The ring doesn't count as the stick being used.

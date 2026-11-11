@@ -4,13 +4,13 @@
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.35rem 0.65rem;
-  border-radius: 999px;
+  border-radius: var(--control-radius);
   border: 1px solid var(--border-1);
   background: var(--bg-input);
   color: var(--text-strong);
   cursor: pointer;
-  font-weight: 600;
-  font-size: 0.9rem;
+  font-weight: 550;
+  font-size: 12px;
   transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -45,7 +45,7 @@
   border-radius: 50%;
   background: var(--bg-2);
   border: 1px solid var(--border-1);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--panel-shadow);
   transform: translate(0, -50%);
   transition: transform 0.2s ease, background-color 0.2s ease, border-color 0.2s ease;
 }

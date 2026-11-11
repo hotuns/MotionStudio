@@ -1,6 +1,6 @@
 # 游戏配置与组合键
 
-「游戏配置 → 动作映射」统一管理按键动作、体感动作和定角转身。摇杆、扳机、触控和体感页设置输入识别与手感。五页共同保存到一份 TOML。
+「游戏配置 → 动作映射」统一管理键鼠动作、虚拟手柄映射、体感动作和定角转身。摇杆、扳机、触控和体感页设置输入识别与手感。五页共同保存到一份 TOML。
 
 ## 设置动作
 
@@ -48,7 +48,9 @@ Esc 或「取消录入」取消操作，窗口失焦也会取消。录入期间�
 
 多个动作需要同一个输出键时，引擎合并按住状态，直到所有动作都释放才松开该键。组合输出先按下 Ctrl／Alt／Shift，再按普通键或鼠标按钮、发送滚轮；释放时先松开普通键或鼠标按钮，再松开修饰键。停止、配置切换、设备断开、输出失败和退出都执行释放清理。滚轮是瞬时操作，不写入按键保护进程的按住清单。
 
-虚拟 Xbox／DualShock 4 的标准自动映射仍按配置工作，动作组合的优先规则只处理自定义键鼠动作。
+选择虚拟 Xbox 或 DualShock 4 后，可以在动作表中逐项编辑手柄映射。「填入标准布局」只补入尚未绑定的标准控件。要把实体 A 改为虚拟 B，可编辑 A 所在的行并改选输出。删除该行即可取消这条绑定。旧虚拟手柄配置读取时会把标准布局转换成显式的行。
+
+虚拟按钮可以用单键、组合键、扳机阶段、摇杆方向或内外圈触发。摇杆以整根摇杆绑定，扳机到扳机时保留模拟行程。多个同时满足的手柄映射都会参与输出。按住层可以保存自己的整套手柄布局，清除该层的布局覆盖即可恢复继承。
 
 ## TOML 格式
 
@@ -83,4 +85,21 @@ threshold = 0.5
 
 输入新增 `left_stick_outer`、`left_stick_inner`、`right_stick_outer`、`right_stick_inner`，可单独绑定或组成组合。同一个摇杆的内外圈不能同时放入组合。`stick_zones` 定义半径和回差；中心死区不属于内圈。可选 `stick_rebound_ms` 开启原版防回弹。
 
-同输入的多种触发方式可以并存；普通按住会立即输出，短按需等松开才能确认。完整设置方法、按住配置层与示例见[配置层与触发说明](action-layers-and-triggers.md)。
+同输入的多种触发方式可以并存。普通、短按、长按、双击和释放动作按同一输入条件共同判断；双击会延迟单次轻按，长按达到阈值会取消普通动作。`allow_simultaneous = true` 可使某行独立判断，默认 false。完整设置方法、时间窗口、按住配置层与示例见[配置层与触发说明](action-layers-and-triggers.md)。
+
+`gamepad_bindings` 的数字映射支持同样的 `threshold`、`trigger`、`trigger_ms`、`sustain`、`turbo_ms` 和 `allow_simultaneous` 字段，缺省值与键鼠动作一致。整根摇杆与扳机行程直连要求 `trigger = "down"`，不可连发。配置层中的 `gamepad_bindings` 同样保留这些设置。
+
+```toml
+[[gamepad_bindings]]
+input = "south"
+output = "east"
+trigger = "long"
+trigger_ms = 300
+sustain = true
+
+[input]
+lstick_directions = "eight_way"
+rstick_directions = "axis_threshold"
+```
+
+`eight_way` 使用 JSM 的八向重叠方向判定，动作阈值作用于摇杆整体幅度；默认 `axis_threshold` 保持原来的单轴阈值判定。

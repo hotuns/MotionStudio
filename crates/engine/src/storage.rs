@@ -29,6 +29,7 @@ pub struct Settings {
     pub output_backend: crate::output::OutputBackend,
     pub gamepad_backend: crate::output::GamepadBackend,
     pub mouse_display_sync: bool,
+    pub io_rates: crate::timing::IoRates,
     pub auto_hide: bool,
     pub overlay_enabled: bool,
     pub overlay_duration_ms: u32,
@@ -54,6 +55,7 @@ impl Default for Settings {
             output_backend: Default::default(),
             gamepad_backend: Default::default(),
             mouse_display_sync: false,
+            io_rates: Default::default(),
             auto_hide: true,
             overlay_enabled: true,
             overlay_duration_ms: 2500,
@@ -162,14 +164,16 @@ impl Store {
         })
     }
     pub fn save(&self, entry: &ProfileEntry) -> Result<()> {
-        Engine::new(entry.profile.clone())?;
+        let mut profile = entry.profile.clone();
+        profile.materialize_gamepad_bindings();
+        Engine::new(profile.clone())?;
         let path = self.profile_path(&entry.id)?;
         if let Ok(old) = read_small(&path) {
             if parse_profile(&old).is_ok() {
                 atomic_write(&path.with_extension("toml.bak"), old.as_bytes())?;
             }
         }
-        atomic_write(&path, toml::to_string_pretty(&entry.profile)?.as_bytes())
+        atomic_write(&path, toml::to_string_pretty(&profile)?.as_bytes())
     }
     pub fn delete(&self, id: &str) -> Result<()> {
         let path = self.profile_path(id)?;
@@ -232,6 +236,7 @@ impl Settings {
         if self.version != 1 {
             bail!("Unsupported settings version");
         }
+        self.io_rates.validate()?;
         if !(1000..=8000).contains(&self.overlay_duration_ms) {
             bail!("配置提示显示时长应在 1 到 8 秒之间");
         }
@@ -266,8 +271,11 @@ pub fn decode_profile(text: &str) -> Result<Profile> {
     if text.len() > MAX_PROFILE_BYTES {
         bail!("配置文件超过 512 KB");
     }
-    match toml::from_str(text) {
-        Ok(profile) => Ok(profile),
+    match toml::from_str::<Profile>(text) {
+        Ok(mut profile) => {
+            profile.materialize_gamepad_bindings();
+            Ok(profile)
+        }
         Err(error) => {
             if toml::from_str::<toml::Table>(text).is_ok_and(|table| table.contains_key("jsm")) {
                 bail!("旧版 JSM 配置需要转换。请在「导入 JSM 配置」中选择此 TOML 文件");

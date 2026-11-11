@@ -19,13 +19,17 @@ fn action(mode: Trigger) -> Action {
         trigger_ms: 100,
         sustain: true,
         turbo_ms: None,
+        allow_simultaneous: false,
     }
 }
 fn button(down: bool) -> InputEvent {
+    button_at(down, 1)
+}
+fn button_at(down: bool, host_ns: u64) -> InputEvent {
     InputEvent::Button {
         time: SampleTime {
-            host_ns: 1,
-            sensor_ns: 1,
+            host_ns,
+            sensor_ns: host_ns,
         },
         index: 0,
         down,
@@ -56,6 +60,48 @@ fn long_press_waits_then_holds_and_early_release_never_fires() {
     assert!(held(&e));
     e.process(&button(false));
     assert!(!held(&e));
+}
+#[test]
+fn a_queued_release_selects_only_one_side_of_the_long_press_boundary() {
+    const START: u64 = 1_000_000_000;
+    const DEADLINE: u64 = START + 100_000_000;
+    for mode in [Trigger::Down, Trigger::OnPress, Trigger::Short] {
+        let mut p = profile();
+        let mut long = action(Trigger::Long);
+        long.output = "key:E".into();
+        p.actions = vec![action(mode), long];
+
+        for (release, expected) in [(DEADLINE - 1, "key:SPACE"), (DEADLINE, "key:E")] {
+            let mut e = Engine::new(p.clone()).unwrap();
+            assert!(e.process(&button_at(true, START)).held.is_empty());
+            // The output clock can pass the deadline before SDL's release is drained.
+            assert!(e.advance_output(0.002, DEADLINE + 1).held.is_empty());
+            let frame = e.process(&button_at(false, release));
+            assert_eq!(frame.held.len(), 1);
+            assert!(frame.held.contains(expected));
+            e.advance_input(DEADLINE + 101_000_000);
+            assert!(e.frame.held.is_empty());
+        }
+    }
+}
+#[test]
+fn a_new_press_cancels_the_withheld_replay_and_can_reach_long_on_the_input_clock() {
+    let mut p = profile();
+    let mut long = action(Trigger::Long);
+    long.output = "key:E".into();
+    p.actions = vec![action(Trigger::Down), long];
+    let mut e = Engine::new(p).unwrap();
+    e.process(&button_at(true, 1_000_000));
+    assert!(e
+        .process(&button_at(false, 51_000_000))
+        .held
+        .contains("key:SPACE"));
+    assert!(e.process(&button_at(true, 52_000_000)).held.is_empty());
+    assert!(!e.advance_input(151_999_999));
+    assert!(e.advance_input(152_000_000));
+    assert_eq!(e.frame.held.len(), 1);
+    assert!(e.frame.held.contains("key:E"));
+    assert!(e.process(&button_at(false, 160_000_000)).held.is_empty());
 }
 #[test]
 fn double_press_holds_second_press_beyond_recognition_window_and_releases() {
@@ -262,8 +308,7 @@ fn layer_sensitivity_change_preserves_long_press_progress_and_sample_clock() {
     p.gyro.acceleration.fast_multiplier = 1.;
     let mut e = Engine::new(p.clone()).unwrap();
     e.process(&button(true));
-    e.advance(0.04, 0);
-    e.advance(0.04, 0);
+    e.advance_input(80_000_001);
     let gyro = |ns| InputEvent::Gyro {
         time: SampleTime {
             host_ns: ns,
@@ -283,7 +328,7 @@ fn layer_sensitivity_change_preserves_long_press_progress_and_sample_clock() {
             "lost or replayed gyro interval: {before} -> {after}"
         );
     }
-    e.advance(0.03, 5_000_000);
+    e.advance_input(110_000_001);
     assert!(held(&e));
 }
 #[test]

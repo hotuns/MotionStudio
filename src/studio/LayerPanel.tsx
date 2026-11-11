@@ -29,7 +29,7 @@ export function LayerPanel({profile,selected,onSelect,onUpdate,blocked,status}:{
      </>}
      <div className={styles.controls}><button type="button" className="secondary-btn" disabled={layers[0]?.id===layer.id} onClick={()=>onUpdate(profile=>{const all=profile.layers!;const i=all.findIndex(item=>item.id===layer.id);[all[i-1],all[i]]=[all[i],all[i-1]];})}>降低层优先级</button>
        <button type="button" className="secondary-btn" disabled={layers.at(-1)?.id===layer.id} onClick={()=>onUpdate(profile=>{const all=profile.layers!;const i=all.findIndex(item=>item.id===layer.id);[all[i+1],all[i]]=[all[i],all[i+1]];})}>提高层优先级</button>
-       {Object.keys(layer.settings).map(key=><button key={key} type="button" className="ghost-btn" onClick={()=>patch(layer=>{delete layer.settings[key];})}>恢复继承：{({gyro:'体感',stick_mouse:'摇杆鼠标',stick_deadzone:'摇杆死区',stick_zones:'摇杆区域',stick_rebound_ms:'防回弹'} as Record<string,string>)[key]??key}</button>)}
+       {Object.keys(layer.settings).map(key=><button key={key} type="button" className="ghost-btn" onClick={()=>patch(layer=>{delete layer.settings[key];})}>恢复继承：{({gyro:'体感',gamepad_bindings:'虚拟手柄映射',stick_mouse:'摇杆鼠标',stick_deadzone:'摇杆死区',stick_zones:'摇杆区域',stick_rebound_ms:'防回弹'} as Record<string,string>)[key]??key}</button>)}
      </div>
      <p className={styles.hint}>此层动作会覆盖相同手柄输入在基础层的所有触发方式，其余动作继续继承。删除此层动作即恢复继承。</p>
      <div className={styles.controls}><div className={styles.field}>禁用继承的手柄输入<OptionPicker label="禁用继承输入" value={disabledInput} groups={padChoices(undefined, [], split)} onChange={setDisabledInput}/></div>

@@ -32,6 +32,7 @@ mod tests;
 
 pub(crate) use eval::{jsm_publish, JsmState};
 pub use analog::{
+    digital_stick_directions as jsm_stick_directions,
     Settings as JsmAnalogSettings, TriggerMode as JsmTriggerMode,
     TriggerStages as JsmTriggerStages, NOISE_FLOOR as JSM_TRIGGER_REST,
 };

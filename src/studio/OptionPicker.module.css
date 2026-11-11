@@ -5,10 +5,10 @@
   gap: 8px;
   width: 100%;
   min-width: 0;
-  min-height: 36px;
-  padding: 8px 10px;
+  min-height: 34px;
+  padding: 7px 11px;
   border: 1px solid var(--border-1);
-  border-radius: 6px;
+  border-radius: var(--control-radius);
   color: var(--text-strong);
   background: var(--bg-input);
   text-align: left;
@@ -31,7 +31,7 @@
   padding: 0 10px;
   margin: 4px 0 14px;
   border: 1px solid var(--border-1);
-  border-radius: 6px;
+  border-radius: var(--control-radius);
   color: var(--text-muted);
   background: var(--bg-input);
 }
@@ -41,3 +41,13 @@
 .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(125px, 100%), 1fr)); gap: 6px; }
 .options button { min-width: 0; padding: 7px 9px; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .options button[aria-pressed='true'] { border-color: var(--accent); color: var(--accent); }
+.listOptions { grid-template-columns: minmax(0, 1fr); gap: 5px; }
+.listOptions button { display: flex; align-items: center; justify-content: flex-start; gap: 10px; min-height: 52px; padding: 9px 11px; border-color: transparent; background: transparent; box-shadow: none; }
+.listOptions button:hover:not(:disabled) { border-color: var(--border-1); background: var(--bg-1); }
+.listOptions button[aria-pressed='true'] { border-color: color-mix(in srgb, var(--accent) 25%, var(--border-1)); background: color-mix(in srgb, var(--accent) 7%, var(--bg-2)); color: var(--text-strong); }
+.optionIcon { display: grid; place-items: center; flex: 0 0 30px; width: 30px; height: 30px; border-radius: var(--control-radius); background: var(--bg-1-5); color: var(--text-muted); }
+.listOptions button[aria-pressed='true'] .optionIcon { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg-2)); }
+.optionName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
+.selectedLabel { flex-shrink: 0; color: var(--accent); font-size: 11px; font-weight: 500; }
+.listOptions button > svg { flex-shrink: 0; color: var(--accent); }
+@media (max-width: 480px) { .selectedLabel { display: none; } }

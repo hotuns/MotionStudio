@@ -1,0 +1,10 @@
+{
+  "buttons": [
+    "south", "east", "west", "north", "back", "guide", "start",
+    "left_stick_click", "right_stick_click", "left_shoulder", "right_shoulder",
+    "dpad_up", "dpad_down", "dpad_left", "dpad_right"
+  ],
+  "sticks": ["left_stick", "right_stick"],
+  "triggers": ["left_trigger", "right_trigger"],
+  "dualshock_4": ["touchpad"]
+}

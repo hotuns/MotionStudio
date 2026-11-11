@@ -80,9 +80,7 @@ export function MotionSettings({ profile, profileId, update, device, recording, 
 
   return <div className={styles.page}>
     <div className={styles.modeHeader}>
-      <div><h2>体感设置</h2><p className={styles.description}>
-        {advanced ? '查看体感的全部调校参数。' : '用手腕转动手柄控制视角。先选择控制方式，再调到习惯的速度。'}
-      </p></div>
+      <h2>体感设置</h2>
       <div className={styles.activationModes} role="group" aria-label="体感设置视图">
         <button type="button" className="secondary-btn" aria-pressed={!advanced} disabled={bindingLocked}
           onClick={() => changeView('simple')}>简易模式</button>
@@ -92,7 +90,7 @@ export function MotionSettings({ profile, profileId, update, device, recording, 
     </div>
     {!advanced ? <section className={styles.panel + ' app-card'}>
       <div className={styles.simpleGrid}>
-        <SettingsGroup title="1. 控制什么">
+        <SettingsGroup title="体感控制">
           <Toggle label="启用体感" value={gyro.enabled} onChange={value => setGyro('enabled', value)}/>
           {gyro.enabled && (gyro.motion.mode === 'pointer' ? <>
             <div className={styles.activationModes} role="group" aria-label="体感控制">
@@ -101,30 +99,29 @@ export function MotionSettings({ profile, profileId, update, device, recording, 
               <button type="button" className="secondary-btn" aria-pressed={gyro.output === 'right_stick'} disabled={!hasGamepad}
                 onClick={() => setGyro('output', 'right_stick')}>右摇杆瞄准</button>
             </div>
-            <p className={styles.hint}>游戏用鼠标转视角就选鼠标，只接收手柄时用右摇杆。</p>
-            {!hasGamepad && <p className={styles.hint}>在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。</p>}
+            <p className={styles.hint}>{hasGamepad
+              ? '游戏用鼠标转视角就选鼠标，只接收手柄时用右摇杆。'
+              : '在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。'}</p>
           </> : <p className={styles.hint}>
             当前使用进阶控制方式 · {gyro.motion.mode === 'steering' ? '姿态控制摇杆' : '体感旋转摇杆方向'}
           </p>)}
-          {gyro.enabled && <details>
-            <summary>方向不对？</summary>
-            <Toggle label="反转垂直方向" value={gyro.invert_y} onChange={value => setGyro('invert_y', value)}/>
-            <Toggle label="反转水平方向" value={gyro.motion.invert_x}
-              onChange={value => update(draft => { draft.gyro.motion.invert_x = value; })}/>
-          </details>}
-        </SettingsGroup>
-        {gyro.enabled && <>
-          <SettingsGroup title="2. 什么时候生效">
+          {gyro.enabled && <>
             {activationSettings}
-            <p className={styles.hint}>只想在开镜时用体感，就选按住开启并绑定瞄准键。</p>
+            {activation === 'hold' && <p className={styles.hint}>只想在开镜时用体感，就选按住开启并绑定瞄准键。</p>}
             {gyro.pause_input && <p className={styles.hint}>按住暂停 · {inputLabel(gyro.pause_input)}</p>}
-          </SettingsGroup>
-          <SettingsGroup title="3. 转多快">
-            <Range label="体感灵敏度" value={gyro.sensitivity} min={0.1} max={10} step={0.1} unit="×"
-              onChange={value => { if (value >= 0.1 && value <= 10) setGyro('sensitivity', value); }}
-              help="准星跟不上时调高，容易转过头时调低。"/>
-          </SettingsGroup>
-          <SettingsGroup title="4. 要多稳">
+            <details>
+              <summary>上下或左右反了？</summary>
+              <Toggle label="反转垂直方向" value={gyro.invert_y} onChange={value => setGyro('invert_y', value)}/>
+              <Toggle label="反转水平方向" value={gyro.motion.invert_x}
+                onChange={value => update(draft => { draft.gyro.motion.invert_x = value; })}/>
+            </details>
+          </>}
+        </SettingsGroup>
+        {gyro.enabled && <SettingsGroup title="灵敏度与防抖">
+          <Range label="体感灵敏度" value={gyro.sensitivity} min={0.1} max={10} step={0.1} unit="×"
+            onChange={value => { if (value >= 0.1 && value <= 10) setGyro('sensitivity', value); }}
+            help="转得太慢就调高，容易转过头就调低。"/>
+          <div className="studio-field">防抖预设
             <div className={styles.activationModes} role="group" aria-label="防抖预设">
               {smoothingPresets.map(([label, ms]) => <button key={ms} type="button" className="secondary-btn"
                 aria-pressed={preset?.[1] === ms} onClick={() => update(draft => {
@@ -132,20 +129,22 @@ export function MotionSettings({ profile, profileId, update, device, recording, 
                   draft.gyro.smoothing_ms = ms;
                 })}>{label}</button>)}
             </div>
-            <p className={styles.hint}>画面有细小抖动时试试均衡或更稳。平滑越多，转向响应越慢。</p>
-            {!preset && <p className={styles.hint}>当前沿用进阶平滑设置。</p>}
-          </SettingsGroup>
-        </>}
+          </div>
+          <p className={styles.hint}>准星微抖时试试「均衡」，仍有抖动就选「更稳」。</p>
+          {!preset && <p className={styles.hint}>当前沿用进阶平滑设置。</p>}
+        </SettingsGroup>}
       </div>
-      {gyro.enabled && <div className={styles.simpleTest}>
-        <p className={styles.description}>应用修改并启动映射后，轻转手柄，在设备页查看输出。</p>
+      {gyro.enabled && <div className={styles.simpleTools}>
         <button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button>
+        {gyro.motion.mode === 'pointer' && <details className={styles.quickCalibration}>
+          <summary>转角对不上？</summary>
+          <GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>
+        </details>}
       </div>}
     </section> : <>
     <nav className={styles.nav} aria-label="体感调校分类">
-      {tabs.map(([id, label, hint], index) => <button key={id} type="button" disabled={measuring&&id!=='calibration'} aria-current={tab === id ? 'page' : undefined} onClick={() => { if (id !== tab) onCancelRecording(); setTab(id); }}>
-        <span className={styles.number}>{String(index + 1).padStart(2, '0')}</span>
-        <span><strong>{label}</strong><small>{hint}</small></span>
+      {tabs.map(([id, label, hint]) => <button key={id} type="button" title={hint} disabled={measuring&&id!=='calibration'} aria-current={tab === id ? 'page' : undefined} onClick={() => { if (id !== tab) onCancelRecording(); setTab(id); }}>
+        {label}
       </button>)}
     </nav>
     <section className={styles.panel + ' app-card'}>

@@ -34,7 +34,6 @@ const partButtons: Partial<Record<string, typeof buttonNames[number]>> = {
 };
 const xAxis = new Vector3(1, 0, 0);
 const zAxis = new Vector3(0, 0, 1);
-const accent = new Color('#6593ff');
 
 type Part = {
   node: Object3D;
@@ -66,7 +65,7 @@ function loadParts(model: Object3D) {
   return parts;
 }
 
-function updateParts(parts: Part[], status?: Status) {
+function updateParts(parts: Part[], accent: Color, status?: Status) {
   const [lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0] = status?.axes ?? [];
   const pressed = new Set(buttonNames.filter((_, index) => status?.buttons[index]));
   const tiltX = new Quaternion();
@@ -216,11 +215,19 @@ export default function Controller3D({ device, status, pose, onUnavailable }: {
     const modelUnavailable = () => { if (!disposed) onUnavailable('model'); };
     const observer = new ResizeObserver(resize);
     observer.observe(mount);
+    const accent = new Color();
+    const syncTheme = () => {
+      accent.set(getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#8bd12a');
+      update.current?.();
+    };
+    syncTheme();
+    const themeObserver = new MutationObserver(syncTheme);
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
     renderer.domElement.addEventListener('webglcontextlost', graphicsUnavailable);
     document.addEventListener('visibilitychange', schedule);
     update.current = () => {
       target.copy(latest.current.pose);
-      updateParts(parts, latest.current.status);
+      updateParts(parts, accent, latest.current.status);
       schedule();
     };
     void new GLTFLoader().loadAsync(url).then(({ scene: loaded }) => {
@@ -243,6 +250,7 @@ export default function Controller3D({ device, status, pose, onUnavailable }: {
       update.current = undefined;
       cancelAnimationFrame(frame);
       observer.disconnect();
+      themeObserver.disconnect();
       document.removeEventListener('visibilitychange', schedule);
       renderer.domElement.removeEventListener('webglcontextlost', graphicsUnavailable);
       if (model) disposeModel(model);

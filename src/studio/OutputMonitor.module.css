@@ -1,25 +1,27 @@
-.output { display: grid; gap: 10px; min-width: 0; }
-.heading, .caption, .footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
-.badge { padding: 3px 8px; border: 1px solid var(--border-1); border-radius: 999px; color: var(--text-mid); font-size: 12px; }
-.badge[data-live='true'] { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--bg-2)); }
+.output { display: grid; gap: 12px; min-width: 0; }
+.heading, .caption, .footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; }
+.heading > strong { font-size: 13px; font-weight: 600; }
+.badge { padding: 3px 7px; border: 1px solid var(--panel-border); border-radius: var(--control-radius); color: var(--text-mid); background: var(--bg-1); font-size: 11px; }
+.badge[data-live='true'] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, var(--border-1)); background: color-mix(in srgb, var(--accent) 7%, var(--bg-2)); }
 .trajectory { margin: 0; }
-.plot { position: relative; overflow: hidden; border: 1px solid var(--border-1); border-radius: 8px; background: var(--bg-2); }
+.plot { position: relative; overflow: hidden; border: 1px solid var(--panel-border); border-radius: var(--section-radius); background: var(--bg-1); }
 .plot svg { display: block; width: 100%; height: auto; max-height: 220px; }
 .gridLines, .trace { fill: none; vector-effect: non-scaling-stroke; }
-.gridLines { stroke: var(--border-1); }
+.gridLines { stroke: var(--panel-border); }
 .trace { stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .start, .stickRing { fill: var(--bg-2); stroke: var(--border-1); }
 .start { stroke: var(--accent); }
 .end { fill: var(--accent); }
-.empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--text-muted); font-size: 12px; }
+.empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 12px; color: var(--text-muted); font-size: 12px; text-align: center; }
 .caption, .footer { color: var(--text-muted); font-size: 12px; }
-.caption { margin: 6px 0 0; }
-.caption strong { color: var(--text-strong); font-variant-numeric: tabular-nums; }
-.footer button { padding: 4px 8px; }
-.virtualOutput { display: grid; gap: 8px; border-top: 1px solid var(--border-1); padding-top: 10px; }
-.virtualOutput h4 { margin: 0; font-size: 13px; }
-.sticks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 104px), 1fr)); gap: 10px; }
-.stick { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+.caption { margin: 8px 0 0; }
+.caption strong { color: var(--text-strong); font-weight: 550; font-variant-numeric: tabular-nums; }
+.footer button { padding: 5px 9px; }
+.virtualOutput { display: grid; gap: 12px; border-top: 1px solid var(--panel-border); padding-top: 14px; }
+.virtualOutput h4 { margin: 0; font-size: 13px; font-weight: 600; }
+.sticks { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 104px), 1fr)); gap: 12px; }
+.stick { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
 .stick svg { width: 46px; height: 46px; flex: 0 0 46px; }
 .stick strong, .stick span { display: block; font-size: 12px; }
+.stick strong { font-weight: 550; }
 .stick span { color: var(--text-muted); font-variant-numeric: tabular-nums; }

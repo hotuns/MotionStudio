@@ -20,7 +20,6 @@ function ControlInput({label,value,onChange}:{label:string;value:string|null;onC
     groups={[{options:[{value:'',label:'不设置'}]}, ...padChoices()]} onChange={v=>onChange(v||null)}/></div>;
 }
 const sticks:[string,string][]=[['right','右摇杆'],['left','左摇杆']];
-const outputs:[string,string][]=[['mouse','鼠标'],['right_stick','虚拟右摇杆'],['both','鼠标和虚拟右摇杆']];
 const mutate=(update:MotionUpdate,key:string,value:unknown)=>update(p=>{(p.gyro.motion as unknown as Record<string,unknown>)[key]=value;});
 const nested=(update:MotionUpdate,group:'edge'|'rotation'|'flick'|'trackball',key:string,value:unknown)=>update(p=>{(p.gyro.motion[group] as unknown as Record<string,unknown>)[key]=value;});
 
@@ -182,15 +181,17 @@ export function FlickStickSettings({profile, update}: Props) {
     {(m.flick.enabled || m.flick.stick_aim) && !profile.gyro.enabled && <p className={styles.hint}>请在「体感」页启用体感，以使用 Flick Stick 和配套摇杆瞄准。</p>}
     {(m.flick.enabled||m.flick.stick_aim)&&<>
       <Choice label="Flick 使用的摇杆" value={m.flick.stick} options={sticks} onChange={v=>flickChange('stick',v)}/>
-      <Choice label="转向输出" value={m.flick.output} options={outputs} onChange={v=>flickChange('output',v)}/>
+      <p className={styles.hint}>{profile.gyro.output === 'right_stick'
+        ? '与体感共用输出 · 虚拟右摇杆'
+        : '与体感共用输出 · 鼠标'}</p>
       <ControlInput label="按住启用（不设置则常开）" value={m.flick.enable_input} onChange={v=>flickChange('enable_input',v)}/>
       <Choice label="原始摇杆输出" value={m.flick.suppress} options={[["full","使用时屏蔽"],["deadzone","只屏蔽外圈"],["off","保留原始输出"]]} onChange={v=>flickChange('suppress',v)}/>
       <Numbers object={m.flick} specs={[["deadzone","快推转身阈值",0.05,0.99,0.01],["smooth_ms","转身完成时间",0,2000,1," ms"],["forward_deadzone","正前方死角",0,180,1,"°"],["stabilise_ms","绕圈方向稳定",0,1000,1," ms"],["speed_gate_ms","快速推杆判定时间",0,2000,1," ms"]]} onChange={(k,v)=>flickChange(k,v)}/>
       {m.flick.enabled && <>
-        <Range label="转角缓出强度" value={(m.flick.release_ease ?? 0) * 100} min={0} max={100} step={1} unit="%"
+        <Range label="转角缓出强度" value={(m.flick.release_ease ?? 0.5) * 100} min={0} max={100} step={1} unit="%"
           onChange={value=>flickChange('release_ease', value / 100)}
-          help="0% 匀速释放，100% 使用 JSM 缓出。强度越高，起步越快、随后减速。"/>
-        <FlickReleaseCurve strength={m.flick.release_ease ?? 0}/>
+          help="0% 匀速释放，50% 使用 JSM 缓出（默认）。高于 50% 起步更快，100% 使用三次缓出。"/>
+        <FlickReleaseCurve strength={m.flick.release_ease ?? 0.5}/>
         <p className={styles.hint}>曲线控制初始转身的转角进度。完成时间设为 0 时立即输出全部转角。</p>
       </>}
       <Toggle label="慢推锁定为连续瞄准" value={m.flick.slow_lock} onChange={v=>flickChange('slow_lock',v)}/>

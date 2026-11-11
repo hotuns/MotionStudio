@@ -390,6 +390,7 @@ impl Runtime {
         Ok(())
     }
     fn start(&mut self, config: RunConfig) -> Result<()> {
+        config.io_rates.validate()?;
         Engine::new(config.profile.clone())?;
         if config.device_path.trim().is_empty() {
             bail!("请先选择一个手柄接口");
@@ -430,6 +431,7 @@ impl Runtime {
         self.status.reload_error = None;
         self.status.stats = Default::default();
         self.status.visibility.requested = config.emit && config.auto_hide;
+        self.io_clock.set_rates(config.io_rates);
         self.config = Some(config);
         self.next_discovery = Instant::now();
         Ok(())
@@ -787,6 +789,7 @@ impl Runtime {
                                 output_backend: Default::default(),
                                 gamepad_backend: Default::default(),
                                 mouse_display_sync: false,
+                                io_rates: Default::default(),
                                 bias: [0.; 3],
                                 sensor_calibration: Default::default(),
                             })?;
@@ -1392,15 +1395,8 @@ impl Runtime {
             return Ok(());
         };
         let now_ns = self.sdl.as_ref().map(Sdl::now_ns).unwrap_or(0);
-        let before = engine.base_trigger_inputs();
-        engine.advance(dt, now_ns);
-        let trigger_changed = before != engine.base_trigger_inputs();
+        engine.advance_output(dt, now_ns);
         self.status.motion = engine.motion.telemetry.clone();
-        self.status.processed_axes = engine.processed_axes();
-        self.track_pad_shortcut(false);
-        if trigger_changed {
-            self.sync_layers()?;
-        }
         if let Some(engine) = &self.engine {
             self.dispatch(engine.frame.clone())?;
         }
@@ -1411,12 +1407,18 @@ impl Runtime {
         Ok(())
     }
     fn poll_inputs(&mut self) -> Result<()> {
-        if let Some(sdl) = &mut self.sdl {
-            sdl.poll_events()?;
-        }
+        let Some(sdl) = &mut self.sdl else {
+            return Ok(());
+        };
+        // Decide timeouts only through input known to have been polled. A
+        // faster output tick could otherwise overtake a queued release.
+        let watermark = sdl.now_ns();
+        sdl.poll_events()?;
+        let mut drained = false;
         for _ in 0..256 {
             let Some(sdl) = &self.sdl else { break };
             let Some(event) = sdl.take_event()? else {
+                drained = true;
                 break;
             };
             if matches!(event, InputEvent::Disconnected { .. }) {
@@ -1439,6 +1441,28 @@ impl Runtime {
         }
         if self.status.device.is_some() && self.connected_input().is_none() {
             self.lost_device()?;
+        }
+        if drained
+            && self.config.is_some()
+            && self.calibration.is_none()
+            && !self.seeding
+            && !self.status.binding_capture
+        {
+            if let Some(engine) = &mut self.engine {
+                let before = engine.base_trigger_inputs();
+                let changed = engine.advance_input(watermark);
+                let trigger_changed = before != engine.base_trigger_inputs();
+                self.status.processed_axes = engine.processed_axes();
+                self.track_pad_shortcut(false);
+                if trigger_changed {
+                    self.sync_layers()?;
+                }
+                if changed || trigger_changed {
+                    if let Some(engine) = &self.engine {
+                        self.dispatch(engine.frame.clone())?;
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -1968,6 +1992,7 @@ mod tests {
             trigger_ms: 250,
             sustain: true,
             turbo_ms: None,
+            allow_simultaneous: false,
         }];
         let sensitivity = base.gyro.sensitivity;
         base.layers.push(motion_core::layers::Layer {
@@ -2438,6 +2463,7 @@ mod tests {
             output_backend: Default::default(),
             gamepad_backend: Default::default(),
             mouse_display_sync: false,
+            io_rates: Default::default(),
             bias: [0.0; 3],
             sensor_calibration: Default::default(),
         });

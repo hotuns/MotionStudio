@@ -1,5 +1,5 @@
 use crate::{
-    background, binding_window::place_floating_window, client::Snapshot, save_profile_locked, text,
+    background, binding_window::floating_position, client::Snapshot, save_profile_locked, text,
     AppState,
 };
 use motion_core::{
@@ -9,27 +9,21 @@ use motion_core::{
     protocol::Command,
     storage::Language,
 };
-use serde::{Deserialize, Serialize};
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 use tauri::{
-    AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent,
+    window::WindowBuilder, AppHandle, Emitter, Manager, State, Theme, WebviewWindow, WindowEvent,
 };
 use uuid::Uuid;
 
 mod windows;
 
 pub const LABEL: &str = "game-calibration";
-const UPDATE_EVENT: &str = "game-calibration-update";
 const MAPPING_CHANGED: &str = "校准所用的映射已改变，请重新打开校准悬浮窗。";
 
 #[derive(Clone, Default)]
 pub struct CalibrationWindow {
     current: Arc<Mutex<Option<Session>>>,
-    sequence: Arc<AtomicU64>,
+    updates: Arc<windows::Updates>,
 }
 
 impl CalibrationWindow {
@@ -47,13 +41,15 @@ impl CalibrationWindow {
 
     fn view(&self, snapshot: &Snapshot) -> Option<CalibrationView> {
         let current = self.current.lock().ok()?;
-        let session = current.as_ref()?;
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-        Some(session.view(snapshot, sequence))
+        Some(current.as_ref()?.view(snapshot))
+    }
+
+    pub fn refresh(&self) {
+        self.updates.request();
     }
 }
 
-#[derive(Clone, Copy, Default, Serialize)]
+#[derive(Clone, Copy, Default)]
 struct Hotkeys {
     measure: bool,
     apply: bool,
@@ -65,7 +61,7 @@ enum Hotkey {
     Apply,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone)]
 struct Saved {
     applied: bool,
     warning: Option<String>,
@@ -81,7 +77,6 @@ struct Session {
     output: GyroOutput,
     stick: Stick,
     language: Language,
-    theme: String,
     owns_measurement: bool,
     result: Option<GameAngleMeasurement>,
     saved: Option<Saved>,
@@ -113,7 +108,7 @@ impl Session {
         Ok(())
     }
 
-    fn view(&self, snapshot: &Snapshot, sequence: u64) -> CalibrationView {
+    fn view(&self, snapshot: &Snapshot) -> CalibrationView {
         let motion = &snapshot.status.motion;
         let blocked = self.ready(snapshot).err();
         let measuring = if self.owns_measurement && self.same_mapping(snapshot) {
@@ -129,13 +124,12 @@ impl Session {
             None
         };
         CalibrationView {
-            sequence,
+            id: self.id,
             blocked,
             profile_name: self.profile_name.clone(),
             output: self.output,
             stick: self.stick,
             language: self.language,
-            theme: self.theme.clone(),
             measuring,
             degrees: motion.measured_degrees,
             measurement_error,
@@ -160,22 +154,19 @@ impl Session {
         self.ready(snapshot).ok()?;
         match (key, snapshot.status.motion.measuring.is_some()) {
             (Hotkey::Measure, true) if self.owns_measurement => Some(CalibrationAction::Finish),
-            (Hotkey::Measure, false) => Some(CalibrationAction::Start { axis: "yaw".into() }),
+            (Hotkey::Measure, false) => Some(CalibrationAction::Start { axis: "yaw" }),
             (Hotkey::Apply, false) if self.result.is_some() => Some(CalibrationAction::Apply),
             _ => None,
         }
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CalibrationView {
-    sequence: u64,
+struct CalibrationView {
+    id: Uuid,
     profile_name: String,
     output: GyroOutput,
     stick: Stick,
     language: Language,
-    theme: String,
     blocked: Option<&'static str>,
     measuring: Option<String>,
     degrees: f32,
@@ -184,18 +175,6 @@ pub struct CalibrationView {
     saved: Option<Saved>,
     hotkeys: Hotkeys,
     action_error: Option<String>,
-}
-
-pub fn publish_view(app: &AppHandle, state: &AppState) {
-    let view = state
-        .client
-        .snapshot
-        .lock()
-        .ok()
-        .and_then(|snapshot| state.game_calibration.view(&snapshot));
-    if let Some(view) = view {
-        let _ = app.emit_to(LABEL, UPDATE_EVENT, &view);
-    }
 }
 
 #[tauri::command]
@@ -208,7 +187,7 @@ pub async fn open_calibration_window(
     if window.label() != "main" {
         return Err("请在 Studio 打开校准悬浮窗。".into());
     }
-    if let Some(floating) = window.get_webview_window(LABEL) {
+    if let Some(floating) = window.get_window(LABEL) {
         if state.game_calibration.session()?.profile_id != profile_id {
             return Err("请先关闭另一份配置的校准悬浮窗。".into());
         }
@@ -238,11 +217,6 @@ pub async fn open_calibration_window(
             output: gyro.output,
             stick: gyro.motion.flick.stick,
             language,
-            theme: if theme == "dark" {
-                theme
-            } else {
-                "light".into()
-            },
             owns_measurement: false,
             result: None,
             saved: None,
@@ -264,23 +238,24 @@ pub async fn open_calibration_window(
     } else {
         "Motion Studio · 游戏内转角校准"
     };
-    let floating = match WebviewWindowBuilder::new(
-        window.app_handle(),
-        LABEL,
-        WebviewUrl::App("index.html".into()),
-    )
-    .title(title)
-    .initialization_script("window.__MOTION_CALIBRATION_WINDOW__ = true;")
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .focusable(false)
-    .minimizable(false)
-    .maximizable(false)
-    .inner_size(405.0, 420.0)
-    .min_inner_size(355.0, 340.0)
-    .visible(false)
-    .build()
+    let theme = if theme == "dark" {
+        Theme::Dark
+    } else {
+        Theme::Light
+    };
+    let floating = match WindowBuilder::new(window.app_handle(), LABEL)
+        .title(title)
+        .theme(Some(theme))
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .focusable(false)
+        .minimizable(false)
+        .maximizable(false)
+        .inner_size(445.0, 398.0)
+        .min_inner_size(420.0, 380.0)
+        .visible(false)
+        .build()
     {
         Ok(floating) => floating,
         Err(error) => {
@@ -295,9 +270,16 @@ pub async fn open_calibration_window(
             tauri::async_runtime::spawn_blocking(move || close_session(&owner, id));
         }
     });
-    place_floating_window(&window, &floating);
-    if let Err(error) = windows::install(&floating, id) {
-        state.client.log(error);
+    if let Some(position) = floating
+        .outer_size()
+        .ok()
+        .and_then(|size| floating_position(&window, size))
+    {
+        let _ = floating.set_position(position);
+    }
+    if let Err(error) = windows::install(&floating, id, theme).await {
+        let _ = floating.destroy();
+        return Err(error);
     }
     if let Err(error) = floating.show() {
         let _ = floating.destroy();
@@ -333,69 +315,30 @@ fn close_session(state: &AppState, id: Uuid) {
     }
 }
 
-#[tauri::command]
-pub fn calibration_window_state(
-    window: WebviewWindow,
-    state: State<'_, AppState>,
-) -> Result<CalibrationView, String> {
-    require_calibration_window(&window)?;
-    let snapshot = state.client.snapshot.lock().map_err(text)?;
-    state
-        .game_calibration
-        .view(&snapshot)
-        .ok_or_else(|| "校准悬浮窗已关闭。".into())
-}
-
-fn require_calibration_window(window: &WebviewWindow) -> Result<(), String> {
-    if window.label() != LABEL {
-        return Err("请在校准悬浮窗中操作。".into());
-    }
-    Ok(())
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum CalibrationAction {
-    Start { axis: String },
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CalibrationAction {
+    Start { axis: &'static str },
     Finish,
     Cancel,
     Apply,
     Close,
 }
 
-#[tauri::command]
-pub async fn calibration_window_action(
-    window: WebviewWindow,
-    state: State<'_, AppState>,
-    action: CalibrationAction,
-) -> Result<(), String> {
-    require_calibration_window(&window)?;
-    if matches!(action, CalibrationAction::Close) {
-        return window.destroy().map_err(text);
-    }
-    let id = state.game_calibration.session()?.id;
-    let state = state.inner().clone();
-    let app = window.app_handle().clone();
-    background(move || {
-        let _lock = state.operations.lock().map_err(text)?;
-        let session = state.game_calibration.session()?;
-        if session.id != id {
-            return Err("校准悬浮窗已关闭。".into());
-        }
-        let snapshot = state.client.snapshot.lock().map_err(text)?.clone();
-        let result = perform_action(&state, &app, session, &snapshot, action);
-        publish_view(&app, &state);
-        result
-    })
-    .await
+enum Input {
+    Button(CalibrationAction),
+    Hotkey(Hotkey),
 }
 
-fn run_hotkey(app: &AppHandle, id: Uuid, key: Hotkey) -> Result<(), String> {
+fn run_input(app: &AppHandle, id: Uuid, input: Input) -> Result<(), String> {
     let Some(state) = app.try_state::<AppState>() else {
         return Ok(());
     };
-    let Ok(lock) = state.operations.try_lock() else {
-        return Ok(());
+    let lock = match &input {
+        Input::Button(_) => state.operations.lock().map_err(text)?,
+        Input::Hotkey(_) => match state.operations.try_lock() {
+            Ok(lock) => lock,
+            Err(_) => return Ok(()),
+        },
     };
     let Ok(session) = state.game_calibration.session() else {
         return Ok(());
@@ -404,17 +347,19 @@ fn run_hotkey(app: &AppHandle, id: Uuid, key: Hotkey) -> Result<(), String> {
         return Ok(());
     }
     let snapshot = state.client.snapshot.lock().map_err(text)?.clone();
-    let Some(action) = session.hotkey_action(&snapshot, key) else {
+    let action = match input {
+        Input::Button(action) => Some(action),
+        Input::Hotkey(key) => session.hotkey_action(&snapshot, key),
+    };
+    let Some(action) = action else {
         return Ok(());
     };
     if matches!(action, CalibrationAction::Close) {
-        let window = app.get_webview_window(LABEL);
+        let window = app.get_window(LABEL);
         drop(lock);
         return window.map_or(Ok(()), |window| window.destroy().map_err(text));
     }
-    let result = perform_action(&state, app, session, &snapshot, action);
-    publish_view(app, &state);
-    result
+    perform_action(&state, app, session, &snapshot, action)
 }
 
 fn perform_action(
@@ -432,7 +377,7 @@ fn perform_action(
                     return Err("请先结束或取消当前转角测量".into());
                 }
                 if let Err(error) = state.client.request(Command::BeginMeasure {
-                    axis,
+                    axis: axis.into(),
                     expected_revision: Some(session.revision),
                 }) {
                     // An IPC timeout can arrive after the engine began the sweep.
@@ -489,30 +434,33 @@ fn perform_action(
     result
 }
 
-fn apply_measurement(gyro: &mut Gyro, measurement: &GameAngleMeasurement) -> Result<(), String> {
+fn measured_angles(measurement: &GameAngleMeasurement) -> Result<(f32, f32), &str> {
     if let Some(error) = &measurement.error {
-        return Err(error.clone());
+        return Err(error);
     }
     let known = match measurement.axis.as_str() {
         "yaw" => 360.,
         "pitch" => 180.,
-        _ => return Err("请先完成转角测量。".into()),
+        _ => return Err("请先完成转角测量。"),
     };
     let degrees = measurement.degrees.abs();
     if !degrees.is_finite() || degrees < 1. || !measurement.peak.is_finite() {
-        return Err("测得的手柄转角不足，请重新测量。".into());
+        return Err("测得的手柄转角不足，请重新测量。");
     }
+    if measurement.output == GyroOutput::RightStick && measurement.peak > 1. {
+        return Err("测量过程中已超过满杆速度，请更慢地转动后重新测量。");
+    }
+    Ok((degrees, known))
+}
+
+fn apply_measurement(gyro: &mut Gyro, measurement: &GameAngleMeasurement) -> Result<(), String> {
+    let (degrees, known) = measured_angles(measurement)?;
     if gyro.output != measurement.output {
         return Err(MAPPING_CHANGED.into());
     }
     let (scale, ratio) = match gyro.output {
         GyroOutput::Mouse => (&mut gyro.counts_per_degree, degrees / known),
-        GyroOutput::RightStick => {
-            if measurement.peak > 1. {
-                return Err("测量过程中已超过满杆速度，请更慢地转动后重新测量。".into());
-            }
-            (&mut gyro.stick_full_scale_dps, known / degrees)
-        }
+        GyroOutput::RightStick => (&mut gyro.stick_full_scale_dps, known / degrees),
     };
     if *scale != measurement.scale {
         return Err(MAPPING_CHANGED.into());
@@ -538,7 +486,6 @@ mod tests {
             output: GyroOutput::Mouse,
             stick: Stick::Right,
             language: Language::En,
-            theme: "dark".into(),
             owns_measurement: false,
             result: None,
             saved: None,
@@ -593,7 +540,7 @@ mod tests {
         snapshot.status.motion.measured_degrees = 42.5;
         let latest = window.view(&snapshot).unwrap();
         assert_eq!(latest.degrees, 42.5);
-        assert!(latest.sequence > previous.sequence);
+        assert_eq!(previous.degrees, 0.);
 
         snapshot.status.motion.measuring = None;
         session.owns_measurement = false;

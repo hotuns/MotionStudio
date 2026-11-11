@@ -26,6 +26,8 @@ pub struct RunConfig {
     #[serde(default)]
     pub mouse_display_sync: bool,
     #[serde(default)]
+    pub io_rates: crate::timing::IoRates,
+    #[serde(default)]
     pub bias: [f32; 3],
     #[serde(default)]
     pub sensor_calibration: crate::motion_config::SensorCalibration,

@@ -189,7 +189,7 @@ impl Client {
     }
     fn publish_calibration(&self) {
         if let Some(state) = self.app.try_state::<crate::AppState>() {
-            crate::game_calibration::publish_view(&self.app, &state);
+            state.game_calibration.refresh();
         }
     }
     pub fn request(&self, command: EngineCommand) -> Result<(), String> {

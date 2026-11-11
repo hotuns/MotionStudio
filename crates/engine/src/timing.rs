@@ -9,6 +9,45 @@ pub const MAX_GAP_NS: u64 = 50_000_000;
 pub const MAX_EVENT_AGE_NS: u64 = 100_000_000;
 pub const CONTINUOUS_OUTPUT_INTERVAL: Duration = Duration::from_millis(2);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IoRates {
+    pub polling_hz: u32,
+    /// Zero uses the input polling rate.
+    pub output_hz: u32,
+}
+
+impl Default for IoRates {
+    fn default() -> Self {
+        Self {
+            polling_hz: 500,
+            output_hz: 500,
+        }
+    }
+}
+
+impl IoRates {
+    pub fn validate(self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            (60..=4000).contains(&self.polling_hz),
+            "输入轮询频率需为 60–4000 Hz"
+        );
+        anyhow::ensure!(
+            self.output_hz == 0 || (60..=4000).contains(&self.output_hz),
+            "固定输出频率需为 60–4000 Hz"
+        );
+        Ok(())
+    }
+
+    pub fn fixed_output_hz(self) -> u32 {
+        if self.output_hz == 0 {
+            self.polling_hz
+        } else {
+            self.output_hz
+        }
+    }
+}
+
 /// Carry small overruns forward on the absolute schedule, but skip missed
 /// slots instead of issuing back-to-back reports after a stall.
 pub fn next_output_deadline(deadline: Instant, now: Instant) -> Instant {

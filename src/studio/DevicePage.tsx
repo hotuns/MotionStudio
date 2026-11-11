@@ -50,7 +50,7 @@ export default function DevicePage({ snapshot, devicePath, device, active, busy,
   const latest = snapshot?.engine_ready && sample && sample.restartCount === restartCount
     && performance.now() - sample.received < 400
     ? sample.status : snapshot?.status;
-  const status = latest?.device?.path === device?.path ? latest : undefined;
+  const status = latest?.device?.path === device?.path && latest?.state !== 'faulted' && latest?.state !== 'waiting' ? latest : undefined;
   const pressed = buttonNames.filter((_, index) => status?.buttons[index]);
   const extended = buttonNames.slice(15).filter(button => device?.buttons.includes(button));
   const stats = status?.stats;
@@ -59,9 +59,11 @@ export default function DevicePage({ snapshot, devicePath, device, active, busy,
   const mapping = !!latest?.emitting || !!latest?.output_backend;
   const stopLabel = latest?.state === 'preparing_output' ? '取消启动' : latest?.state === 'waiting' ? '取消等待'
     : mapping ? '停止映射' : '停止观察';
+  const physical = devices.filter(entry => entry.origin !== 'virtual' && entry.gamepad);
+  const inaccessible = physical.filter(entry => entry.open_error);
 
   return <div className={styles.page}>
-    <section className={'app-card ' + styles.connection} aria-label="连接状态">
+    <section className={styles.connection} aria-label="连接状态">
       <div className="studio-device-controls">
         <label className="studio-field">映射使用的手柄
           <select value={devicePath} disabled={active || busy} onChange={event => onSelect(event.target.value)}>
@@ -86,15 +88,23 @@ export default function DevicePage({ snapshot, devicePath, device, active, busy,
           </button>
         </div>
       </div>
-      {!devices.some(entry => entry.origin !== 'virtual' && entry.gamepad && entry.gyro && !entry.open_error) &&
-        <p className="studio-note">暂无可访问的体感接口。请检查第三方接管模式及 HidHide 读取权限。</p>}
+      {!physical.length && <p className={styles.connectionHint}>连接手柄后，点击重新检测。</p>}
+      {device && <p className={styles.connectionHint}>
+        <span translate="no">{device.name}</span> · {device.gyro ? '体感可用' : '无体感'}
+      </p>}
+      {inaccessible.map(entry => <p className={styles.connectionError} role="alert" key={entry.id}>
+        <strong translate="no">{entry.name}</strong> · {entry.open_error}
+      </p>)}
+      {!!inaccessible.length && <button type="button" className="secondary-btn" onClick={onSettings}>检查驱动与读取权限</button>}
+      {(latest?.state === 'faulted' || latest?.state === 'waiting') && latest.message &&
+        <p className={latest.state === 'faulted' ? styles.connectionError : styles.connectionHint} role={latest.state === 'faulted' ? 'alert' : 'status'}>{latest.message}</p>}
     </section>
     {device && <DeviceMonitor key={device.path + ':' + restartCount} device={device} status={status} />}
-    {calibration && <details className="app-card studio-details" ref={calibrationDetails}>
+    {calibration && <details className={styles.details} ref={calibrationDetails}>
       <summary className={styles.foldHeading}><strong>设备校准</strong><span>静止校准 · 六面校准 · 设备方向与噪声</span></summary>
       {calibration}
     </details>}
-    <details className="app-card studio-details">
+    <details className={styles.details}>
       <summary className={styles.foldHeading}><strong>输入诊断</strong><span>原始和处理后输入 · 设备接口</span></summary>
       {device && <div className={styles.diagnostics}>
         <div className={styles.deviceMeta}>

@@ -1,4 +1,6 @@
-import {chordParts,inputs,outputLabel,wheelOutputs,type Action} from '../types';
+import {chordParts,inputs,outputLabel,wheelOutputs,type Action,type TriggerSettings} from '../types';
+import {triggerCompetition,type TriggerBinding} from '../mapping-triggers';
+import {t} from '../i18n';
 import {Range,Toggle} from './Controls';
 import {OptionPicker} from './OptionPicker';
 import {padChoices, outputChoices} from './binding-choices';
@@ -6,16 +8,27 @@ import styles from './GameProfilesPage.module.css';
 import {modifierOutputs as modifiers} from '../keyboard';
 export const inputOpposites:Record<string,string>={left_stick_up:'left_stick_down',left_stick_down:'left_stick_up',left_stick_left:'left_stick_right',left_stick_right:'left_stick_left',right_stick_up:'right_stick_down',right_stick_down:'right_stick_up',right_stick_left:'right_stick_right',right_stick_right:'right_stick_left',dpad_up:'dpad_down',dpad_down:'dpad_up',dpad_left:'dpad_right',dpad_right:'dpad_left',left_stick_inner:'left_stick_outer',left_stick_outer:'left_stick_inner',right_stick_inner:'right_stick_outer',right_stick_outer:'right_stick_inner'};
 export const triggerNames={down:'按住',short:'短按',long:'长按',double:'双击',on_press:'按下时触发',on_release:'松开时触发'};
-export function ActionTriggerFields({action,onChange,showHint=true}:{action:Action;onChange:(patch:Partial<Action>)=>void;showHint?:boolean}){
+const triggerHints={down:'按住期间持续输出。',short:'在短按最长时间内松开后触发，输出持续时间与本次按压相同。',long:'达到长按时间后触发，可保持到松开或只触发一次。',double:'在时间窗内再次按下时触发，第二次按住期间持续输出。',on_press:'按下时输出一次，持续时间由下方设置决定。',on_release:'松开时输出一次，持续时间由下方设置决定。'};
+export function ActionTriggerFields({action,onChange,peers=[]}:{action:TriggerBinding;onChange:(patch:Partial<TriggerSettings>)=>void;peers?:TriggerBinding[]}){
  const trigger=action.trigger??'down';
- const choose=(next:Action['trigger'])=>{if(next!==trigger)onChange({trigger:next,trigger_ms:next==='on_press'||next==='on_release'?50:250});};
+ const choose=(next:TriggerSettings['trigger'])=>{if(next!==trigger)onChange({trigger:next,trigger_ms:next==='on_press'||next==='on_release'?50:250});};
+ const competition=triggerCompetition(action,peers);
+ const ordinary=trigger==='down'||trigger==='on_press'||trigger==='on_release';
  return <div className={styles.bindingFields}>
    <div className={styles.triggerModes} role="group" aria-label="动作触发方式">{Object.entries(triggerNames).map(([value,label])=><button type="button" key={value} aria-pressed={trigger===value} onClick={()=>choose(value as Action['trigger'])}>{label}</button>)}</div>
    {trigger!=='down'&&<Range label={trigger==='long'?'长按时间':trigger==='double'?'双击时间窗':trigger==='short'?'短按最长时间':'触发持续时间'} value={action.trigger_ms??250} min={10} max={5000} step={10} unit=" ms" onChange={trigger_ms=>onChange({trigger_ms})}/>}
    {trigger==='long'&&<Toggle label="长按触发后保持，直到松开" value={action.sustain!==false} onChange={sustain=>onChange({sustain})}/>}
    <Toggle label="按住连发" value={action.turbo_ms!=null} onChange={enabled=>onChange({turbo_ms:enabled?100:null})}/>
    {action.turbo_ms!=null&&<Range label="连发周期" value={action.turbo_ms} min={20} max={2000} step={10} unit=" ms" onChange={turbo_ms=>onChange({turbo_ms})}/>}
-   {showHint&&<small>普通按住立即生效。短按在松开后确认；双击在第二次按下时生效，保持到松开。同一输入可添加多种触发，短按与长按可避免同时触发普通按住动作。</small>}
+   <small>{triggerHints[trigger]}</small>
+   <Toggle label="允许同时触发" value={!!action.allow_simultaneous} onChange={allow_simultaneous=>onChange({allow_simultaneous})}
+     help="开启后，这条映射独立判断触发方式，可与同一输入的其他动作一起输出。"/>
+   {!action.allow_simultaneous&&<>
+     {ordinary&&competition.long!==null&&<small>同一输入有长按：普通动作等待松开；达到长按时间后只触发长按。</small>}
+     {ordinary&&competition.short!==null&&<small>同一输入有短按：短按时间内松开只触发短按；超过该时间后由其余触发方式决定输出。</small>}
+     {(ordinary||trigger==='short')&&competition.double!==null&&<small role="status">{t('同一输入有双击：单次按压需等待双击时间窗（{0} ms）结束；识别为双击后取消单次动作。').replace('{0}',String(competition.double))}</small>}
+     {(trigger==='long'||trigger==='double')&&competition.long!==null&&competition.double!==null&&<small>长按与双击共用输入时，先识别成功的触发方式生效，直到本次松开。</small>}
+   </>}
  </div>;
 }
 export function InputChordFields({value,onChange,allowed=inputs,showHint=true,split=false}: {

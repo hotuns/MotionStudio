@@ -11,7 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{
-    Manager, PhysicalPosition, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent,
 };
 
 pub const LABEL: &str = "binding-window";
@@ -193,7 +194,13 @@ pub async fn open_binding_window(
         }
         _ => {}
     });
-    place_floating_window(&window, &floating);
+    if let Some(position) = floating
+        .outer_size()
+        .ok()
+        .and_then(|size| floating_position(&window, size))
+    {
+        let _ = floating.set_position(position);
+    }
     if let Err(error) = floating.show() {
         let _ = floating.destroy();
         return Err(text(error));
@@ -202,14 +209,16 @@ pub async fn open_binding_window(
     Ok(id)
 }
 
-pub(crate) fn place_floating_window(window: &WebviewWindow, floating: &WebviewWindow) {
-    if let (Ok(Some(monitor)), Ok(size)) = (window.current_monitor(), floating.outer_size()) {
-        let work = monitor.work_area();
-        let margin = (16.0 * monitor.scale_factor()).round() as i32;
-        let x = work.position.x + (work.size.width as i32 - size.width as i32 - margin).max(0);
-        let y = work.position.y + margin;
-        let _ = floating.set_position(PhysicalPosition::new(x, y));
-    }
+pub(crate) fn floating_position(
+    window: &WebviewWindow,
+    size: PhysicalSize<u32>,
+) -> Option<PhysicalPosition<i32>> {
+    let monitor = window.current_monitor().ok()??;
+    let work = monitor.work_area();
+    let margin = (16.0 * monitor.scale_factor()).round() as i32;
+    let x = work.position.x + (work.size.width as i32 - size.width as i32 - margin).max(0);
+    let y = work.position.y + margin;
+    Some(PhysicalPosition::new(x, y))
 }
 
 #[tauri::command]

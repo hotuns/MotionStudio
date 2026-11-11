@@ -1,5 +1,7 @@
 import {t,type Language} from '../i18n';
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { isTauri } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { version } from '../../package.json';
 import { StudioIcon, type StudioIconName } from './StudioIcon';
 import {CurrentProfilePicker} from './CurrentProfilePicker';
@@ -18,23 +20,19 @@ const pages = {
 } as const;
 
 export type StudioPage = keyof typeof pages;
-const navigation: { label?: string; pages: StudioPage[] }[] = [
-  { pages: ['overview', 'games', 'controllerStatus'] },
-  { label: '资源', pages: ['profiles', 'switching', 'settings'] },
-];
 
-type Command = { label: string; icon: StudioIconName; run: () => void };
+type Command = { label: string; icon: StudioIconName; run: () => void; disabled?: boolean };
 type Props = {
   page: StudioPage;
   gameTab: GameTab;
   onNavigate: (page: StudioPage) => void;
   onGameTab: (tab: GameTab) => void;
   children: ReactNode;
+  controllerNavigation: ReactNode;
   profileId: string;
   profiles: { id: string; name: string }[];
   onSelectProfile: (id: string) => void;
   onChooseCommunity: (profile: CommunityProfile) => void;
-  layerControls?: ReactNode;
   onNewProfile: () => void;
   onImportJsm: () => void;
   onGamepad: () => void;
@@ -67,7 +65,7 @@ type Props = {
 };
 
 export function StudioShell(props: Props) {
-  const [theme, setTheme] = useState<'light' | 'dark'>(() => localStorage.getItem('motion-studio-theme') === 'dark' ? 'dark' : 'light');
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => document.documentElement.dataset.theme === 'light' ? 'light' : 'dark');
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState('');
   const palette = useRef<HTMLDialogElement>(null);
@@ -77,7 +75,15 @@ export function StudioShell(props: Props) {
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = theme;
-    localStorage.setItem('motion-studio-theme', theme);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'light' ? '#f0f1f3' : '#101210');
+    try {
+      localStorage.setItem('motion-studio-theme', theme);
+    } catch {
+      // Keep theme switching usable when storage is unavailable.
+    }
+    if (isTauri()) {
+      void getCurrentWindow().setTheme(theme).catch(error => console.warn('Unable to update the window theme', error));
+    }
   }, [theme]);
   useEffect(() => { scrollArea.current?.scrollTo(0, 0); }, [props.page, props.gameTab]);
   useEffect(() => { if (searchOpen && !palette.current?.open) palette.current?.showModal(); }, [searchOpen]);
@@ -105,31 +111,26 @@ export function StudioShell(props: Props) {
     return () => window.removeEventListener('keydown', keyDown);
   }, []);
 
+  const blocked = props.calibrating || props.busy;
+  const outputBlocked = blocked || props.capturing;
   const tools: Command[] = [
+    { label: '新建配置', icon: 'profiles', run: props.onNewProfile, disabled: blocked },
+    { label: '导入 JSM 配置', icon: 'folder', run: props.onImportJsm, disabled: outputBlocked },
+    { label: '搜索页面或操作', icon: 'search', run: openSearch },
+    { label: props.gamepadOn ? '停用手柄界面操作' : '手柄操作界面', icon: 'games', run: props.onGamepad, disabled: outputBlocked || !props.gamepadAvailable },
     { label: '软件更新', icon: 'settings', run: openUpdates },
     { label: '打开配置文件夹', icon: 'folder', run: props.onOpenFolder },
-    { label: '自动切换', icon: 'profiles', run: () => props.onNavigate('switching') },
     { label: '帮助与快捷键', icon: 'help', run: props.onHelp },
   ];
   const allCommands: Command[] = [
-    ...navigation.flatMap(group => group.pages).map(page => ({ ...pages[page], run: () => props.onNavigate(page) })),
+    ...(Object.keys(pages) as StudioPage[]).map(page => ({ ...pages[page], run: () => props.onNavigate(page) })),
     ...gameTabs.map(tab => ({ label: tab.shortcut, icon: tab.icon, run: () => props.onGameTab(tab.id) })),
-    { label: '新建配置', icon: 'profiles', run: props.onNewProfile },
-    { label: '导入 JSM 配置', icon: 'profiles', run: props.onImportJsm },
-    ...tools.filter(command => command.label !== '自动切换'),
+    ...tools.filter(command => command.label !== '搜索页面或操作'),
   ];
   const commands = allCommands.filter(command => (t(command.label)+(command.label===pages.games.label?' '+t('按键映射 组合键 鼠标滚轮 侧键 摇杆设置'):'')).toLowerCase().includes(query.trim().toLowerCase()));
-  const runCommand = (command: Command) => { palette.current?.close(); command.run(); };
-  const navButton = (page: StudioPage) => (
-    <button type="button" key={page} className={styles.navItem} aria-current={props.page === page ? 'page' : undefined}
-      aria-label={pages[page].label} title={pages[page].label} onClick={() => props.onNavigate(page)}>
-      <StudioIcon name={pages[page].icon} /><span>{pages[page].label}</span>
-    </button>
-  );
-
+  const runCommand = (command: Command) => { if (command.disabled) return; palette.current?.close(); command.run(); };
   const heading = pages[props.page];
-  const blocked = props.calibrating || props.busy;
-  const outputBlocked = blocked || props.capturing;
+  const overview = props.page === 'overview';
   const light = theme === 'light';
   const outputLabel = props.preparing ? '正在准备输出' : props.waiting ? '等待手柄连接' : props.outputOn ? '映射运行中'
     : props.calibrating || props.capturing ? '输出已暂停' : '映射已停止';
@@ -138,110 +139,92 @@ export function StudioShell(props: Props) {
 
   return (
     <div className={styles.shell}>
-      <aside className={styles.sidebar} data-pad-zone="sidebar">
-        <div className={styles.brand}>
-          <span className={styles.brandMark} aria-hidden="true"><i /><i /><i /></span>
-          <span><strong>Motion Studio</strong><small>CONTROL WORKSPACE</small></span>
-        </div>
-        <button type="button" className={styles.searchButton} aria-label="搜索页面或操作" onClick={openSearch}>
-          <StudioIcon name="search" size={16} /><span>搜索页面或操作…</span><kbd>Ctrl K</kbd>
-        </button>
-        <nav aria-label="控制工作区" className={styles.navigation}>
-          {navigation.map(group => (
-            <Fragment key={group.pages[0]}>
-              {group.label && <div className={styles.navLabel}>{group.label}</div>}
-              <div className={styles.navGroup}>{group.pages.map(navButton)}</div>
-            </Fragment>
-          ))}
-        </nav>
-        <div className={styles.sidebarBottom}>
-          <button type="button" className={styles.community} onClick={props.onHelp}>
-            <StudioIcon name="help" size={16} />支持与帮助<span>↗</span>
-          </button>
-          <div className={styles.preferences}>
-            <label title="界面语言">
-              <span className="language-select-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3c5 5 5 13 0 18 M12 3c-5 5-5 13 0 18"/></svg></span>
-              <select aria-label="界面语言" value={props.language} disabled={props.languageDisabled} onChange={event=>props.onLanguage(event.target.value as Language)}>
-                <option value="zh-CN" translate="no">简体中文</option><option value="en" translate="no">English</option>
-              </select>
-            </label>
-            <button type="button" className={[themeStyles.themeToggle, themeStyles.compact, light ? themeStyles.on : ''].join(' ')}
-              aria-label={light ? '切换为深色主题' : '切换为浅色主题'} aria-pressed={light}
-              title={light ? '切换为深色主题' : '切换为浅色主题'}
-              onClick={() => setTheme(light ? 'dark' : 'light')}>
-              <span className={themeStyles.labelGroup}><span className={themeStyles.icon} aria-hidden="true">{light ? '☀' : '☾'}</span></span>
-              <span className={themeStyles.switch} aria-hidden="true"><span className={themeStyles.thumb} /></span>
-            </button>
-          </div>
-          {props.updateVersion && <button type="button" className={styles.updateLink} onClick={openUpdates}>
-            {t('发现新版本 v{0}').replace('{0}', props.updateVersion)}
-          </button>}
-          <div className={styles.version}>Motion Studio <span>v{version}</span></div>
-        </div>
-      </aside>
       <div className={styles.workspace}>
         <header className={styles.toolbar} data-pad-zone="toolbar">
           <div className={styles.profileTools}>
+            <button type="button" className={styles.homeButton + ' secondary-btn'} data-workbench-home
+              aria-current={overview ? 'page' : undefined} title={overview ? t('工作台') : t('返回工作台')}
+              onClick={() => props.onNavigate('overview')}>
+              <span className={overview ? undefined : styles.backIcon}><StudioIcon name={overview ? 'overview' : 'arrow'} size={16} /></span>
+              工作台
+            </button>
+            <h1 className={overview ? styles.srOnly : styles.pageTitle}>{heading.label}</h1>
             <div className={styles.profileSelect} data-profile-picker>
               <StudioIcon name="profiles" size={18} /><span>当前配置</span>
               <CurrentProfilePicker value={props.profileId} profiles={props.profiles} disabled={blocked}
                 onSelect={props.onSelectProfile} onChooseCommunity={props.onChooseCommunity} onCreate={props.onNewProfile}/>
               {props.dirty && <span className={styles.dirtyDot} title="有未保存的修改" />}
             </div>
-            {props.layerControls}
-            <button type="button" className="secondary-btn" disabled={blocked} onClick={props.onNewProfile}>新建配置</button>
           </div>
           <div className={styles.toolbarActions}>
-            <button type="button" className="secondary-btn" aria-label="手柄操作界面" aria-pressed={props.gamepadOn} disabled={outputBlocked||!props.gamepadAvailable} onClick={props.onGamepad} title="方向移动，A 确认，B 返回；View + Menu 切回界面">
-              <StudioIcon name="games" size={16}/>{props.gamepadOn?'手柄操作中':'手柄操作'}
-            </button>
+            {props.gamepadOn && <button type="button" className="secondary-btn" aria-label="手柄操作界面" aria-pressed
+              disabled={outputBlocked} onClick={props.onGamepad} title="方向移动，A 确认，B 返回；View + Menu 切回界面">
+              <StudioIcon name="games" size={16}/>手柄操作中
+            </button>}
             <div className={styles.outputControls}>
-              <span className={styles.outputStatus} data-running={props.outputOn} role="status">
-                <span className={styles.statusDot} aria-hidden="true" />{outputLabel}
-              </span>
               <button type="button" className={styles.mappingAction + ' ' + (stopAction ? 'danger-btn' : 'primary-btn')}
                 disabled={outputBlocked || props.outputDisabled} onClick={stopAction ? props.onStopMapping : props.onStartMapping}>
                 <StudioIcon name={stopAction ? 'stop' : 'play'} size={16}/>{actionLabel}
               </button>
             </div>
             <details className={styles.tools}>
-              <summary aria-label="更多工具" title="更多工具"><StudioIcon name="more" /></summary>
+              <summary aria-label="更多工具" title={props.updateVersion ? t('发现新版本 v{0}').replace('{0}', props.updateVersion) : t('更多工具')}>
+                <StudioIcon name="more" size={18} />更多工具{props.updateVersion && <span className={styles.updateDot} />}
+              </summary>
               <div className={styles.toolsMenu}>{tools.map(command => (
-                <button key={command.label} type="button" onClick={event => {
+                <button key={command.label} type="button" disabled={command.disabled} onClick={event => {
                   event.currentTarget.closest('details')?.removeAttribute('open');
                   command.run();
                 }}><StudioIcon name={command.icon} size={16} />{command.label}</button>
-              ))}</div>
+              ))}
+                <div className={styles.preferences}>
+                  <label title="界面语言">
+                    <span className="language-select-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18 M12 3c5 5 5 13 0 18 M12 3c-5 5-5 13 0 18"/></svg></span>
+                    <select aria-label="界面语言" value={props.language} disabled={props.languageDisabled} onChange={event=>props.onLanguage(event.target.value as Language)}>
+                      <option value="zh-CN" translate="no">简体中文</option><option value="en" translate="no">English</option>
+                    </select>
+                  </label>
+                  <button type="button" className={[themeStyles.themeToggle, themeStyles.compact, light ? themeStyles.on : ''].join(' ')}
+                    aria-label={light ? '切换为深色主题' : '切换为浅色主题'} aria-pressed={light}
+                    title={light ? '切换为深色主题' : '切换为浅色主题'} onClick={() => setTheme(light ? 'dark' : 'light')}>
+                    <span className={themeStyles.labelGroup}><span className={themeStyles.icon} aria-hidden="true">{light ? '☀' : '☾'}</span></span>
+                    <span className={themeStyles.switch} aria-hidden="true"><span className={themeStyles.thumb} /></span>
+                  </button>
+                </div>
+                {props.updateVersion && <button type="button" className={styles.updateLink} onClick={event => {
+                  event.currentTarget.closest('details')?.removeAttribute('open');
+                  openUpdates();
+                }}>{t('发现新版本 v{0}').replace('{0}', props.updateVersion)}</button>}
+                <div className={styles.version}>Motion Studio <span>v{version}</span></div>
+              </div>
             </details>
           </div>
         </header>
         <div className={styles.scrollArea} ref={scrollArea} data-pad-scroll>
           <main className={styles.main} id="studio-workspace" data-pad-zone="content">
-            <div className={styles.pageHeading}>
-              <div>
-                <div className={styles.breadcrumb}>Motion Studio <span>/</span> {heading.label}</div>
-                <h1>{heading.label}</h1>
-                <p>{heading.description}</p>
-              </div>
-            </div>
             {props.children}
           </main>
         </div>
         <footer className={[styles.footer, props.pending ? styles.footerPending : ''].join(' ')} data-pad-zone="footer">
-          <div className={styles.editState} role="status">
-            <span className={props.pending ? styles.dirtyDot : styles.savedIcon}>
-              {!props.pending && <StudioIcon name="check" size={15} />}
+          {props.pending && <div className={styles.pendingBar}>
+            <div className={styles.editState} role="status">
+              <span className={styles.dirtyDot} />
+              <strong>{props.dirty ? '有未保存的修改' : '当前配置尚未应用'}</strong>
+            </div>
+            <div className={styles.footerActions}>
+              {props.dirty && <button type="button" className="ghost-btn" disabled={blocked} onClick={props.onDiscard}>撤销修改</button>}
+              {props.dirty && <button type="button" className="secondary-btn" disabled={!props.canSave || outputBlocked} onClick={props.onSave}>保存配置<kbd>Ctrl S</kbd></button>}
+              <button type="button" className="primary-btn" disabled={!props.canApply || outputBlocked} onClick={props.onApply}>应用修改<kbd>Ctrl ↵</kbd></button>
+            </div>
+          </div>}
+          {props.controllerNavigation}
+          <div className={styles.statusBar} role="status">
+            <span className={styles.outputStatus} data-running={props.outputOn}>
+              <span className={styles.statusDot} aria-hidden="true" />{outputLabel}
             </span>
-            <span>
-              <strong>{props.dirty ? '有未保存的修改' : props.pending ? '当前配置尚未应用' : '没有待应用的修改'}</strong>
-              <small title={props.status}>{props.status}</small>
-            </span>
-          </div>
-          <div className={styles.footerActions}>
-            <span className={styles.connection}><span className={styles.statusDot} />{props.deviceCount ? props.deviceCount + ' 台设备' : '未连接设备'}</span>
-            {props.dirty && <button type="button" className="ghost-btn" disabled={blocked} onClick={props.onDiscard}>撤销修改</button>}
-            <button type="button" className="secondary-btn" disabled={!props.canSave || outputBlocked} onClick={props.onSave}>保存配置<kbd>Ctrl S</kbd></button>
-            <button type="button" className="primary-btn" disabled={!props.canApply || outputBlocked} onClick={props.onApply}>应用修改<kbd>Ctrl ↵</kbd></button>
+            <span className={styles.statusMessage} title={props.status}>{props.status}</span>
+            <span className={styles.connection}>{props.deviceCount ? props.deviceCount + ' 台设备' : '未连接设备'}</span>
+            <span className={styles.stopHint}><kbd>F12</kbd> 停止映射</span>
           </div>
         </footer>
       </div>
@@ -251,14 +234,14 @@ export function StudioShell(props: Props) {
           <StudioIcon name="search" />
           <input autoFocus aria-label="搜索页面或操作" placeholder="搜索页面或操作…" value={query} onChange={event => setQuery(event.target.value)}
             onKeyDown={event => {
-              if (event.key === 'Enter' && commands[0]) runCommand(commands[0]);
-              if (event.key === 'ArrowDown') { event.preventDefault(); palette.current?.querySelector<HTMLButtonElement>('[data-command]')?.focus(); }
+              if (event.key === 'Enter') { const command=commands.find(item=>!item.disabled); if(command)runCommand(command); }
+              if (event.key === 'ArrowDown') { event.preventDefault(); palette.current?.querySelector<HTMLButtonElement>('[data-command]:not(:disabled)')?.focus(); }
             }} />
           <button type="button" className={styles.closeButton} aria-label="关闭搜索" onClick={() => palette.current?.close()}><StudioIcon name="close" size={18} /></button>
         </div>
         <p className={styles.paletteHint}>输入功能名称，快速前往</p>
         <div className={styles.commandList}>
-          {commands.map(command => <button type="button" data-command key={command.label} onClick={() => runCommand(command)}>
+          {commands.map(command => <button type="button" data-command key={command.label} disabled={command.disabled} onClick={() => runCommand(command)}>
             <StudioIcon name={command.icon} size={18} /><span>{command.label}</span><StudioIcon name="arrow" size={16} />
           </button>)}
           {!commands.length && <p>没有匹配的操作</p>}

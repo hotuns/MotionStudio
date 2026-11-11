@@ -151,7 +151,8 @@ impl Default for Rotation {
 pub struct Flick {
     pub enabled: bool,
     pub stick: Stick,
-    pub output: AimOutput,
+    #[serde(rename = "output", skip_serializing)]
+    _legacy_output: serde::de::IgnoredAny,
     pub enable_input: Option<String>,
     pub deadzone: f32,
     pub smooth_ms: f32,
@@ -171,12 +172,12 @@ impl Default for Flick {
         Self {
             enabled: false,
             stick: Stick::Right,
-            output: AimOutput::Mouse,
+            _legacy_output: serde::de::IgnoredAny,
             enable_input: None,
             deadzone: 0.85,
             smooth_ms: 100.0,
             forward_deadzone: 0.0,
-            release_ease: 0.0,
+            release_ease: 0.5,
             stabilise_ms: 0.0,
             speed_gate_ms: 0.0,
             slow_lock: false,
@@ -392,7 +393,12 @@ impl MotionConfig {
             ("外圈交还阈值", self.rotation.outer, 0.05, 1.),
             ("Flick 死区", self.flick.deadzone, 0.05, 0.99),
             ("Flick 时间", self.flick.smooth_ms, 0., 2000.),
-            ("Flick 缓出强度", self.flick.release_ease, 0., 1.),
+            (
+                "Flick 缓出强度",
+                self.flick.release_ease,
+                0.,
+                flexinput_engine::eval::MAX_FLICK_RELEASE_EASE,
+            ),
             ("正前方死角", self.flick.forward_deadzone, 0., 180.),
             ("Flick 稳定", self.flick.stabilise_ms, 0., 1000.),
             ("快推判定时间", self.flick.speed_gate_ms, 0., 2000.),

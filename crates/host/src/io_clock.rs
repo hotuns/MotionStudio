@@ -4,13 +4,10 @@ use motion_core::{
     protocol::DisplaySyncStatus,
     timing::{
         io_schedule::{IoPass, IoSchedule},
-        HrWaiter,
+        HrWaiter, IoRates,
     },
 };
 use std::time::{Duration, Instant};
-
-const POLL_HZ: u32 = 500;
-const POLL_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / POLL_HZ as u64);
 
 #[cfg(windows)]
 const SYNC: display_clock::OutputSync = display_clock::OutputSync {
@@ -22,6 +19,7 @@ const SYNC: display_clock::OutputSync = display_clock::OutputSync {
 pub(crate) struct IoClock {
     schedule: IoSchedule,
     waiter: HrWaiter,
+    rates: IoRates,
     #[cfg(windows)]
     enabled: bool,
     #[cfg(windows)]
@@ -33,6 +31,7 @@ impl IoClock {
         Self {
             schedule: IoSchedule::new(now),
             waiter: HrWaiter::new(),
+            rates: IoRates::default(),
             #[cfg(windows)]
             enabled: false,
             #[cfg(windows)]
@@ -42,6 +41,11 @@ impl IoClock {
 
     pub fn reset(&mut self, now: Instant) {
         self.schedule = IoSchedule::new(now);
+    }
+
+    pub fn set_rates(&mut self, rates: IoRates) {
+        self.rates = rates;
+        self.reset(Instant::now());
     }
 
     pub fn set_enabled(&mut self, enabled: bool) {
@@ -59,7 +63,7 @@ impl IoClock {
         if self.enabled {
             return display_clock::output_hz(SYNC.per_frame).clamp(30, 4000);
         }
-        POLL_HZ
+        self.rates.fixed_output_hz()
     }
 
     fn display_tick(&self, interval: Duration) -> Option<Instant> {
@@ -74,13 +78,14 @@ impl IoClock {
 
     pub fn begin(&mut self, now: Instant) -> IoPass {
         let interval = Duration::from_nanos(1_000_000_000 / u64::from(self.output_hz()));
+        let poll_interval = Duration::from_nanos(1_000_000_000 / u64::from(self.rates.polling_hz));
         let tick = self.display_tick(interval);
         #[cfg(windows)]
         let margin = self.precise.margin();
         #[cfg(not(windows))]
         let margin = Duration::ZERO;
         self.schedule
-            .begin(now, POLL_INTERVAL, interval, tick, margin)
+            .begin(now, poll_interval, interval, tick, margin)
     }
 
     pub fn wait_until(&mut self, deadline: Instant) {

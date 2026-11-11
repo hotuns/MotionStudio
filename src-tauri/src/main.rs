@@ -453,6 +453,7 @@ async fn start_mapping(
                 output_backend: runtime_settings.output_backend,
                 gamepad_backend: runtime_settings.gamepad_backend,
                 mouse_display_sync: runtime_settings.mouse_display_sync,
+                io_rates: runtime_settings.io_rates,
                 bias,
                 sensor_calibration,
             }),
@@ -766,7 +767,7 @@ fn main() {
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 for label in [binding_window::LABEL, game_calibration::LABEL] {
-                    if let Some(floating) = window.get_webview_window(label) {
+                    if let Some(floating) = window.get_window(label) {
                         let _ = floating.destroy();
                     }
                 }
@@ -780,8 +781,6 @@ fn main() {
             binding_window::show_binding_window,
             binding_window::batch_capture,
             game_calibration::open_calibration_window,
-            game_calibration::calibration_window_state,
-            game_calibration::calibration_window_action,
             updates::check_studio_update,
             updates::download_studio_update,
             updates::install_studio_update,

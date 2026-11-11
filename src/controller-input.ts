@@ -1,7 +1,7 @@
 import native from './native-input-defaults.json';
 import type {ControllerInputConfig,Profile} from './types';
 
-export const inputDefaults=():ControllerInputConfig=>({lstick_center:[0,0],rstick_center:[0,0],lstick_radial:Array(native.radial_buckets).fill(1),rstick_radial:Array(native.radial_buckets).fill(1),ltrig_min:0,ltrig_max:1,rtrig_min:0,rtrig_max:1,digital_triggers:false,ltrig_digital_threshold:native.trigger_digital_threshold,rtrig_digital_threshold:native.trigger_digital_threshold,trig_hysteresis:native.trigger_hysteresis,trig_debounce_ms:native.trigger_debounce_ms});
+export const inputDefaults=():ControllerInputConfig=>({lstick_directions:'axis_threshold',rstick_directions:'axis_threshold',lstick_center:[0,0],rstick_center:[0,0],lstick_radial:Array(native.radial_buckets).fill(1),rstick_radial:Array(native.radial_buckets).fill(1),ltrig_min:0,ltrig_max:1,rtrig_min:0,rtrig_max:1,digital_triggers:false,ltrig_digital_threshold:native.trigger_digital_threshold,rtrig_digital_threshold:native.trigger_digital_threshold,trig_hysteresis:native.trigger_hysteresis,trig_debounce_ms:native.trigger_debounce_ms});
 export const inputConfig=(profile:Profile):ControllerInputConfig=>({...inputDefaults(),...profile.input});
 export function inputDeadzone(profile:Profile,side:'left'|'right'){
   return profile.input?.[side==='left'?'deadzone_left':'deadzone_right']??(profile.stick_mouse.enabled&&profile.stick_mouse.stick===side?profile.stick_mouse.deadzone:profile.stick_deadzone);
