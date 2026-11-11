@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { portableEntries, stagePortable } from './package-portable.mjs';
@@ -61,7 +61,14 @@ function releaseAsset(dir, file) {
 }
 
 mkdirSync(artifacts, { recursive: true });
-const stage = mkdtempSync(join(realpathSync(artifacts), '.update-release-'));
+const artifactsRoot = realpathSync(artifacts);
+const stage = mkdtempSync(join(artifactsRoot, '.update-release-'));
+function removeReleaseDirectory(path) {
+  if (existsSync(path) && dirname(realpathSync(path)) === artifactsRoot) {
+    rmSync(path, { recursive: true, maxRetries: 3 });
+  }
+}
+
 try {
   copyFileSync(setupBuild, join(stage, setupName));
   copyFileSync(setupBuild + '.sig', join(stage, setupName + '.sig'));
@@ -85,10 +92,21 @@ try {
     createHash('sha256').update(readFileSync(join(stage, file))).digest('hex') + '  ' + file);
   writeFileSync(join(stage, 'latest.json'), JSON.stringify(manifest, null, 2) + '\n');
   writeFileSync(join(stage, 'SHA256SUMS.txt'), checksums.join('\n') + '\n');
-  renameSync(stage, output);
-} finally {
-  if (existsSync(stage) && dirname(realpathSync(stage)) === realpathSync(artifacts)) {
-    rmSync(stage, { recursive: true });
+  try {
+    renameSync(stage, output);
+  } catch (error) {
+    if (process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+    // Windows can block renaming a directory while another process reads its files.
+    // Reserve the destination first so the fallback cannot replace another release.
+    mkdirSync(output);
+    try {
+      cpSync(stage, output, { recursive: true, force: false, errorOnExist: true });
+    } catch (copyError) {
+      removeReleaseDirectory(output);
+      throw copyError;
+    }
   }
+} finally {
+  removeReleaseDirectory(stage);
 }
 console.log('Signed release: ' + output);
