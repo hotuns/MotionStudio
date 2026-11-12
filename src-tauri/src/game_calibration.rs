@@ -78,6 +78,11 @@ struct Session {
     stick: Stick,
     language: Language,
     owns_measurement: bool,
+    owns_trial: bool,
+    manual: bool,
+    manual_available: bool,
+    original_scale: f32,
+    draft_scale: f32,
     result: Option<GameAngleMeasurement>,
     saved: Option<Saved>,
     hotkeys: Hotkeys,
@@ -98,7 +103,7 @@ impl Session {
             || !status.emitting
             || status.state != "running"
             || status.binding_capture
-            || !status.device.as_ref().is_some_and(|device| device.gyro)
+            || status.device.is_none()
         {
             return Err(MAPPING_CHANGED);
         }
@@ -118,7 +123,7 @@ impl Session {
         };
         let measurement_error = if measuring.is_some() {
             motion.measurement_error.clone()
-        } else if self.owns_measurement && blocked.is_none() {
+        } else if self.owns_measurement && !self.owns_trial && blocked.is_none() {
             Some("转角测量已中断，请重新开始。".into())
         } else {
             None
@@ -137,6 +142,9 @@ impl Session {
             saved: self.saved.clone(),
             hotkeys: self.hotkeys,
             action_error: self.action_error.clone(),
+            manual: self.manual,
+            manual_available: self.manual_available,
+            draft_scale: self.draft_scale,
         }
     }
 
@@ -153,9 +161,17 @@ impl Session {
         }
         self.ready(snapshot).ok()?;
         match (key, snapshot.status.motion.measuring.is_some()) {
-            (Hotkey::Measure, true) if self.owns_measurement => Some(CalibrationAction::Finish),
-            (Hotkey::Measure, false) => Some(CalibrationAction::Start { axis: "yaw" }),
-            (Hotkey::Apply, false) if self.result.is_some() => Some(CalibrationAction::Apply),
+            (Hotkey::Measure, true) if self.owns_measurement => Some(if self.owns_trial {
+                CalibrationAction::Cancel
+            } else {
+                CalibrationAction::Finish
+            }),
+            (Hotkey::Measure, false) => Some(if self.manual {
+                CalibrationAction::Start { axis: "yaw" }
+            } else {
+                CalibrationAction::Trial
+            }),
+            (Hotkey::Apply, false) if !self.manual => Some(CalibrationAction::Apply),
             _ => None,
         }
     }
@@ -175,6 +191,9 @@ struct CalibrationView {
     saved: Option<Saved>,
     hotkeys: Hotkeys,
     action_error: Option<String>,
+    manual: bool,
+    manual_available: bool,
+    draft_scale: f32,
 }
 
 #[tauri::command]
@@ -203,8 +222,11 @@ pub async fn open_calibration_window(
         }
         let entry = owner.store.load(&profile_id).map_err(text)?;
         let gyro = &entry.profile.gyro;
-        if !gyro.enabled || gyro.motion.mode != MotionMode::Pointer {
-            return Err("转角测量需要启用角速度瞄准模式，并选择水平或垂直轴".into());
+        if !gyro.enabled
+            && !(gyro.motion.flick.standalone
+                && (gyro.motion.flick.enabled || gyro.motion.flick.stick_aim))
+        {
+            return Err("请先启用体感或 Flick，再打开转角校准。".into());
         }
         let snapshot = owner.client.snapshot.lock().map_err(text)?;
         let language = owner.settings.lock().map_err(text)?.language;
@@ -218,6 +240,13 @@ pub async fn open_calibration_window(
             stick: gyro.motion.flick.stick,
             language,
             owns_measurement: false,
+            owns_trial: false,
+            manual: false,
+            manual_available: gyro.enabled
+                && gyro.motion.mode == MotionMode::Pointer
+                && snapshot.status.device.as_ref().is_some_and(|d| d.gyro),
+            original_scale: scale(gyro),
+            draft_scale: scale(gyro),
             result: None,
             saved: None,
             hotkeys: Hotkeys::default(),
@@ -249,11 +278,11 @@ pub async fn open_calibration_window(
         .always_on_top(true)
         .skip_taskbar(true)
         .focused(false)
-        .focusable(false)
+        .focusable(true)
         .minimizable(false)
         .maximizable(false)
-        .inner_size(445.0, 398.0)
-        .min_inner_size(420.0, 380.0)
+        .inner_size(490.0, 540.0)
+        .min_inner_size(470.0, 520.0)
         .visible(false)
         .build()
     {
@@ -317,6 +346,11 @@ fn close_session(state: &AppState, id: Uuid) {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CalibrationAction {
+    Trial,
+    Less,
+    More,
+    Manual,
+    Back,
     Start { axis: &'static str },
     Finish,
     Cancel,
@@ -327,11 +361,16 @@ enum CalibrationAction {
 enum Input {
     Button(CalibrationAction),
     Hotkey(Hotkey),
+    Edited(String, Box<Input>),
 }
 
 fn run_input(app: &AppHandle, id: Uuid, input: Input) -> Result<(), String> {
     let Some(state) = app.try_state::<AppState>() else {
         return Ok(());
+    };
+    let (value, input) = match input {
+        Input::Edited(value, input) => (Some(value), *input),
+        input => (None, input),
     };
     let lock = match &input {
         Input::Button(_) => state.operations.lock().map_err(text)?,
@@ -339,6 +378,7 @@ fn run_input(app: &AppHandle, id: Uuid, input: Input) -> Result<(), String> {
             Ok(lock) => lock,
             Err(_) => return Ok(()),
         },
+        Input::Edited(..) => unreachable!(),
     };
     let Ok(session) = state.game_calibration.session() else {
         return Ok(());
@@ -350,6 +390,7 @@ fn run_input(app: &AppHandle, id: Uuid, input: Input) -> Result<(), String> {
     let action = match input {
         Input::Button(action) => Some(action),
         Input::Hotkey(key) => session.hotkey_action(&snapshot, key),
+        Input::Edited(..) => unreachable!(),
     };
     let Some(action) = action else {
         return Ok(());
@@ -359,7 +400,7 @@ fn run_input(app: &AppHandle, id: Uuid, input: Input) -> Result<(), String> {
         drop(lock);
         return window.map_or(Ok(()), |window| window.destroy().map_err(text));
     }
-    perform_action(&state, app, session, &snapshot, action)
+    perform_action(&state, app, session, &snapshot, action, value)
 }
 
 fn perform_action(
@@ -368,9 +409,66 @@ fn perform_action(
     mut session: Session,
     snapshot: &Snapshot,
     action: CalibrationAction,
+    value: Option<String>,
 ) -> Result<(), String> {
     let result = (|| {
+        if matches!(
+            action,
+            CalibrationAction::Trial
+                | CalibrationAction::Apply
+                | CalibrationAction::Less
+                | CalibrationAction::More
+                | CalibrationAction::Manual
+        ) {
+            session.ready(snapshot)?;
+            if snapshot.status.motion.measuring.is_some() || session.saved.is_some() {
+                return Err("请先结束或取消当前转角测量".into());
+            }
+            if let Some(value) = value {
+                let parsed = value
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|_| "请输入有效的校准数值。")?;
+                validate_scale(session.output, parsed)?;
+                session.draft_scale = parsed;
+            }
+        }
         match action {
+            CalibrationAction::Trial => {
+                if let Err(error) = state.client.request(Command::TrialTurn {
+                    scale: session.draft_scale,
+                    expected_revision: session.revision,
+                }) {
+                    session.owns_measurement = state
+                        .client
+                        .finish_angle_measurement(session.revision)
+                        .is_err();
+                    session.owns_trial = session.owns_measurement;
+                    return Err(error);
+                }
+                session.owns_measurement = true;
+                session.owns_trial = true;
+                session.result = None;
+            }
+            CalibrationAction::Less | CalibrationAction::More => {
+                let increase =
+                    (action == CalibrationAction::Less) == (session.output == GyroOutput::Mouse);
+                let next = session.draft_scale * if increase { 1.01 } else { 1. / 1.01 };
+                validate_scale(session.output, next)?;
+                session.draft_scale = next;
+            }
+            CalibrationAction::Manual => {
+                if !session.manual_available {
+                    return Err("手动测量需要启用角速度瞄准，并连接支持体感的手柄。".into());
+                }
+                session.manual = true;
+                session.owns_measurement = false;
+                session.owns_trial = false;
+            }
+            CalibrationAction::Back => {
+                session.manual = false;
+                session.result = None;
+            }
             CalibrationAction::Start { axis } => {
                 session.ready(snapshot)?;
                 if snapshot.status.motion.measuring.is_some() || session.saved.is_some() {
@@ -378,6 +476,7 @@ fn perform_action(
                 }
                 if let Err(error) = state.client.request(Command::BeginMeasure {
                     axis: axis.into(),
+                    scale: Some(session.draft_scale),
                     expected_revision: Some(session.revision),
                 }) {
                     // An IPC timeout can arrive after the engine began the sweep.
@@ -388,6 +487,7 @@ fn perform_action(
                     return Err(error);
                 }
                 session.owns_measurement = true;
+                session.owns_trial = false;
                 session.result = None;
             }
             CalibrationAction::Finish | CalibrationAction::Cancel => {
@@ -397,6 +497,7 @@ fn perform_action(
                     None
                 };
                 session.owns_measurement = false;
+                session.owns_trial = false;
                 session.result = if matches!(action, CalibrationAction::Finish) {
                     result
                 } else {
@@ -405,12 +506,39 @@ fn perform_action(
                 if matches!(action, CalibrationAction::Finish) && session.result.is_none() {
                     return Err("转角测量已中断，请重新开始。".into());
                 }
+                if let Some(measurement) = &session.result {
+                    let mut gyro = state
+                        .store
+                        .load(&session.profile_id)
+                        .map_err(text)?
+                        .profile
+                        .gyro;
+                    match gyro.output {
+                        GyroOutput::Mouse => gyro.counts_per_degree = measurement.scale,
+                        GyroOutput::RightStick => gyro.stick_full_scale_dps = measurement.scale,
+                    }
+                    apply_measurement(&mut gyro, measurement)?;
+                    validate_scale(gyro.output, scale(&gyro))?;
+                    session.draft_scale = scale(&gyro);
+                    session.manual = false;
+                    session.result = None;
+                }
             }
             CalibrationAction::Apply => {
                 session.ready(snapshot)?;
-                let measurement = session.result.as_ref().ok_or("请先完成转角测量。")?;
                 let mut entry = state.store.load(&session.profile_id).map_err(text)?;
-                apply_measurement(&mut entry.profile.gyro, measurement)?;
+                if entry.profile.gyro.output != session.output
+                    || scale(&entry.profile.gyro) != session.original_scale
+                {
+                    return Err(MAPPING_CHANGED.into());
+                }
+                validate_scale(session.output, session.draft_scale)?;
+                match session.output {
+                    GyroOutput::Mouse => entry.profile.gyro.counts_per_degree = session.draft_scale,
+                    GyroOutput::RightStick => {
+                        entry.profile.gyro.stick_full_scale_dps = session.draft_scale
+                    }
+                }
                 let result = save_profile_locked(state, entry)?;
                 session.saved = Some(Saved {
                     applied: result.applied,
@@ -432,6 +560,22 @@ fn perform_action(
         *current = session;
     }
     result
+}
+
+fn scale(gyro: &Gyro) -> f32 {
+    match gyro.output {
+        GyroOutput::Mouse => gyro.counts_per_degree,
+        GyroOutput::RightStick => gyro.stick_full_scale_dps,
+    }
+}
+
+fn validate_scale(output: GyroOutput, value: f32) -> Result<(), String> {
+    match output {
+        GyroOutput::Mouse if value.is_finite() && value > 0. && value <= 10000. => Ok(()),
+        GyroOutput::RightStick if (30.0..=1440.0).contains(&value) => Ok(()),
+        GyroOutput::Mouse => Err("鼠标转角系数需大于 0 且不超过 10000。".into()),
+        GyroOutput::RightStick => Err("满杆角速度需为 30–1440 °/s".into()),
+    }
 }
 
 fn measured_angles(measurement: &GameAngleMeasurement) -> Result<(f32, f32), &str> {
@@ -487,6 +631,11 @@ mod tests {
             stick: Stick::Right,
             language: Language::En,
             owns_measurement: false,
+            owns_trial: false,
+            manual: true,
+            manual_available: true,
+            original_scale: 12.,
+            draft_scale: 12.,
             result: None,
             saved: None,
             hotkeys: Hotkeys {
@@ -544,6 +693,7 @@ mod tests {
 
         snapshot.status.motion.measuring = None;
         session.owns_measurement = false;
+        session.manual = false;
         session.result = Some(GameAngleMeasurement {
             axis: "yaw".into(),
             degrees: 90.,
@@ -554,7 +704,7 @@ mod tests {
         });
         assert!(matches!(
             session.hotkey_action(&snapshot, Hotkey::Measure),
-            Some(CalibrationAction::Start { .. })
+            Some(CalibrationAction::Trial)
         ));
         assert!(matches!(
             session.hotkey_action(&snapshot, Hotkey::Apply),

@@ -40,6 +40,7 @@ const SUBCLASS_ID: usize = 1;
 const MEASURE_ID: i32 = 0x4d41;
 const APPLY_ID: i32 = 0x4d42;
 const BUTTON_ID: usize = 0x4d43;
+const SCALE_ID: usize = 0x4d50;
 const WM_REFRESH: u32 = WM_APP + 1;
 
 struct Target {
@@ -129,9 +130,15 @@ impl Button {
         use CalibrationAction::*;
         if let Some(action) = action {
             let label = match action {
+                Trial => "试转 360°",
+                Less => "没转够 · 微调 1%",
+                More => "转过头 · 微调 1%",
+                Manual => "更多校准方式",
+                Back => "返回试转校准",
                 Start { axis: "pitch" } => "测量垂直 180°",
                 Start { .. } => "测量水平 360°",
                 Finish => "结束测量",
+                Cancel if view.measuring.as_deref() == Some("trial") => "停止试转",
                 Cancel if view.measuring.is_some() => "取消测量",
                 Cancel => "重新测量",
                 Apply => "保存并应用校准",
@@ -181,7 +188,12 @@ struct Context {
     degrees: Control,
     detail: Control,
     shortcuts: Control,
-    buttons: [Button; 2],
+    scale_label: Control,
+    scale_edit: Control,
+    scale_visible: Cell<bool>,
+    last_scale: Cell<f32>,
+    game_window: Cell<HWND>,
+    buttons: [Button; 6],
     bg: u32,
     fg: u32,
     brush: HBRUSH,
@@ -228,14 +240,34 @@ impl Context {
         self.detail.set_text(&panel.detail);
         self.shortcuts.set_text(&panel.shortcuts);
         let busy = self.busy.load(Ordering::Acquire);
+        let show_scale = !view.manual && view.measuring.is_none() && view.saved.is_none();
+        let scale_changed = self.scale_visible.replace(show_scale) != show_scale;
+        let label = match view.output {
+            GyroOutput::Mouse => "鼠标转角系数（counts/°）",
+            GyroOutput::RightStick => "满杆角速度（°/s）",
+        };
+        self.scale_label.set_text(tr(label));
+        if self.last_scale.replace(view.draft_scale) != view.draft_scale {
+            self.scale_edit.value.borrow_mut().clear();
+            self.scale_edit.set_text(&view.draft_scale.to_string());
+        }
+        for control in [&self.scale_label, &self.scale_edit] {
+            ShowWindow(control.hwnd, if show_scale { SW_SHOWNA } else { SW_HIDE });
+        }
+        EnableWindow(
+            self.scale_edit.hwnd,
+            i32::from(!busy && view.blocked.is_none()),
+        );
         for (button, action) in self.buttons.iter().zip(panel.actions) {
             let enabled = action.is_some()
                 && !busy
-                && (action != Some(CalibrationAction::Apply) || panel.valid_result);
+                && (action != Some(CalibrationAction::Apply) || panel.valid_result)
+                && (action != Some(CalibrationAction::Manual) || view.manual_available);
             button.update(action, enabled, &view);
         }
         let has_shortcuts = !panel.shortcuts.is_empty();
-        if had_degrees != panel.degrees.is_some() || had_shortcuts != has_shortcuts {
+        if scale_changed || had_degrees != panel.degrees.is_some() || had_shortcuts != has_shortcuts
+        {
             self.layout(hwnd);
         }
     }
@@ -271,8 +303,14 @@ impl Context {
                 &self.profile,
                 &self.detail,
                 &self.shortcuts,
+                &self.scale_label,
+                &self.scale_edit,
                 &self.buttons[0].control,
                 &self.buttons[1].control,
+                &self.buttons[2].control,
+                &self.buttons[3].control,
+                &self.buttons[4].control,
+                &self.buttons[5].control,
             ] {
                 SendMessageW(control.hwnd, WM_SETFONT, fonts.body as usize, 1);
             }
@@ -284,9 +322,19 @@ impl Context {
         GetClientRect(hwnd, &mut rect);
         let padding = px(16);
         let width = (rect.right - padding * 2).max(1);
-        let button_y = (rect.bottom - px(50)).max(0);
+        let button_y = (rect.bottom - px(134)).max(0);
         let has_shortcuts = !self.shortcuts.value.borrow().is_empty();
-        let heading_y = if has_shortcuts { px(88) } else { px(44) };
+        let top = if has_shortcuts { px(88) } else { px(44) };
+        MoveWindow(self.scale_label.hwnd, padding, top, width, px(24), 1);
+        MoveWindow(
+            self.scale_edit.hwnd,
+            padding,
+            top + px(26),
+            width,
+            px(34),
+            1,
+        );
+        let heading_y = top + if self.scale_visible.get() { px(70) } else { 0 };
         let degrees_y = heading_y + px(26);
         let degrees_height = if self.degrees.value.borrow().is_empty() {
             0
@@ -325,8 +373,8 @@ impl Context {
         for (index, button) in self.buttons.iter().enumerate() {
             MoveWindow(
                 button.control.hwnd,
-                padding + index as i32 * (button_width + gap),
-                button_y,
+                padding + (index % 2) as i32 * (button_width + gap),
+                button_y + (index / 2) as i32 * px(42),
                 button_width,
                 px(34),
                 1,
@@ -338,6 +386,68 @@ impl Context {
         if self.busy.swap(true, Ordering::AcqRel) {
             return;
         }
+        // Only the numeric field activates the overlay. Return focus to the
+        // previous game before a button/hotkey starts emitting a trial.
+        unsafe {
+            let parent = GetParent(self.scale_edit.hwnd);
+            let measuring = self.app.try_state::<AppState>().is_some_and(|state| {
+                state
+                    .client
+                    .snapshot
+                    .lock()
+                    .is_ok_and(|snapshot| snapshot.status.motion.measuring.is_some())
+            });
+            let starts_output = matches!(
+                &input,
+                Input::Button(CalibrationAction::Trial | CalibrationAction::Start { .. })
+            ) || (matches!(&input, Input::Hotkey(Hotkey::Measure))
+                && !measuring);
+            if starts_output {
+                let foreground = GetForegroundWindow();
+                let studio_window = |handle: HWND| {
+                    self.app.windows().values().any(|window| {
+                        window
+                            .hwnd()
+                            .is_ok_and(|hwnd| hwnd.0 as usize == handle as usize)
+                    })
+                };
+                let focus_failed = if foreground == parent {
+                    let game = self.game_window.get();
+                    game.is_null()
+                        || studio_window(game)
+                        || IsWindow(game) == 0
+                        || SetForegroundWindow(game) == 0
+                } else {
+                    foreground.is_null() || studio_window(foreground)
+                };
+                if focus_failed {
+                    if let Some(state) = self.app.try_state::<AppState>() {
+                        if let Ok(mut current) = state.game_calibration.current.lock() {
+                            if let Some(session) = current.as_mut().filter(|s| s.id == self.session)
+                            {
+                                session.action_error =
+                                    Some("请切回游戏，再使用 Ctrl + Shift + F8 试转。".into());
+                            }
+                        }
+                    }
+                    self.busy.store(false, Ordering::Release);
+                    self.updates.request();
+                    return;
+                }
+            }
+        }
+        let input = if self.scale_visible.get() {
+            let mut value = vec![0u16; 128];
+            let len = unsafe {
+                GetWindowTextW(self.scale_edit.hwnd, value.as_mut_ptr(), value.len() as i32)
+            };
+            Input::Edited(
+                String::from_utf16_lossy(&value[..len.max(0) as usize]),
+                Box::new(input),
+            )
+        } else {
+            input
+        };
         self.updates.request();
         let app = self.app.clone();
         let session = self.session;
@@ -360,7 +470,7 @@ struct Panel {
     degrees: Option<f32>,
     detail: String,
     shortcuts: String,
-    actions: [Option<CalibrationAction>; 2],
+    actions: [Option<CalibrationAction>; 6],
     valid_result: bool,
 }
 
@@ -381,6 +491,11 @@ impl Panel {
             panel.actions[0] = Some(Close);
         } else if let Some(blocked) = view.blocked {
             panel.detail = tr(blocked).into();
+            panel.actions[0] = Some(Close);
+        } else if view.measuring.as_deref() == Some("trial") {
+            panel.heading = "正在试转 360°";
+            panel.detail = tr("请观察是否完整转一圈。试转结束后自动停止，再对齐参照物并调整数值。F12 可停止映射。开始和结束方向相同，也可能已转过多圈。").into();
+            panel.actions = [Some(Cancel), Some(Close), None, None, None, None];
         } else if let Some(axis) = view.measuring.as_deref() {
             panel.heading = if axis == "yaw" {
                 "正在测量水平 360°"
@@ -394,7 +509,7 @@ impl Panel {
             };
             panel.degrees = Some(view.degrees);
             panel.detail = format!("{}\r\n\r\n{}", tr("手柄净转角"), tr(instruction));
-            panel.actions = [Some(Finish), Some(Cancel)];
+            panel.actions = [Some(Finish), Some(Cancel), None, None, None, None];
         } else if let Some(result) = &view.result {
             panel.heading = if result.axis == "yaw" {
                 "水平测量已完成"
@@ -410,8 +525,9 @@ impl Panel {
                     panel.detail.push_str(tr(error));
                 }
             }
-            panel.actions = [Some(Apply), Some(Cancel)];
-        } else {
+            panel.actions = [Some(Cancel), Some(Back), None, None, None, None];
+        } else if view.manual {
+            panel.heading = "手动转动测量";
             let stick_hint = match view.stick {
                 Stick::Left => "水平测量可沿左摇杆外圈转动，再用体感微调。",
                 Stick::Right => "水平测量可沿右摇杆外圈转动，再用体感微调。",
@@ -427,7 +543,30 @@ impl Panel {
                 tr(stick_hint),
                 tr(mode_hint),
             );
-            panel.actions = [Some(Start { axis: "yaw" }), Some(Start { axis: "pitch" })];
+            panel.actions = [
+                Some(Start { axis: "yaw" }),
+                Some(Start { axis: "pitch" }),
+                Some(Back),
+                Some(Close),
+                None,
+                None,
+            ];
+        } else {
+            panel.heading = "对齐参照物后试转";
+            let hint = match view.output {
+                GyroOutput::Mouse => "没转够 → 调大数值；转过头 → 调小数值。鼠标转角系数表示每度需要的移动量。",
+                GyroOutput::RightStick => "没转够 → 调小数值；转过头 → 调大数值。使用摇杆 Flick 前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。",
+            };
+            panel.detail = format!("{}\r\n\r\n{}", tr(hint), tr("每次重新对齐参照物，确认完整转一圈。修改后再次试转，保存时才写入配置。校准后保持游戏灵敏度不变。"));
+            panel.valid_result = true;
+            panel.actions = [
+                Some(Trial),
+                Some(Apply),
+                Some(Less),
+                Some(More),
+                Some(Manual),
+                Some(Close),
+            ];
         }
         for error in [&view.measurement_error, &view.action_error]
             .into_iter()
@@ -439,8 +578,12 @@ impl Panel {
             panel.detail.push_str(tr(error));
         }
         if view.hotkeys.measure && view.blocked.is_none() && view.saved.is_none() {
-            let label = if view.measuring.is_some() {
+            let label = if view.measuring.as_deref() == Some("trial") {
+                "停止试转"
+            } else if view.measuring.is_some() {
                 "结束测量"
+            } else if !view.manual {
+                "试转 360°"
             } else if view.result.is_some() {
                 "重测水平 360°"
             } else {
@@ -521,7 +664,24 @@ unsafe fn install_controls(
         degrees: label(0)?,
         detail: label(0)?,
         shortcuts: label(0)?,
-        buttons: [Button::new(hwnd, 0)?, Button::new(hwnd, 1)?],
+        scale_label: label(0)?,
+        scale_edit: Control::new(
+            hwnd,
+            w!("EDIT"),
+            WS_TABSTOP | WS_BORDER | ES_AUTOHSCROLL as u32,
+            SCALE_ID,
+        )?,
+        scale_visible: Cell::new(false),
+        last_scale: Cell::new(f32::NAN),
+        game_window: Cell::new(GetForegroundWindow()),
+        buttons: [
+            Button::new(hwnd, 0)?,
+            Button::new(hwnd, 1)?,
+            Button::new(hwnd, 2)?,
+            Button::new(hwnd, 3)?,
+            Button::new(hwnd, 4)?,
+            Button::new(hwnd, 5)?,
+        ],
         bg,
         fg,
         brush: CreateSolidBrush(bg),
@@ -530,12 +690,19 @@ unsafe fn install_controls(
     });
     if context.brush.is_null()
         || SetWindowSubclass(
+            context.scale_edit.hwnd,
+            Some(edit_proc),
+            SUBCLASS_ID,
+            (&mut *context as *mut Context) as usize,
+        ) == 0
+        || SetWindowSubclass(
             hwnd,
             Some(window_proc),
             SUBCLASS_ID,
             (&mut *context as *mut Context) as usize,
         ) == 0
     {
+        RemoveWindowSubclass(context.scale_edit.hwnd, Some(edit_proc), SUBCLASS_ID);
         return Err("无法安装校准窗口处理程序".into());
     }
     let context = &*Box::into_raw(context);
@@ -591,7 +758,7 @@ unsafe extern "system" fn window_proc(
             EndPaint(hwnd, &paint);
             return 0;
         }
-        WM_CTLCOLORSTATIC => {
+        WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
             SetTextColor(wparam as HDC, context.fg);
             SetBkColor(wparam as HDC, context.bg);
             return context.brush as LRESULT;
@@ -631,6 +798,28 @@ unsafe extern "system" fn window_proc(
             }
         }
         _ => {}
+    }
+    DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
+unsafe extern "system" fn edit_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    subclass: usize,
+    data: usize,
+) -> LRESULT {
+    if message == WM_MOUSEACTIVATE {
+        let context = &*(data as *const Context);
+        let foreground = GetForegroundWindow();
+        if !foreground.is_null() && foreground != GetParent(hwnd) {
+            context.game_window.set(foreground);
+        }
+        return MA_ACTIVATE as LRESULT;
+    }
+    if message == WM_NCDESTROY {
+        RemoveWindowSubclass(hwnd, Some(edit_proc), subclass);
     }
     DefSubclassProc(hwnd, message, wparam, lparam)
 }

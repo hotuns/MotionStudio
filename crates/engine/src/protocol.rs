@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -76,7 +76,13 @@ pub enum Command {
     BeginMeasure {
         axis: String,
         #[serde(default)]
+        scale: Option<f32>,
+        #[serde(default)]
         expected_revision: Option<u64>,
+    },
+    TrialTurn {
+        scale: f32,
+        expected_revision: u64,
     },
     EndMeasure {
         #[serde(default)]

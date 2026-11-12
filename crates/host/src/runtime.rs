@@ -820,7 +820,12 @@ impl Runtime {
                 let status_before_reply = shortcut_update
                     || matches!(
                         &request.command,
-                        Command::Start { .. } | Command::Navigate { .. } | Command::Stop
+                        Command::Start { .. }
+                            | Command::Navigate { .. }
+                            | Command::Stop
+                            | Command::TrialTurn { .. }
+                            | Command::BeginMeasure { .. }
+                            | Command::EndMeasure { .. }
                     );
                 let mut measurement = None;
                 let result = (|| -> Result<()> {
@@ -961,8 +966,36 @@ impl Runtime {
                                 result
                             }
                         }
+                        Command::TrialTurn {
+                            scale,
+                            expected_revision,
+                        } => {
+                            if expected_revision != self.status.revision {
+                                bail!("校准所用的映射已改变，请重新打开校准悬浮窗。");
+                            }
+                            if self.calibration.is_some()
+                                || !self.status.emitting
+                                || self.status.binding_capture
+                                || self.resync_input
+                                || self.status.device.is_none()
+                            {
+                                bail!("试转需要先保存配置并启用映射输出");
+                            }
+                            if !self.active_layers.is_empty() {
+                                bail!("请松开配置层按键，切回基础层后再校准。");
+                            }
+                            self.engine
+                                .as_mut()
+                                .context("引擎未运行")?
+                                .begin_trial_turn(scale)?;
+                            self.clear_outputs_or_fault()?;
+                            self.status.motion =
+                                self.engine.as_ref().unwrap().motion.telemetry.clone();
+                            Ok(())
+                        }
                         Command::BeginMeasure {
                             axis,
+                            scale,
                             expected_revision,
                         } => {
                             if expected_revision.is_some_and(|rev| rev != self.status.revision) {
@@ -987,7 +1020,7 @@ impl Runtime {
                             self.engine
                                 .as_mut()
                                 .context("引擎未运行")?
-                                .begin_measurement(&axis)?;
+                                .begin_measurement_at_scale(&axis, scale)?;
                             self.clear_outputs_or_fault()?;
                             self.status.motion =
                                 self.engine.as_ref().unwrap().motion.telemetry.clone();

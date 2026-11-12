@@ -571,6 +571,8 @@ pub struct Engine {
     turns: Vec<PendingTurn>,
     turn_stick_owed: f32,
     measuring: Option<String>,
+    trial_scale: Option<f32>,
+    measurement_scale: Option<f32>,
     raw_sticks: [Vec2; 2],
     zone_layouts: [flexinput_core::area::AreaLayout; 2],
     stick_time: f64,
@@ -757,6 +759,8 @@ impl Engine {
             turns: vec![],
             turn_stick_owed: 0.0,
             measuring: None,
+            trial_scale: None,
+            measurement_scale: None,
             raw_sticks: [Vec2::ZERO; 2],
             stick_time: 0.,
             zone_layouts: [0, 1].map(|_| {
@@ -1103,6 +1107,9 @@ impl Engine {
         self.clear_turn_output();
         self.turn_held.fill(false);
         self.measuring = None;
+        self.trial_scale = None;
+        self.measurement_scale = None;
+        self.restore_measurement_scale();
         self.gyro.graph.nodes[1].params.remove("cal_measure");
         self.activation_pressed = false;
         self.gyro_latched = false;
@@ -1113,6 +1120,15 @@ impl Engine {
         self.eval_controls(false, 0);
     }
     fn update_pad(&mut self) {
+        if self.trial_scale.is_some() {
+            self.frame.pad = self.physical_pad.map(|_| PadState {
+                right_x: axis_to_i16(self.turn_stick),
+                ..Default::default()
+            });
+            self.frame.held.clear();
+            self.frame.scroll = [0; 2];
+            return;
+        }
         self.frame.pad = self.physical_pad.map(|mut pad| {
             if self.measuring.is_some() {
                 pad.right_x = 0;
@@ -1171,6 +1187,9 @@ impl Engine {
             .collect();
     }
     fn clear_gyro_motion(&mut self) {
+        if self.trial_scale.is_some() {
+            self.clear_turn_output();
+        }
         let measurement = self
             .measuring
             .as_ref()
@@ -1309,6 +1328,10 @@ impl Engine {
     }
     fn eval_controls(&mut self, allow_toggle: bool, now_ns: u64) {
         self.action_time_ns = self.action_time_ns.max(now_ns);
+        if self.trial_scale.is_some() {
+            self.update_pad();
+            return;
+        }
         let blocked = self.flick_source_block();
         self.controls
             .eval_with_stick_block(&mut self.signals, blocked, 0.0);
@@ -1611,6 +1634,11 @@ impl Engine {
 
     fn process_gyro(&mut self, time: SampleTime, value: [f32; 3]) {
         self.gyro_events += 1;
+        // A timed trial is output-driven; physical gyro samples must not add
+        // displacement or overwrite mouse counts queued by the turn adapter.
+        if self.trial_scale.is_some() {
+            return;
+        }
         if !value.iter().all(|v| v.is_finite() && v.abs() < 100.) {
             self.invalid_values += 1;
             self.clock.reset();
@@ -1836,6 +1864,79 @@ impl Engine {
         }
     }
 
+    pub fn begin_trial_turn(&mut self, scale: f32) -> Result<()> {
+        if self.measuring.is_some() {
+            bail!("请先结束或取消当前转角测量");
+        }
+        let output = self.profile.gyro.output;
+        let valid = match output {
+            GyroOutput::Mouse => scale.is_finite() && scale > 0. && scale <= 10000.,
+            GyroOutput::RightStick => (30.0..=1440.0).contains(&scale),
+        };
+        if !valid {
+            bail!("校准数值超出允许范围");
+        }
+        if output == GyroOutput::RightStick && self.physical_pad.is_none() {
+            bail!("请先启用虚拟手柄输出");
+        }
+        self.clear_gyro_motion();
+        self.clock.reset();
+        self.clear_turn_output();
+        self.clear_flick_output();
+        self.frame.mouse_delta = [0.; 2];
+        self.measuring = Some("trial".into());
+        self.trial_scale = Some(scale);
+        self.motion.measurement_mode();
+        self.motion.telemetry.measuring = self.measuring.clone();
+        // Reuse the normal timed-turn/count conversion and right-stick angle
+        // budget. Mouse movement is spread over one second, not a giant packet.
+        self.turns.push(PendingTurn {
+            degrees: 360.,
+            seconds: if output == GyroOutput::Mouse { 1. } else { 0. },
+            output: if output == GyroOutput::Mouse {
+                AimOutput::Mouse
+            } else {
+                AimOutput::RightStick
+            },
+        });
+        self.update_pad();
+        Ok(())
+    }
+
+    fn restore_measurement_scale(&mut self) {
+        let params = &mut self.gyro.graph.nodes[1].params;
+        params.insert("scale".into(), json!(self.profile.gyro.counts_per_degree));
+        params.insert(
+            "stick_out_dps".into(),
+            json!(self.profile.gyro.stick_full_scale_dps),
+        );
+    }
+
+    pub fn begin_measurement_at_scale(&mut self, axis: &str, scale: Option<f32>) -> Result<()> {
+        if let Some(scale) = scale {
+            let valid = match self.profile.gyro.output {
+                GyroOutput::Mouse => scale.is_finite() && scale > 0. && scale <= 10000.,
+                GyroOutput::RightStick => (30.0..=1440.0).contains(&scale),
+            };
+            if !valid {
+                bail!("校准数值超出允许范围");
+            }
+        }
+        self.begin_measurement(axis)?;
+        self.measurement_scale = scale;
+        if let Some(scale) = scale {
+            let key = if self.profile.gyro.output == GyroOutput::Mouse {
+                "scale"
+            } else {
+                "stick_out_dps"
+            };
+            self.gyro.graph.nodes[1]
+                .params
+                .insert(key.into(), json!(scale));
+        }
+        Ok(())
+    }
+
     pub fn begin_measurement(&mut self, axis: &str) -> Result<()> {
         if self.measuring.is_some() {
             bail!("请先结束或取消当前转角测量");
@@ -1881,6 +1982,10 @@ impl Engine {
     }
     pub fn end_measurement(&mut self) -> Option<GameAngleMeasurement> {
         let axis = self.measuring.take()?;
+        if self.trial_scale.take().is_some() {
+            self.clear_turn_output();
+            self.frame.mouse_delta = [0.; 2];
+        }
         let gyro = &self.profile.gyro;
         let result = GameAngleMeasurement {
             axis,
@@ -1888,11 +1993,12 @@ impl Engine {
             peak: self.motion.telemetry.measurement_peak,
             error: self.motion.telemetry.measurement_error.clone(),
             output: gyro.output,
-            scale: match gyro.output {
+            scale: self.measurement_scale.take().unwrap_or(match gyro.output {
                 GyroOutput::Mouse => gyro.counts_per_degree,
                 GyroOutput::RightStick => gyro.stick_full_scale_dps,
-            },
+            }),
         };
+        self.restore_measurement_scale();
         self.gyro.graph.nodes[1].params.remove("cal_measure");
         self.gyro.state.clear();
         self.gyro_stick = Vec2::ZERO;
@@ -1969,6 +2075,9 @@ impl Engine {
     fn advance_turns(&mut self, dt: f32) {
         self.flick_turn_stick = 0.;
         self.turn_stick = 0.;
+        let mouse_scale = self
+            .trial_scale
+            .unwrap_or(self.profile.gyro.counts_per_degree);
         self.turns.retain_mut(|t| {
             let step = if t.seconds <= dt {
                 t.degrees
@@ -1978,7 +2087,7 @@ impl Engine {
             t.degrees -= step;
             t.seconds = (t.seconds - dt).max(0.);
             if t.output != AimOutput::RightStick {
-                self.frame.mouse_delta[0] += f64::from(step * self.profile.gyro.counts_per_degree);
+                self.frame.mouse_delta[0] += f64::from(step * mouse_scale);
             }
             if t.output != AimOutput::Mouse {
                 self.turn_stick_owed += step;
@@ -1992,7 +2101,10 @@ impl Engine {
             self.turn_stick_owed = 0.;
         } else {
             let base = self.frame.pad.map_or(0., |p| axis_from_i16(p.right_x));
-            let cap = self.profile.gyro.stick_full_scale_dps * dt;
+            let cap = self
+                .trial_scale
+                .unwrap_or(self.profile.gyro.stick_full_scale_dps)
+                * dt;
             let room = (1. - base * owed.signum()).max(0.) * cap;
             let emit = owed.abs().min(room) * owed.signum();
             // Allocate the shared stick capacity while retaining ownership of
@@ -2051,6 +2163,23 @@ impl Engine {
     }
 
     fn tick_output(&mut self, dt: f32, now_ns: u64, flick_input_dt: f32) -> &Frame {
+        if self.trial_scale.is_some() {
+            if !dt.is_finite() || dt <= 0. || dt > 0.05 {
+                self.motion.telemetry.measurement_error =
+                    Some("试转时输出时序中断，请重新试转。".into());
+            }
+            if self.motion.telemetry.measurement_error.is_some() {
+                self.clear_turn_output();
+                self.update_pad();
+            } else if self.turns.is_empty() && self.turn_stick_owed == 0. {
+                // Keep the last emitted axis for its full output interval,
+                // then release it on the following tick.
+                self.end_measurement();
+            } else {
+                self.advance_turns(dt);
+            }
+            return &self.frame;
+        }
         if self
             .last_stick_gyro_ns
             .is_some_and(|last| now_ns.checked_sub(last).is_none_or(|age| age >= MAX_GAP_NS))

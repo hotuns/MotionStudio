@@ -814,7 +814,7 @@ export default function App() {
               recording={gyroRecording} canRecord={canRecordGyro}
               onRecord={gyroField=>beginCapture({kind:'pad',index:null,gyroField})} onCancelRecording={cancelCapture}
               onOpenDevice={()=>navigate('controllerStatus','actions',true)} onPreviewOutput={()=>navigate('controllerStatus')} status={status}
-              canMeasure={!!status?.emitting&&!!status.device?.gyro&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
+              canMeasure={!!status?.emitting&&!!status.device&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
               onOpenCalibration={()=>void run(()=>invoke('open_calibration_window',{
                 profileId:draft.id,theme:document.documentElement.dataset.theme==='light'?'light':'dark',
               }))}

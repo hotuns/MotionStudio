@@ -134,12 +134,12 @@ export function MotionSettings({ profile, profileId, update, device, recording, 
           {!preset && <p className={styles.hint}>当前沿用进阶平滑设置。</p>}
         </SettingsGroup>}
       </div>
-      {gyro.enabled && <div className={styles.simpleTools}>
+      {(gyro.enabled || (gyro.motion.flick.standalone && (gyro.motion.flick.enabled || gyro.motion.flick.stick_aim))) && <div className={styles.simpleTools}>
         <button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button>
-        {gyro.motion.mode === 'pointer' && <details className={styles.quickCalibration}>
+        <details className={styles.quickCalibration}>
           <summary>转角对不上？</summary>
           <GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>
-        </details>}
+        </details>
       </div>}
     </section> : <>
     <nav className={styles.nav} aria-label="体感调校分类">

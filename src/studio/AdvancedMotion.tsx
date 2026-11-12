@@ -178,6 +178,11 @@ export function FlickStickSettings({profile, update}: Props) {
   return <Group title="Flick Stick 与摇杆瞄准">
     <Toggle label="启用 Flick Stick" value={m.flick.enabled} onChange={v=>flickChange('enabled',v)}/>
     <Toggle label="启用配套摇杆瞄准" value={m.flick.stick_aim} onChange={v=>flickChange('stick_aim',v)}/>
+    {m.flick.stick_aim&&<>
+      <Numbers object={m.flick} specs={[["aim_sensitivity","摇杆瞄准倍率",0.01,100,0.1,"×"],["max_dps","连续瞄准基础转速",1,4000,1," °/s"],["vertical_ratio","摇杆纵向比例",0.01,10,0.05,"×"]]} onChange={(k,v)=>flickChange(k,v)}/>
+      <p className={styles.hint}>这三个参数只影响配套摇杆的连续瞄准，不改变快推 Flick 的目标转角。水平目标转速由基础转速、瞄准倍率和推杆进度共同决定，纵向再乘纵向比例。</p>
+      {profile.gyro.output==='right_stick'&&<p className={styles.hint}>「满杆角速度」是游戏实际满杆转速的校准值，用于把目标转速换算成虚拟摇杆幅度。提高连续瞄准基础转速不会提高游戏本身的满杆转速。</p>}
+    </>}
     {(m.flick.enabled||m.flick.stick_aim)&&<>
       <Toggle label="关闭体感时也启用" value={m.flick.standalone ?? false} onChange={v=>flickChange('standalone',v)}/>
       {!m.flick.standalone && !profile.gyro.enabled && <p className={styles.hint}>请在「体感」页启用体感，以使用 Flick Stick 和配套摇杆瞄准。</p>}
@@ -196,7 +201,6 @@ export function FlickStickSettings({profile, update}: Props) {
         <p className={styles.hint}>曲线控制初始转身的转角进度。完成时间设为 0 时立即输出全部转角。</p>
       </>}
       <Toggle label="慢推锁定为连续瞄准" value={m.flick.slow_lock} onChange={v=>flickChange('slow_lock',v)}/>
-      {m.flick.stick_aim&&<Numbers object={m.flick} specs={[["aim_sensitivity","摇杆瞄准倍率",0.01,100,0.1,"×"],["max_dps","摇杆最大转速",1,4000,1," °/s"],["vertical_ratio","摇杆纵向比例",0.01,10,0.05,"×"]]} onChange={(k,v)=>flickChange(k,v)}/>}
 
       <p className={styles.hint}>快推选择朝向，沿摇杆外圈转动控制镜头。在「游戏配置 → 体感 → 游戏内转角校准」测量游戏转角，可以让转身角度对应游戏中的朝向。</p>
     </>}
@@ -212,9 +216,10 @@ export type GameCalibrationProps = {
 
 export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'> & {profile:Profile}) {
   return <Group title="游戏内转角校准">
-    <p className={styles.hint}>保存并应用基础层配置，启用映射后打开悬浮窗。开始、结束和保存测量都可以在游戏内完成。</p>
+    <p className={styles.hint}>保存并应用基础层配置，启用映射后打开悬浮窗。对准参照物试转 360°，直接调整数值后再次试转，满意后保存。原来的手动转动测量保留在「更多校准方式」。</p>
+    {profile.gyro.output==='right_stick'&&<p className={styles.hint}>使用摇杆 Flick 前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。校准后保持游戏灵敏度不变。</p>}
     <div className="studio-actions">
-      <button type="button" className="primary-btn" disabled={!canMeasure||!profile.gyro.enabled||profile.gyro.motion.mode!=='pointer'}
+      <button type="button" className="primary-btn" disabled={!canMeasure||(!profile.gyro.enabled&&!(profile.gyro.motion.flick.standalone&&(profile.gyro.motion.flick.enabled||profile.gyro.motion.flick.stick_aim)))}
         onClick={onOpenCalibration}>打开校准悬浮窗</button>
     </div>
     </Group>;
