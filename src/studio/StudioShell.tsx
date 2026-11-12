@@ -9,6 +9,7 @@ import type {CommunityProfile} from '../profile-sharing';
 import {gameTabs, type GameTab} from './game-tabs';
 import styles from './StudioShell.module.css';
 import themeStyles from './ThemeToggle.module.css';
+import {settingsCatalog,type SettingTarget} from './settings-catalog';
 
 const pages = {
   overview: { label: '工作台', description: '连接设备、选择配置，然后开始调校。', icon: 'overview' },
@@ -21,12 +22,14 @@ const pages = {
 
 export type StudioPage = keyof typeof pages;
 
-type Command = { label: string; icon: StudioIconName; run: () => void; disabled?: boolean };
+type Command = { label: string; icon: StudioIconName; run: () => void; disabled?: boolean; keywords?: string; context?: string };
 type Props = {
   page: StudioPage;
   gameTab: GameTab;
   onNavigate: (page: StudioPage) => void;
   onGameTab: (tab: GameTab) => void;
+  onSetting: (target: SettingTarget) => void;
+  settingsBlocked: boolean;
   children: ReactNode;
   controllerNavigation: ReactNode;
   profileId: string;
@@ -122,7 +125,7 @@ export function StudioShell(props: Props) {
   const tools: Command[] = [
     { label: '新建配置', icon: 'profiles', run: props.onNewProfile, disabled: blocked },
     { label: '导入 JSM 配置', icon: 'folder', run: props.onImportJsm, disabled: outputBlocked },
-    { label: '搜索页面或操作', icon: 'search', run: openSearch },
+    { label: '搜索设置和操作', icon: 'search', run: openSearch },
     { label: props.gamepadOn ? '停用手柄界面操作' : '手柄操作界面', icon: 'games', run: props.onGamepad, disabled: outputBlocked || !props.gamepadAvailable },
     { label: '软件更新', icon: 'settings', run: openUpdates },
     { label: '打开配置文件夹', icon: 'folder', run: props.onOpenFolder },
@@ -131,9 +134,17 @@ export function StudioShell(props: Props) {
   const allCommands: Command[] = [
     ...(Object.keys(pages) as StudioPage[]).map(page => ({ ...pages[page], run: () => props.onNavigate(page) })),
     ...gameTabs.map(tab => ({ label: tab.shortcut, icon: tab.icon, run: () => props.onGameTab(tab.id) })),
-    ...tools.filter(command => command.label !== '搜索页面或操作'),
+    ...tools.filter(command => command.label !== '搜索设置和操作'),
+    ...(query.trim()?settingsCatalog.map(target=>({label:target.label,icon:'settings' as const,
+      keywords:[target.path,target.keywords??'',t(target.keywords??'')].join(' '),context:gameTabs.find(tab=>tab.id===target.tab)?.label,
+      run:()=>props.onSetting(target),disabled:props.settingsBlocked})):[]),
   ];
-  const commands = allCommands.filter(command => (t(command.label)+(command.label===pages.games.label?' '+t('按键映射 组合键 鼠标滚轮 侧键 摇杆设置'):'')).toLowerCase().includes(query.trim().toLowerCase()));
+  const words=query.trim().toLowerCase().split(/\s+/);
+  const commands=allCommands.filter(command=>{
+    const haystack=[command.label,t(command.label),command.keywords??'',t(command.keywords??''),command.context??'',t(command.context??''),
+      command.label===pages.games.label?t('按键映射 组合键 鼠标滚轮 侧键 摇杆设置'):''].join(' ').toLowerCase();
+    return words.every(word=>haystack.includes(word));
+  });
   const runCommand = (command: Command) => { if (command.disabled) return; palette.current?.close(); command.run(); };
   const heading = pages[props.page];
   const overview = props.page === 'overview';
@@ -167,6 +178,8 @@ export function StudioShell(props: Props) {
             </div>
           </div>
           <div className={styles.toolbarActions}>
+            <button type="button" className="ghost-btn" aria-label="搜索设置和操作" title="搜索设置和操作 · Ctrl K"
+              disabled={outputBlocked} onClick={openSearch}><StudioIcon name="search" size={17}/></button>
             {props.gamepadOn && <button type="button" className="secondary-btn" aria-label="手柄操作界面" aria-pressed
               disabled={outputBlocked} onClick={props.onGamepad} title="方向移动，A 确认，B 返回；View + Menu 切回界面">
               <StudioIcon name="games" size={16}/>手柄操作中
@@ -247,20 +260,20 @@ export function StudioShell(props: Props) {
         </footer>
       </div>
       {searchOpen && <dialog className={styles.palette} ref={palette} aria-labelledby="studio-search-title" onClose={() => setSearchOpen(false)}>
-        <h2 className={styles.srOnly} id="studio-search-title">搜索页面或操作</h2>
+        <h2 className={styles.srOnly} id="studio-search-title">搜索设置和操作</h2>
         <div className={styles.paletteHeader}>
           <StudioIcon name="search" />
-          <input autoFocus aria-label="搜索页面或操作" placeholder="搜索页面或操作…" value={query} onChange={event => setQuery(event.target.value)}
+          <input autoFocus aria-label="搜索设置和操作" placeholder="搜索参数、页面或操作…" value={query} onChange={event => setQuery(event.target.value)}
             onKeyDown={event => {
               if (event.key === 'Enter') { const command=commands.find(item=>!item.disabled); if(command)runCommand(command); }
               if (event.key === 'ArrowDown') { event.preventDefault(); palette.current?.querySelector<HTMLButtonElement>('[data-command]:not(:disabled)')?.focus(); }
             }} />
           <button type="button" className={styles.closeButton} aria-label="关闭搜索" onClick={() => palette.current?.close()}><StudioIcon name="close" size={18} /></button>
         </div>
-        <p className={styles.paletteHint}>输入功能名称，快速前往</p>
+        <p className={styles.paletteHint}>搜索参数后直接定位，自动展开所在分组。</p>
         <div className={styles.commandList}>
           {commands.map(command => <button type="button" data-command key={command.label} disabled={command.disabled} onClick={() => runCommand(command)}>
-            <StudioIcon name={command.icon} size={18} /><span>{command.label}</span><StudioIcon name="arrow" size={16} />
+            <StudioIcon name={command.icon} size={18} /><span>{command.label}{command.context&&<small>{command.context}</small>}</span><StudioIcon name="arrow" size={16} />
           </button>)}
           {!commands.length && <p>没有匹配的操作</p>}
         </div>

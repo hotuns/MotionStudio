@@ -10,9 +10,9 @@ export function FeedbackSettings({profile,device,status,update}:Props){
  const set=<K extends keyof FeedbackConfig>(key:K,value:FeedbackConfig[K])=>update(p=>{p.feedback={...feedbackConfig(p),[key]:value};});
  return <div className={styles.group}>
   <p className={styles.hint}>把游戏发给虚拟手柄的震动／灯光交回当前所选实体手柄。Xbox 主要提供震动，DualShock 4 还可以提供灯光；实际能力取决于实体接口。</p>
-  <Toggle label="回传游戏震动" value={config.rumble_enabled} onChange={v=>set('rumble_enabled',v)}/>
-  {config.rumble_enabled&&<Range label="震动强度" value={config.rumble_gain} min={0} max={2} step={0.05} unit="×" onChange={v=>set('rumble_gain',v)}/>}
-  <Toggle label="回传游戏灯光" value={config.lightbar_enabled} onChange={v=>set('lightbar_enabled',v)}/>
+  <Toggle label="回传游戏震动" settingPath="feedback.rumble_enabled" value={config.rumble_enabled} onChange={v=>set('rumble_enabled',v)}/>
+  {config.rumble_enabled&&<Range label="震动强度" settingPath="feedback.rumble_gain" value={config.rumble_gain} min={0} max={2} step={0.05} unit="×" onChange={v=>set('rumble_gain',v)}/>}
+  <Toggle label="回传游戏灯光" settingPath="feedback.lightbar_enabled" value={config.lightbar_enabled} onChange={v=>set('lightbar_enabled',v)}/>
   {device&&<p className={styles.hint}>所选接口：{device.rumble?'支持震动':'未报告震动支持'} · {device.lightbar?'支持灯光':'未报告灯光支持'}</p>}
   {profile.virtual_gamepad==='none'?<p className={styles.hint}>选择虚拟 Xbox／DualShock 4 输出后，游戏反馈回传才会运行。</p>:runtime?.active?<p role="status">{runtime.awaiting_new_command?'等待新的游戏反馈':'正在回传游戏反馈'} · <span translate="no">{Math.round(runtime.rumble[0]*100)}% / {Math.round(runtime.rumble[1]*100)}%</span></p>:null}
   <p className={styles.hint}>录入、停止、断线和切换时释放震动，恢复后等待新的游戏命令。停止灯光回传时取消待发送颜色，设备保留最后颜色。</p>
@@ -23,7 +23,7 @@ export function TouchpadSettings({profile,device,status,update}:Props){
  const config=touchpadConfig(profile);
  const set=<K extends keyof TouchpadConfig>(key:K,value:TouchpadConfig[K])=>update(p=>{p.touchpad={...touchpadConfig(p),[key]:value};});
  const count=Math.min(2,Math.max(1,device?.touchpads??0));
- return <section className={styles.group}>
+ return <section className={styles.group} data-setting-section="touch-general">
   <div className={styles.groupHeading}><h3>原生触摸板鼠标</h3></div>
   <Toggle label="启用触摸板鼠标" value={config.enabled} onChange={v=>set('enabled',v)}/>
   <p className={styles.hint}>单指移动光标，双指滚动。单指轻点为左键，双指轻点为右键，按住触摸板可拖动。双触摸板使用左板滚动、右板移动，双板同时按下为中键。</p>

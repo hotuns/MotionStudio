@@ -243,7 +243,7 @@ const FLK_TRACK_PENDING: usize = 5; // un-delivered tracking rotation (deg), smo
 /// Sustained release needed to disengage. Brief dropouts shorter than this (e.g.
 /// a Bluetooth input gap that momentarily reads ~0) are ignored, so the flick
 /// doesn't drop and re-fire.
-const FLK_DISENGAGE_HOLD_S: f32 = 0.06;
+const FLK_DISENGAGE_HOLD_MS: f32 = 60.0;
 /// Time constant for paying out tracked rotation. The stick usually polls slower
 /// than the eval loop, so the raw per-tick heading delta arrives as 0,0,spike,…;
 /// spreading it over this window turns it into a smooth stream the mouse driver
@@ -346,6 +346,8 @@ pub(crate) fn compute_rws(
     let max_rate = pf("max_rate_dps", 360.0);
     let (flick_on, stick_aim) = rws_stick_uses(inputs, params);
     let flick_deadzone = pf("flick_deadzone", 0.85);
+    let flick_release_ratio = params.get("flick_release_ratio").and_then(Value::as_f64).map(|v| v as f32);
+    let flick_disengage_s = pf("flick_disengage_ms", FLK_DISENGAGE_HOLD_MS).clamp(0.0, 60.0) / 1000.0;
     let flick_smooth_ms = pf("flick_smooth_ms", 100.0);
     let flick_release_ease = pf("flick_release_ease", 0.0).clamp(0.0, crate::eval::MAX_FLICK_RELEASE_EASE);
     let flick_fwd_dz = pf("flick_fwd_dz_deg", 0.0).clamp(0.0, 180.0);
@@ -448,7 +450,7 @@ pub(crate) fn compute_rws(
     let allow_flick = !(gated && slow_lock && state.aux_f32[GST] == GST_STEERING);
 
     let flick_deg = if flick_on && !measuring {
-        compute_flick(inputs, state, flick_deadzone, flick_smooth_ms, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt, flick_input_dt, observe_only)
+        compute_flick(inputs, state, flick_deadzone, flick_release_ratio, flick_disengage_s, flick_smooth_ms, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt, flick_input_dt, observe_only)
     } else {
         reset_flick(state);
         0.0
@@ -640,6 +642,8 @@ fn compute_flick(
     inputs: &[Option<Signal>],
     state: &mut NodeState,
     deadzone: f32,
+    release_ratio: Option<f32>,
+    disengage_s: f32,
     smooth_ms: f32,
     release_ease: f32,
     fwd_dz_deg: f32,
@@ -665,10 +669,15 @@ fn compute_flick(
     //  • The heading is only read when the stick is reliably deflected — below the
     //    floor `atan2` is meaningless (a dropout reads ~0), so we hold the last
     //    heading instead of yanking toward 0°.
-    //  • Disengage requires a SUSTAINED release (`FLK_DISENGAGE_HOLD_S`), so a
+    //  • A nonzero disengage hold requires a sustained release, so a
     //    brief Bluetooth input gap doesn't drop the flick and re-fire it.
     let engage_dz = deadzone.clamp(0.05, 0.99);
-    let release_dz = (engage_dz * 0.5).clamp(0.15, 0.7);
+    let release_dz = if let Some(ratio) = release_ratio {
+        // Keep the safety floor unless the configured engage threshold is lower.
+        (engage_dz * ratio.clamp(0.0, 1.0)).clamp(0.15_f32.min(engage_dz), engage_dz)
+    } else {
+        (engage_dz * 0.5).clamp(0.15, 0.7)
+    };
     let reliable = mag >= release_dz;
 
     if reliable {
@@ -724,7 +733,7 @@ fn compute_flick(
         // Below the release floor: hold the heading (no spurious rotation) and
         // disengage only after a sustained release, so brief dropouts are ignored.
         state.aux_f32[FLK_BELOW_S] += input_dt;
-        if state.aux_f32[FLK_BELOW_S] >= FLK_DISENGAGE_HOLD_S {
+        if state.aux_f32[FLK_BELOW_S] >= disengage_s {
             state.aux_f32[FLK_ENGAGED] = 0.0;
             // Let go: turn whatever the stabiliser was still holding back.
             let held = state.aux_f32[FLK_STAB_RAW] - state.aux_f32[FLK_STAB_OUT];

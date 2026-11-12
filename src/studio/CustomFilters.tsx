@@ -10,7 +10,7 @@ const stages:[FilterStage,string][]=[['raw_gyro','原始角速度'],['before_bui
 type Draft={filter:CustomFilter;parameters:{key:string;value:string}[]};
 const draftOf=(filter:CustomFilter):Draft=>({filter:structuredClone(filter),parameters:Object.entries(filter.params).map(([key,value])=>({key,value:String(value)}))});
 
-export function CustomFilters({profile,update,statuses=[],running=false,onReset}:{profile:Profile;update:(change:(profile:Profile)=>void)=>void;statuses?:FilterStatus[];running?:boolean;onReset:()=>void}) {
+export function CustomFilters({profile,update,statuses=[],running=false,onReset,embedded=false}:{profile:Profile;update:(change:(profile:Profile)=>void)=>void;statuses?:FilterStatus[];running?:boolean;onReset:()=>void;embedded?:boolean}) {
   const filters=profile.gyro.motion.custom_filters??[];
   const [editing,setEditing]=useState<Draft|null>(null),[removing,setRemoving]=useState<string|null>(null);
   const [template,setTemplate]=useState('passthrough'),[signal,setSignal]=useState('noise'),[axis,setAxis]=useState(0);
@@ -47,8 +47,9 @@ export function CustomFilters({profile,update,statuses=[],running=false,onReset}
   const reorder=(id:string,direction:number)=>mutate(filters=>{const index=filters.findIndex(filter=>filter.id===id),stage=filters[index]?.stage;const same=filters.map((filter,index)=>({filter,index})).filter(item=>item.filter.stage===stage);const next=same[same.findIndex(item=>item.index===index)+direction]?.index;if(next!==undefined)[filters[index],filters[next]]=[filters[next],filters[index]];});
   const shown=preview?.points??[],peak=Math.max(0.1,...shown.flatMap(point=>[Math.abs(point.input[axis]),Math.abs(point.output[axis])]));
   const line=(output:boolean)=>shown.map((point,index)=>`${20+index/Math.max(1,shown.length-1)*860},${90-(output?point.output[axis]:point.input[axis])/peak*70}`).join(' ');
-  return <details className={styles.root} open={filters.length>0}>
-    <summary>高级：自定义处理链（Rhai）</summary>
+  const Container=embedded?'div':'details';
+  return <Container className={styles.root+(embedded?' '+styles.embedded:'')} {...(!embedded?{open:filters.length>0}:{})}>
+    {embedded?<h3>自定义处理链（Rhai）</h3>:<summary>高级：自定义处理链（Rhai）</summary>}
     <p>添加自己的防抖和滤波脚本。按传感器样本处理，状态与参数独立；修改随当前配置保存。</p>
     <div className={styles.toolbar}>
       <button type="button" className="secondary-btn" disabled={filters.length>=4} onClick={()=>open({api_version:1,id:crypto.randomUUID(),name:t('自定义滤波'),enabled:true,stage:'before_builtin',source:filterTemplates[0].source,params:{}})}>添加滤波器</button>
@@ -101,5 +102,5 @@ export function CustomFilters({profile,update,statuses=[],running=false,onReset}
           <p className={styles.hint}>500 Hz · {preview.points.length} 个样本 · {preview.status.last_us} µs / {preview.status.max_us} µs</p>{preview.status.error&&<p className={styles.error} role="alert" translate="no">{preview.status.error}</p>}</>}
       </div>
     </Dialog>}
-  </details>;
+  </Container>;
 }

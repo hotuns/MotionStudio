@@ -43,3 +43,29 @@ function mergePatch(target:Record<string,unknown>,patch:Record<string,unknown>){
   }
 }
 export function newLayer():ProfileLayer{return {id:crypto.randomUUID(),name:t('新配置层'),input:'left_shoulder',activation_threshold:0.5,activation_hysteresis:0.1,settings:{},actions:[],disabled_inputs:[]};}
+
+export function layerSettingOverridden(layer: ProfileLayer, path: string): boolean {
+  let value: unknown = layer.settings;
+  for (const key of path.split('.')) {
+    if (!object(value)) return value !== undefined;
+    if (value.clear === true) return true;
+    if (!Object.hasOwn(value,key)) return false;
+    value = value[key];
+  }
+  return value !== undefined;
+}
+
+// Delete the patch itself. Assigning the base value would leave an override
+// behind and prevent future edits of the base layer from being inherited.
+export function restoreLayerSetting(layer: ProfileLayer, path: string) {
+  const remove = (patch: Record<string,unknown>, keys: string[]) => {
+    const [key,...rest] = keys;
+    if (!Object.hasOwn(patch,key)) return;
+    if (!rest.length || !object(patch[key]) || patch[key].clear === true) delete patch[key];
+    else {
+      remove(patch[key],rest);
+      if (!Object.keys(patch[key]).length) delete patch[key];
+    }
+  };
+  remove(layer.settings,path.split('.'));
+}

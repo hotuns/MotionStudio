@@ -5,6 +5,7 @@
   "接管速度": "Takeover speed",
   "外圈交还阈值": "Outer-ring handback threshold",
   "Flick 死区": "Flick deadzone",
+  "Flick 追踪下限比例": "Flick tracking threshold ratio",
   "Flick 时间": "Flick time",
   "Flick 稳定": "Flick stabilization",
   "快推判定时间": "Fast flick detection time",

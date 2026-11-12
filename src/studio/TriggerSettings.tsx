@@ -1,5 +1,6 @@
 import type {Profile, TriggerStageMode, TriggerStagesConfig} from '../types';
-import {Range, SettingsGroup as Group, Toggle} from './Controls';
+import {Range, Toggle} from './Controls';
+import {SettingField,SettingSection,settingStyles} from './SettingLayout';
 import {OptionPicker} from './OptionPicker';
 import type {MotionUpdate} from './AdvancedMotion';
 import {TriggerInputSettings} from './ControllerInputSettings';
@@ -30,9 +31,8 @@ export function TriggerSettings({profile, layerMode, update, onEditBase}: {
     draft.trigger_stages = {...(draft.trigger_stages ?? stageDefaults), ...patch};
   });
   const skipping = [stage.left_mode, stage.right_mode].some(mode => mode.startsWith('may_skip') || mode.startsWith('must_skip'));
-  return <section className={styles.panel + ' app-card'}>
-    <h2>扳机设置</h2>
-    <Group title="扳机轻拉与全拉">
+  return <div className={settingStyles.page}>
+    <SettingSection id="trigger-stages" title="扳机轻拉与全拉" defaultOpen summary={layerMode?'基础层共用':'轻拉与全拉'}>
       <p className={styles.hint}>在动作里分别选择 LT 或 RT 的轻拉和全拉。全拉点取决于校准后的最大行程。</p>
       {layerMode && <div className="studio-actions">
         <p className={styles.hint}>轻拉和全拉规则在基础层设置，所有配置层共用。</p>
@@ -40,19 +40,19 @@ export function TriggerSettings({profile, layerMode, update, onEditBase}: {
       </div>}
       <fieldset className="studio-content" disabled={layerMode}>
         <div className={styles.grid}>
-          <OptionPicker label="左扳机全拉模式" value={stage.left_mode} groups={stageChoices}
-            onChange={value => updateStages({left_mode:value as TriggerStageMode})}/>
-          <OptionPicker label="右扳机全拉模式" value={stage.right_mode} groups={stageChoices}
-            onChange={value => updateStages({right_mode:value as TriggerStageMode})}/>
+          <SettingField label="左扳机全拉模式"><OptionPicker label="左扳机全拉模式" value={stage.left_mode} groups={stageChoices}
+            onChange={value => updateStages({left_mode:value as TriggerStageMode})}/></SettingField>
+          <SettingField label="右扳机全拉模式"><OptionPicker label="右扳机全拉模式" value={stage.right_mode} groups={stageChoices}
+            onChange={value => updateStages({right_mode:value as TriggerStageMode})}/></SettingField>
           {stage.soft_threshold >= 0 && <Range label="轻拉阈值" value={stage.soft_threshold} min={0} max={0.99} step={0.01}
             onChange={soft_threshold => updateStages({soft_threshold})}/>}
-          {skipping && <Range label="快速全拉时间窗" value={stage.skip_delay_ms} min={0} max={5000} step={1} unit=" ms"
+          {skipping && <Range label="快速全拉时间窗" value={stage.skip_delay_ms} min={0} max={5000} step={1} unit=" ms" slider={false}
             onChange={skip_delay_ms => updateStages({skip_delay_ms})}/>}
         </div>
         <Toggle label="随扳机移动触发轻拉" value={stage.soft_threshold < 0}
           onChange={enabled => updateStages({soft_threshold:enabled ? -1 : stageDefaults.soft_threshold})}/>
       </fieldset>
-    </Group>
+    </SettingSection>
     <TriggerInputSettings profile={profile} update={update}/>
-  </section>;
+  </div>;
 }

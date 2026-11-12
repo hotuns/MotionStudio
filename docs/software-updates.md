@@ -20,7 +20,6 @@
 ```powershell
 npm run build -- --ci --bundles nsis --config src-tauri/tauri.release.conf.json -- --locked
 npm run package:update
-cargo test --locked --release -p motion-studio updates::tests::signed_release_packages -- --ignored
 ```
 
-完整发布资产在 `artifacts/release-vX.Y.Z/`。签名验证使用正式公钥，并检查修改过的安装包和不匹配的版本号能否被拒绝。验证过程只读取安装包。
+完整发布资产在 `artifacts/release-vX.Y.Z/`。`package:update` 使用正式公钥验证安装包的 BLAKE2b-512 / Ed25519 签名、可信注释签名和其中的版本号；任何一项不匹配都会中止打包。发布流程只读取产物，不安装软件，也不再为验签编译或运行 Rust 测试程序。

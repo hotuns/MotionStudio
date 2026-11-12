@@ -1,6 +1,7 @@
 .page, .wizard { display: grid; gap: var(--section-gap); color: var(--text-strong); font-size: 13px; }
 .page { --profile-navigation-offset: calc(var(--profile-navigation-height, 0px) + var(--section-gap)); }
 .tabPanel { display: grid; gap: var(--section-gap); min-width: 0; }
+.tabPanel > :global(fieldset.studio-content) { display: grid; align-content: start; gap: 12px; }
 .tabPanel :where(button, input, select, textarea, summary, a[href], [tabindex]):not(dialog *) {
   scroll-margin-block-start: var(--profile-navigation-offset);
 }

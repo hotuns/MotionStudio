@@ -32,10 +32,8 @@ jobs:
           if (-not $env:TAURI_SIGNING_PRIVATE_KEY) { throw 'Configure the TAURI_SIGNING_PRIVATE_KEY repository secret first.' }
           npm run build -- --ci --bundles nsis --config src-tauri/tauri.release.conf.json -- --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Prepare installer release assets
+      - name: Verify signatures and prepare installer release assets
         run: npm run package:update
-      - name: Verify the signed installer without installing it
-        run: cargo test --locked --release -p motion-studio updates::tests::signed_release_packages -- --ignored
       - name: Create a draft GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

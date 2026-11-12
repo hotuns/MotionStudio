@@ -26,7 +26,8 @@ import {ImportJsm} from './studio/ImportJsm';
 import { pickImportFile } from './import-file';
 import {GamepadNavigation} from './studio/GamepadNavigation';
 import {LayerToolbar} from './studio/LayerToolbar';
-import {editingProfile,updateLayer} from './layers';
+import {editingProfile,updateLayer,restoreLayerSetting} from './layers';
+import type {SettingRequest} from './studio/settings-catalog';
 import {useLanguage,setLanguage,getLanguage,t} from './i18n';
 import { chordParts,inputLabel,outputLabel, type Action, type ComponentStatus, type Entry, type Profile, type Settings, type Snapshot, type Workspace } from './types';
 import { padBindingCandidates, padInputNeutral, heldPadInputs, recordedSticks, type GamepadBindingRecording, type GyroBindingField, type GyroBindingRecording } from './pad-capture';
@@ -89,6 +90,9 @@ export default function App() {
   const [revealDeviceCalibration, setRevealDeviceCalibration] = useState(false);
   const [gameTab, setGameTab] = useState<GameTab>('actions');
   const [editingLayer,setEditingLayer]=useState('');
+  const [settingRequest,setSettingRequest]=useState<SettingRequest>();
+  const settingSerial=useRef(0);
+  useEffect(()=>{setSettingRequest(undefined);},[draft?.id,editingLayer]);
   useEffect(()=>{setEditingLayer('');},[draft?.id]);
   useEffect(()=>{if(editingLayer&&!draft?.profile.layers?.some(layer=>layer.id===editingLayer))setEditingLayer('');},[draft?.profile.layers,editingLayer]);
   const [busy, setBusy] = useState(false);
@@ -441,6 +445,7 @@ export default function App() {
       return;
     }
     cancelCapture();
+    setSettingRequest(undefined);
     if (target === 'games') setGameTab(measuringRef.current ? 'motion' : tab);
     setRevealDeviceCalibration(showCalibration);
     setPage(target);
@@ -776,6 +781,11 @@ export default function App() {
 
   return <>
     <StudioShell page={page} gameTab={gameTab} onNavigate={navigate} onGameTab={tab=>navigate('games',tab)}
+      settingsBlocked={locked||captureActive||!!status?.motion?.measuring||!!editor||!!batch||!!bindingWindowId||!draft}
+      onSetting={target=>{
+        if(locked||captureActive||measuringRef.current||!draft)return;
+        navigate('games',target.tab);setSettingRequest({...target,serial:++settingSerial.current});
+      }}
       controllerNavigation={<GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||!!status?.motion?.measuring}
         canSave={canSave} canPlay={canObserve&&!locked&&!needsBindings}
         onSave={()=>{if(dirty&&!locked)void run(saveDraft);}} onPlay={()=>void run(()=>startMapping(true))} onDisable={disableGamepad}/>}
@@ -814,6 +824,20 @@ export default function App() {
 
       {page === 'games' && workspace && (profile && draft
         ? <GameProfilesPage key={draft.id} editingLayerKey={editingLayer} layerMode={!!editingLayer} tab={gameTab} profile={profile} device={device} status={status}
+            editingLayer={draft.profile.layers?.find(layer=>layer.id===editingLayer)} settingRequest={settingRequest}
+            onRestoreSetting={paths=>{
+              if(locked||captureActive||measuringRef.current)return;
+              setDraft(current=>{
+                if(!current)return current;
+                const entry=structuredClone(current),layer=entry.profile.layers?.find(layer=>layer.id===editingLayer);
+                if(layer)paths.forEach(path=>restoreLayerSetting(layer,path));
+                return entry;
+              });
+            }}
+            canMeasure={!!status?.emitting&&!!status.device&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
+            onOpenCalibration={()=>void run(()=>invoke('open_calibration_window',{
+              profileId:draft.id,theme:document.documentElement.dataset.theme==='light'?'light':'dark',
+            }))}
             layerControls={<LayerToolbar key={draft.id} profile={draft.profile} profileId={draft.id} selected={editingLayer} onSelect={setEditingLayer}
               blocked={locked||!!capture||!!editor||!!batch||!!status?.motion?.measuring} status={status}
               onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
@@ -827,10 +851,6 @@ export default function App() {
               recording={gyroRecording} canRecord={canRecordGyro}
               onRecord={gyroField=>beginCapture({kind:'pad',index:null,gyroField})} onCancelRecording={cancelCapture}
               onOpenDevice={()=>navigate('controllerStatus','actions',true)} onPreviewOutput={()=>navigate('controllerStatus')} status={status}
-              canMeasure={!!status?.emitting&&!!status.device&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
-              onOpenCalibration={()=>void run(()=>invoke('open_calibration_window',{
-                profileId:draft.id,theme:document.documentElement.dataset.theme==='light'?'light':'dark',
-              }))}
               onMotionAction={motionAction}/>}
             onExport={() => void run(() => exportProfile(draft))} onOpenFolder={() => openLocation('profiles')} onNavigate={navigate} />
         : <section className="app-card"><h2>创建你的第一份游戏配置</h2>

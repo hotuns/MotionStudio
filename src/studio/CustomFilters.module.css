@@ -1,5 +1,7 @@
 .root { grid-column: 1 / -1; min-width: 0; border: 1px solid var(--panel-border); border-radius: var(--section-radius); background: var(--bg-1); padding: 16px; }
 .root > summary { cursor: pointer; color: var(--text-strong); font-weight: 600; }
+.embedded { padding: 0; border: 0; background: transparent; }
+.embedded > h3 { margin: 12px 0 6px; font-size: 13px; font-weight: 600; }
 .root p, .hint { color: var(--text-muted); font-size: 12px; line-height: 1.7; }
 .toolbar, .card, .actions, .editorTools, .parameter { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .toolbar { justify-content: space-between; margin: 16px 0; }

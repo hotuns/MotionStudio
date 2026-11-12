@@ -3,6 +3,7 @@ import type {GyroBindingField, GyroBindingRecording} from '../pad-capture';
 import {OptionPicker} from './OptionPicker';
 import {padChoices, padInputLabel} from './binding-choices';
 import styles from './MotionControls.module.css';
+import {SettingField} from './SettingLayout';
 
 export function GyroBindingInput({field, value, blocked, split, recording, locked, available, onChange, onRecord, onCancel}: {
   field: GyroBindingField;
@@ -20,7 +21,7 @@ export function GyroBindingInput({field, value, blocked, split, recording, locke
   const label = pause ? '按住暂停' : '开启按键';
   const groups = padChoices(undefined, blocked ? [blocked] : [], split);
   if (pause) groups.unshift({options:[{value:'', label:'不设置'}]});
-  return <div className={styles.bindingField}>
+  return <SettingField label={label} path={'gyro.'+field} inheritance={false}><div className={styles.bindingField}>
     <div className={styles.bindingRow}>
       <div className="studio-field">{label}
         <OptionPicker label={label} value={value ?? ''} groups={groups} disabled={locked} onChange={onChange}/>
@@ -40,5 +41,5 @@ export function GyroBindingInput({field, value, blocked, split, recording, locke
         '请按下或接触要录入的手柄输入。'}
       <br/>录入期间暂停游戏输出，Esc 可取消。
     </p>}
-  </div>;
+  </div></SettingField>;
 }

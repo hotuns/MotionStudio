@@ -633,6 +633,8 @@ fn flick_graph(profile: &Profile) -> GraphRunner {
         ("_rws_flick_out_wired".into(), json!(f.enabled)),
         ("stick_aim_enabled".into(), json!(f.stick_aim)),
         ("flick_deadzone".into(), json!(f.deadzone)),
+        ("flick_release_ratio".into(), json!(f.release_ratio)),
+        ("flick_disengage_ms".into(), json!(f.disengage_ms)),
         ("flick_smooth_ms".into(), json!(f.smooth_ms)),
         ("flick_release_ease".into(), json!(f.release_ease)),
         ("flick_fwd_dz_deg".into(), json!(f.forward_deadzone)),
