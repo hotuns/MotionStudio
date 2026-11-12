@@ -6,9 +6,10 @@ use motion_core::{
         emergency_stop, probe_virtual_driver, Dispatcher, GamepadBackend, ObserveSink,
         OutputBackend, Sink, SplitSink, WindowsSink,
     },
-    profile::{GamepadTarget, Profile},
-    protocol::{Command, Event, Request, RunConfig, Status, PROTOCOL_VERSION},
+    profile::{pressed_inputs, GamepadTarget, Profile},
+    protocol::{Command, Event, PadShortcutEvent, Request, RunConfig, Status, PROTOCOL_VERSION},
     sdl::{Device, InputOrigin, Sdl},
+    shortcut::{validate_shortcut_rules, PadShortcut, PadShortcutEdges, ShortcutRule, ShortcutTrigger},
     storage::{parse_profile, read_small},
     timing::{
         io_schedule::{self, IoPass},
@@ -25,6 +26,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+const PAD_SHORTCUT_EVENT_LIMIT: usize = 64;
 
 fn probe_output(
     backend: OutputBackend,
@@ -155,7 +158,7 @@ pub struct Runtime {
     seeding: bool,
     resync_input: bool,
     measurement_input_interrupted: bool,
-    pad_shortcut: motion_core::shortcut::PadShortcutEdges,
+    pad_shortcut_edges: Vec<PadShortcutEdges>,
     feedback: motion_core::feedback::FeedbackRouter,
     last_feedback: Instant,
 }
@@ -221,7 +224,7 @@ impl Runtime {
             seeding: false,
             resync_input: false,
             measurement_input_interrupted: false,
-            pad_shortcut: Default::default(),
+            pad_shortcut_edges: vec![],
             feedback: Default::default(),
             last_feedback: Instant::now(),
         }
@@ -373,6 +376,7 @@ impl Runtime {
         self.navigation.reset();
         self.status.navigation_events.clear();
         self.status.navigation_held.clear();
+        self.reset_pad_shortcut_events();
         self.status.processed_axes = [0.0; 6];
         self.status.stick_regions = Default::default();
         self.status.pad_region_capture = Default::default();
@@ -812,10 +816,12 @@ impl Runtime {
             }
             Control::Request(request) => {
                 let shutdown = matches!(request.command, Command::Shutdown);
-                let changes_session = matches!(
-                    &request.command,
-                    Command::Start { .. } | Command::Navigate { .. } | Command::Stop
-                );
+                let shortcut_update = matches!(&request.command, Command::SetPadShortcuts { .. });
+                let status_before_reply = shortcut_update
+                    || matches!(
+                        &request.command,
+                        Command::Start { .. } | Command::Navigate { .. } | Command::Stop
+                    );
                 let mut measurement = None;
                 let result = (|| -> Result<()> {
                     match request.command {
@@ -868,16 +874,7 @@ impl Runtime {
                             Ok(())
                         }
                         Command::SetBindingCapture { active } => self.set_binding_capture(active),
-                        Command::SetPadShortcut { binding } => {
-                            if let Some(binding) = &binding {
-                                motion_core::shortcut::validate_pad_input(&binding.input)?;
-                                if binding.target.is_empty() || binding.target.len() > 128 {
-                                    bail!("手柄快捷键目标配置无效");
-                                }
-                            }
-                            self.status.pad_shortcut = binding;
-                            Ok(())
-                        }
+                        Command::SetPadShortcuts { bindings } => self.set_pad_shortcuts(bindings),
                         Command::Scan => self.scan(),
                         Command::Calibrate => {
                             if self.status.binding_capture {
@@ -1030,9 +1027,12 @@ impl Runtime {
                         }
                     }
                 })();
-                self.track_pad_shortcut(true);
-                if changes_session {
-                    // The next request may use the selected device from this status.
+                if !shortcut_update {
+                    self.track_pad_shortcut(true);
+                }
+                if status_before_reply {
+                    // The caller may use the selected device or rule indices
+                    // from this status as soon as it receives the reply.
                     self.publisher.reliable(Event::Status {
                         status: Box::new(self.status_snapshot()),
                     })?;
@@ -1043,7 +1043,7 @@ impl Runtime {
                     error: result.err().map(|e| format!("{e:#}")),
                     measurement,
                 })?;
-                if !changes_session {
+                if !status_before_reply {
                     self.publish_status();
                 }
                 if shutdown {
@@ -1089,6 +1089,7 @@ impl Runtime {
         self.navigation.reset();
         self.status.navigation_events.clear();
         self.status.navigation_held.clear();
+        self.reset_pad_shortcut_events();
         self.status.input_chord.clear();
         self.status.motion = Default::default();
         self.status.calibration_progress = 0.0;
@@ -1294,6 +1295,33 @@ impl Runtime {
         }
         Ok(())
     }
+    fn set_pad_shortcuts(&mut self, bindings: Vec<PadShortcut>) -> Result<()> {
+        if self.status.pad_shortcuts != bindings {
+            let rules: Vec<_> = bindings
+                .iter()
+                .map(|binding| ShortcutRule {
+                    trigger: ShortcutTrigger::Gamepad {
+                        input: binding.input.clone(),
+                    },
+                    target: binding.target.clone(),
+                    return_on_repeat: true,
+                })
+                .collect();
+            validate_shortcut_rules(&rules)?;
+            self.pad_shortcut_edges.clear();
+            self.pad_shortcut_edges
+                .resize_with(bindings.len(), PadShortcutEdges::default);
+            self.status.pad_shortcuts = bindings;
+            self.track_pad_shortcut(true);
+        }
+        Ok(())
+    }
+
+    fn reset_pad_shortcut_events(&mut self) {
+        self.status.pad_shortcut_baseline = self.status.pad_shortcut_serial;
+        self.status.pad_shortcut_events.clear();
+    }
+
     fn track_pad_shortcut(&mut self, baseline: bool) {
         self.status.stick_regions = self.engine.as_mut().zip(self.config.as_ref()).map_or(
             Default::default(),
@@ -1316,17 +1344,39 @@ impl Runtime {
             && !self.seeding
             && !self.engine.as_ref().is_some_and(Engine::is_measuring);
         if baseline {
-            self.status.pad_shortcut_baseline = self.status.pad_shortcut_serial;
+            self.reset_pad_shortcut_events();
         }
-        if self.pad_shortcut.update(
-            self.status.pad_shortcut.as_ref(),
-            &self.status.buttons,
-            &self.status.processed_axes,
-            &extra,
-            enabled,
-            baseline,
-        ) {
+        if self.status.pad_shortcuts.is_empty() {
+            return;
+        }
+        let pressed = pressed_inputs(&self.status.buttons, &self.status.processed_axes, 0.6);
+        let retained = pressed_inputs(&self.status.buttons, &self.status.processed_axes, 0.5);
+        let mut matched = None;
+        for (index, (edge, binding)) in self
+            .pad_shortcut_edges
+            .iter_mut()
+            .zip(&self.status.pad_shortcuts)
+            .enumerate()
+        {
+            if edge.update_with_held(Some(binding), &pressed, &retained, &extra, enabled, baseline) {
+                let specificity = binding.input.split('+').count();
+                // Prefer the longer chord when one control completes multiple
+                // bindings, and prefer the first saved rule on a tie.
+                if matched.is_none_or(|(_, best)| specificity > best) {
+                    matched = Some((index, specificity));
+                }
+            }
+        }
+        if let Some((index, _)) = matched {
             self.status.pad_shortcut_serial = self.status.pad_shortcut_serial.saturating_add(1);
+            let events = &mut self.status.pad_shortcut_events;
+            if events.len() == PAD_SHORTCUT_EVENT_LIMIT {
+                events.remove(0);
+            }
+            events.push(PadShortcutEvent {
+                serial: self.status.pad_shortcut_serial,
+                index,
+            });
         }
     }
 
@@ -1491,6 +1541,7 @@ impl Runtime {
     }
     fn begin_input_resync(&mut self) -> Result<()> {
         self.resync_input = true;
+        self.reset_pad_shortcut_events();
         self.clear_outputs()?;
         if let Some(engine) = &mut self.engine {
             if engine.is_measuring() {
@@ -2590,10 +2641,12 @@ mod tests {
     #[test]
     fn pad_shortcut_keeps_every_raw_tap_without_status_polling_or_profile_engine_ownership() {
         let (mut runtime, _, _rx) = fixture();
-        runtime.status.pad_shortcut = Some(motion_core::shortcut::PadShortcut {
-            input: "south".into(),
-            target: "aim".into(),
-        });
+        runtime
+            .set_pad_shortcuts(vec![PadShortcut {
+                input: "south".into(),
+                target: "aim".into(),
+            }])
+            .unwrap();
         runtime.track_pad_shortcut(true);
         for _ in 0..2 {
             runtime.input(down(), false).unwrap();
@@ -2624,6 +2677,62 @@ mod tests {
     }
 
     #[test]
+    fn controller_shortcuts_keep_rule_order_across_edges_and_rebase_on_replacement() {
+        let (mut runtime, _, _rx) = fixture();
+        let bindings = [("east", "menu"), ("south+east", "aim"), ("west", "map")]
+            .map(|(input, target)| PadShortcut {
+                input: input.into(),
+                target: target.into(),
+            });
+        runtime.set_pad_shortcuts(bindings.to_vec()).unwrap();
+        runtime.track_pad_shortcut(true);
+        let button = |index, down| InputEvent::Button {
+            time: SampleTime {
+                host_ns: 10,
+                sensor_ns: 0,
+            },
+            index,
+            down,
+        };
+        for (index, pressed) in [(0, true), (1, true), (1, false), (0, false), (2, true)] {
+            runtime.input(button(index, pressed), false).unwrap();
+        }
+        assert_eq!(
+            runtime.status.pad_shortcut_events,
+            [
+                PadShortcutEvent {
+                    serial: 1,
+                    index: 1,
+                },
+                PadShortcutEvent {
+                    serial: 2,
+                    index: 2,
+                },
+            ]
+        );
+        let mut invalid = bindings.to_vec();
+        invalid[1].input.clear();
+        assert!(runtime.set_pad_shortcuts(invalid).is_err());
+        assert_eq!(runtime.status.pad_shortcuts, bindings);
+        assert_eq!(runtime.status.pad_shortcut_events.len(), 2);
+
+        runtime.set_pad_shortcuts(vec![bindings[2].clone()]).unwrap();
+        runtime.track_pad_shortcut(true);
+        runtime.input(button(2, true), false).unwrap();
+        assert!(runtime.status.pad_shortcut_events.is_empty());
+        assert_eq!(runtime.status.pad_shortcut_baseline, 2);
+        runtime.input(button(2, false), false).unwrap();
+        runtime.input(button(2, true), false).unwrap();
+        assert_eq!(
+            runtime.status.pad_shortcut_events,
+            [PadShortcutEvent {
+                serial: 3,
+                index: 0,
+            }]
+        );
+    }
+
+    #[test]
     fn outer_shortcut_uses_base_geometry_and_capture_keeps_the_outer_edge() {
         use motion_core::profile::StickRegion::{Inner, Outer};
         let (mut runtime, held, _rx) = fixture();
@@ -2635,10 +2744,12 @@ mod tests {
             .unwrap()
             .apply_layer(active)
             .unwrap();
-        runtime.status.pad_shortcut = Some(motion_core::shortcut::PadShortcut {
-            input: "left_stick_outer".into(),
-            target: "aim".into(),
-        });
+        runtime
+            .set_pad_shortcuts(vec![PadShortcut {
+                input: "left_stick_outer".into(),
+                target: "aim".into(),
+            }])
+            .unwrap();
         let axis = |value: f32| InputEvent::Axis {
             time: SampleTime {
                 host_ns: 10,
@@ -2685,10 +2796,12 @@ mod tests {
     #[test]
     fn touch_contact_can_complete_a_switch_chord_and_release_rearms_it() {
         let (mut runtime, _, _rx) = fixture();
-        runtime.status.pad_shortcut = Some(motion_core::shortcut::PadShortcut {
-            input: "south+touch1".into(),
-            target: "aim".into(),
-        });
+        runtime
+            .set_pad_shortcuts(vec![PadShortcut {
+                input: "south+touch1".into(),
+                target: "aim".into(),
+            }])
+            .unwrap();
         runtime.track_pad_shortcut(true);
         runtime.input(down(), false).unwrap();
         assert_eq!(runtime.status.pad_shortcut_serial, 0);

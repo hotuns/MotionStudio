@@ -18,6 +18,7 @@ dialog.editorDialog { width: min(1080px,calc(100vw - 40px)); }
 .parts button > span { color: var(--text-muted); }
 .capturePad > * { max-width: 100%; }
 .inputKeys { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 6px; margin: 12px 0; }
+.pairedKeys { grid-template-columns: repeat(2,minmax(0,1fr)); }
 .inputKeys button,.modifiers button,.keyRow button,.mouseKeys button,.extraKeys button { min-width: 0; border: 1px solid var(--border-1); border-radius: var(--control-radius); background: var(--bg-input); color: var(--text-mid); font: inherit; cursor: pointer; }
 .inputKeys button { min-height: 33px; padding: 7px 4px; font-size: 11px; }.inputKeys button[aria-pressed='true'],.modifiers button[aria-pressed='true'],.keyRow button[aria-pressed='true'],.mouseKeys button[aria-pressed='true'],.extraKeys button[aria-pressed='true'] { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb,var(--accent) 11%,var(--bg-input)); }
 .sectionHeading { margin: 16px 0 0; padding-top: 14px; border-top: 1px solid var(--border-1); font-size: 12px; font-weight: 600; }

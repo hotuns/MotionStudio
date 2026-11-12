@@ -98,6 +98,7 @@ export function GameProfilesPage(props: Props) {
     </nav>
     <div key={props.editingLayerKey} data-pad-zone="game-panel" className={styles.tabPanel}>
       {tab==='actions' ? <ActionMappings profile={profile} device={device} status={status} blocked={blocked}
+        gamepadRecording={props.gamepadRecording} canRecordGamepad={props.canRecordGamepad} onRecordGamepad={props.onRecordGamepad}
         capture={capture} onCapture={props.onCapture} onCancelCapture={props.onCancelCapture} onAssignEscape={props.onAssignEscape}
         onUpdate={onUpdate} onEdit={props.onEdit} onBatch={props.onBatch} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :
         <fieldset className="studio-content" disabled={blocked || !!capture}>

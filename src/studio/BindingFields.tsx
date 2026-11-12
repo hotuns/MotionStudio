@@ -3,10 +3,55 @@ import {triggerCompetition,type TriggerBinding} from '../mapping-triggers';
 import {t} from '../i18n';
 import {Range,Toggle} from './Controls';
 import {OptionPicker} from './OptionPicker';
-import {padChoices, outputChoices} from './binding-choices';
+import {padChoices, outputChoices, padInputLabel} from './binding-choices';
+import editorStyles from './ActionEditor.module.css';
 import styles from './GameProfilesPage.module.css';
 import {modifierOutputs as modifiers} from '../keyboard';
 export const inputOpposites:Record<string,string>={left_stick_up:'left_stick_down',left_stick_down:'left_stick_up',left_stick_left:'left_stick_right',left_stick_right:'left_stick_left',right_stick_up:'right_stick_down',right_stick_down:'right_stick_up',right_stick_left:'right_stick_right',right_stick_right:'right_stick_left',dpad_up:'dpad_down',dpad_down:'dpad_up',dpad_left:'dpad_right',dpad_right:'dpad_left',left_stick_inner:'left_stick_outer',left_stick_outer:'left_stick_inner',right_stick_inner:'right_stick_outer',right_stick_outer:'right_stick_inner'};
+export const quickInputKeys = [
+  ['south','A'], ['east','B'], ['west','X'], ['north','Y'],
+  ['left_shoulder','LB'], ['right_shoulder','RB'], ['left_trigger','LT'], ['right_trigger','RT'],
+  ['left_trigger_soft','LT 轻拉'], ['left_trigger_full','LT 全拉'], ['right_trigger_soft','RT 轻拉'], ['right_trigger_full','RT 全拉'],
+  ['dpad_up','↑'], ['dpad_down','↓'], ['dpad_left','←'], ['dpad_right','→'],
+  ['left_stick_click','LS'], ['right_stick_click','RS'], ['back','View'], ['start','Menu'],
+  ['guide','Home'], ['touchpad','触摸板'], ['left_stick_outer','左外圈'], ['right_stick_outer','右外圈'],
+];
+
+export function InputCaptureButton({value, recording, disabled, hint, onClick}: {
+  value: string;
+  recording: boolean;
+  disabled: boolean;
+  hint?: string;
+  onClick: () => void;
+}) {
+  return <button type="button" className={editorStyles.capturePad} data-cancel-capture
+    aria-label={recording ? '取消手柄录入' : '录入手柄'} aria-pressed={recording}
+    disabled={disabled} onClick={onClick}>
+    <small>{recording ? '正在录入手柄…' : '点击录入手柄'}</small>
+    <strong>{value || '选择手柄输入'}</strong>
+    <span>{hint ?? (recording ? '全部松开后完成 · 点击取消' : '也可以选择下面的按键')}</span>
+  </button>;
+}
+
+export function InputQuickKeys({value, combo, split = false, onChange}: {
+  value: string;
+  combo: boolean;
+  split?: boolean;
+  onChange: (value: string) => void;
+}) {
+  const parts = chordParts(value);
+  return <div className={editorStyles.inputKeys} role="group" aria-label="手柄按键">
+    {quickInputKeys.map(([key, label]) => {
+      const selected = parts.includes(key);
+      const disabled = combo && !selected && (parts.length >= 4 || parts.some(part => inputOpposites[part] === key));
+      const next = !combo ? key : (selected ? parts.filter(part => part !== key) : [...parts, key]).join('+');
+      const name = t(padInputLabel(key, split));
+      return <button type="button" key={key} aria-label={'选择输入 '+name} title={name}
+        aria-pressed={selected} disabled={disabled} onClick={() => onChange(next)}>{label}</button>;
+    })}
+  </div>;
+}
+
 export const triggerNames={down:'按住',short:'短按',long:'长按',double:'双击',on_press:'按下时触发',on_release:'松开时触发'};
 const triggerHints={down:'按住期间持续输出。',short:'在短按最长时间内松开后触发，输出持续时间与本次按压相同。',long:'达到长按时间后触发，可保持到松开或只触发一次。',double:'在时间窗内再次按下时触发，第二次按住期间持续输出。',on_press:'按下时输出一次，持续时间由下方设置决定。',on_release:'松开时输出一次，持续时间由下方设置决定。'};
 export function ActionTriggerFields({action,onChange,peers=[]}:{action:TriggerBinding;onChange:(patch:Partial<TriggerSettings>)=>void;peers?:TriggerBinding[]}){

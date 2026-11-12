@@ -1,4 +1,8 @@
-use crate::{engine::Engine, profile::Profile};
+use crate::{
+    engine::Engine,
+    profile::Profile,
+    shortcut::{ShortcutRule, ShortcutTrigger},
+};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -43,6 +47,8 @@ pub struct Settings {
     pub shortcut_profile: Option<String>,
     pub shortcut_key: Option<crate::shortcut::Shortcut>,
     pub shortcut_pad: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shortcut_rules: Option<Vec<ShortcutRule>>,
     pub calibrations: BTreeMap<String, [f32; 3]>,
     pub motion_calibrations: BTreeMap<String, crate::motion_config::SensorCalibration>,
 }
@@ -68,6 +74,7 @@ impl Default for Settings {
             shortcut_profile: None,
             shortcut_key: Some(Default::default()),
             shortcut_pad: None,
+            shortcut_rules: None,
             calibrations: BTreeMap::new(),
             motion_calibrations: BTreeMap::new(),
         }
@@ -126,12 +133,7 @@ impl Store {
         Ok(store)
     }
     pub fn profile_path(&self, id: &str) -> Result<PathBuf> {
-        if id.is_empty()
-            || id.len() > 80
-            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        {
-            bail!("Invalid profile ID");
-        }
+        validate_profile_id(id)?;
         Ok(self.root.join("profiles").join(format!("{id}.toml")))
     }
     pub fn list(&self) -> Result<(Vec<ProfileEntry>, Vec<String>)> {
@@ -232,6 +234,32 @@ impl Store {
     }
 }
 impl Settings {
+    /// An explicit list, including an empty list, replaces the legacy shortcut fields.
+    pub fn effective_shortcut_rules(&self) -> Vec<ShortcutRule> {
+        if let Some(rules) = &self.shortcut_rules {
+            return rules.clone();
+        }
+        let Some(target) = &self.shortcut_profile else {
+            return Vec::new();
+        };
+        self.shortcut_key
+            .iter()
+            .cloned()
+            .map(|key| ShortcutTrigger::Keyboard { key })
+            .chain(
+                self.shortcut_pad
+                    .iter()
+                    .cloned()
+                    .map(|input| ShortcutTrigger::Gamepad { input }),
+            )
+            .map(|trigger| ShortcutRule {
+                trigger,
+                target: target.clone(),
+                return_on_repeat: true,
+            })
+            .collect()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.version != 1 {
             bail!("Unsupported settings version");
@@ -243,11 +271,15 @@ impl Settings {
         if self.cursor_debounce_ms > 5000 {
             bail!("光标状态确认时间应在 0 到 5000 毫秒之间");
         }
-        if let Some(key) = &self.shortcut_key {
-            key.validate()?;
-        }
-        if let Some(input) = &self.shortcut_pad {
-            crate::shortcut::validate_pad_input(input)?;
+        if let Some(rules) = &self.shortcut_rules {
+            crate::shortcut::validate_shortcut_rules(rules)?;
+        } else {
+            if let Some(key) = &self.shortcut_key {
+                key.validate()?;
+            }
+            if let Some(input) = &self.shortcut_pad {
+                crate::shortcut::validate_pad_input(input)?;
+            }
         }
         for calibration in self.motion_calibrations.values() {
             calibration.validate()?;
@@ -263,6 +295,17 @@ impl Settings {
         Ok(())
     }
 }
+
+pub(crate) fn validate_profile_id(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 80
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        bail!("Invalid profile ID");
+    }
+    Ok(())
+}
+
 pub const MAX_PROFILE_BYTES: usize = 512 * 1024;
 
 /// Decode the stored format before initializing an engine. Sharing uses this

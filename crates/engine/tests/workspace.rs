@@ -87,6 +87,83 @@ fn legacy_settings_keep_f9_and_custom_shortcuts_persist_and_reject_reserved_keys
     assert!(motion_core::profile::valid_output("key:F9"));
     assert!(!motion_core::profile::valid_output("key:F12"));
 }
+
+#[test]
+fn shortcut_rules_round_trip_and_an_empty_list_replaces_legacy_shortcuts() {
+    use motion_core::{
+        shortcut::{Shortcut, ShortcutRule, ShortcutTrigger},
+        storage::Settings,
+    };
+    let mut settings: Settings = serde_json::from_str(
+        r#"{"version":1,"shortcut_profile":"gyro","shortcut_pad":"left_shoulder+south"}"#,
+    )
+    .unwrap();
+    let mut rules = settings.effective_shortcut_rules();
+    assert_eq!(
+        rules,
+        vec![
+            ShortcutRule {
+                trigger: ShortcutTrigger::Keyboard {
+                    key: Shortcut::default(),
+                },
+                target: "gyro".into(),
+                return_on_repeat: true,
+            },
+            ShortcutRule {
+                trigger: ShortcutTrigger::Gamepad {
+                    input: "left_shoulder+south".into(),
+                },
+                target: "gyro".into(),
+                return_on_repeat: true,
+            },
+        ]
+    );
+    let legacy_rule: ShortcutRule = serde_json::from_str(
+        r#"{"trigger":{"kind":"gamepad","input":"left_shoulder+south"},"target":"gyro"}"#,
+    )
+    .unwrap();
+    assert_eq!(legacy_rule, rules[1]);
+    rules[1].target = "gamepad".into();
+    rules[1].return_on_repeat = false;
+    settings.shortcut_rules = Some(rules.clone());
+    let tmp = Sandbox::new();
+    let store = Store::open(tmp.0.clone()).unwrap();
+    store.save_settings(&settings).unwrap();
+    assert_eq!(store.settings().unwrap().effective_shortcut_rules(), rules);
+
+    settings.shortcut_rules = Some(vec![]);
+    store.save_settings(&settings).unwrap();
+    assert!(store.settings().unwrap().effective_shortcut_rules().is_empty());
+}
+
+#[test]
+fn shortcut_rules_reject_equivalent_keyboard_and_controller_triggers() {
+    use motion_core::shortcut::{validate_shortcut_rules, Shortcut, ShortcutRule, ShortcutTrigger};
+    let keyboard = |target: &str, ctrl| ShortcutRule {
+        trigger: ShortcutTrigger::Keyboard {
+            key: Shortcut {
+                key: "CTRL".into(),
+                ctrl,
+                ..Default::default()
+            },
+        },
+        target: target.into(),
+        return_on_repeat: true,
+    };
+    let pad = |target: &str, input: &str| ShortcutRule {
+        trigger: ShortcutTrigger::Gamepad { input: input.into() },
+        target: target.into(),
+        return_on_repeat: true,
+    };
+    assert!(validate_shortcut_rules(&[keyboard("gyro", false), keyboard("gamepad", true)]).is_err());
+    assert!(validate_shortcut_rules(&[
+        pad("gyro", "left_shoulder+south"),
+        pad("gamepad", "south + left_shoulder"),
+    ])
+    .is_err());
+    assert!(validate_shortcut_rules(&[keyboard("gyro", false), pad("gamepad", "south")]).is_ok());
+}
+
 #[test]
 fn profiles_share_as_one_document_and_empty_library_stays_empty() {
     let tmp = Sandbox::new();

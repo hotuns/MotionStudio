@@ -1,8 +1,8 @@
 import {useEffect, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {t} from '../i18n';
-import {gyroInputNeutral, padBindingCandidates} from '../pad-capture';
-import {chordParts, inputs, type Settings, type Status} from '../types';
+import {padInputNeutral, padBindingCandidates} from '../pad-capture';
+import {chordParts, inputs, type Status} from '../types';
 import {InputChordFields, inputOpposites} from './BindingFields';
 import {padInputLabel} from './binding-choices';
 import styles from './CursorSwitchPanel.module.css';
@@ -10,13 +10,14 @@ import styles from './CursorSwitchPanel.module.css';
 const modes = [['controls', '按键与方向'], ['regions', '摇杆内外圈']] as const;
 type Mode = (typeof modes)[number][0];
 
-const isNeutral = (status: Status, mode: Mode) => gyroInputNeutral(status)
+const isNeutral = (status: Status, mode: Mode) => padInputNeutral(status)
   && (mode !== 'regions' || (status.stick_regions ?? []).every(region => region === 'center'));
 const inputSerial = (status: Status, mode: Mode) =>
   mode === 'regions' ? status.pad_region_capture?.serial ?? 0 : status.input_serial;
 const outerCount = (parts: string[]) => parts.filter(part => part.endsWith('_outer')).length;
 
-function validation(parts: string[]) {
+export function validatePadShortcut(input: string) {
+  const parts = chordParts(input);
   if (!parts.length || parts.length > 4 || new Set(parts).size !== parts.length ||
       parts.some(part => !inputs.includes(part) || parts.includes(inputOpposites[part]))) {
     return '请选择 1–4 个有效且不冲突的手柄输入。';
@@ -25,16 +26,15 @@ function validation(parts: string[]) {
   return null;
 }
 
-export function PadShortcutSettings({settings, status, busy, onChange, onPrepare, onCapture, onRecordingChange}: {
-  settings: Settings;
+export function PadShortcutSettings({input, status, busy, onChange, onPrepare, onCapture, onRecordingChange}: {
+  input: string;
   status?: Status;
   busy: boolean;
-  onChange: (patch: Partial<Settings>) => void;
+  onChange: (input: string) => void;
   onPrepare: () => Promise<Status>;
   onCapture: (active: boolean) => Promise<void>;
   onRecordingChange: (active: boolean) => void;
 }) {
-  const [draft, setDraft] = useState(settings.shortcut_pad ?? '');
   const [mode, setMode] = useState<Mode>('controls');
   const [recording, setRecording] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -51,7 +51,6 @@ export function PadShortcutSettings({settings, status, busy, onChange, onPrepare
   const split = (status?.device?.touchpads ?? 0) >= 2;
   const label = (parts: string[]) => parts.map(part => t(padInputLabel(part, split))).join(' + ');
 
-  useEffect(() => { setDraft(settings.shortcut_pad ?? ''); }, [settings.shortcut_pad]);
   const release = () => {
     if (!lease.current) return;
     lease.current = false;
@@ -104,7 +103,7 @@ export function PadShortcutSettings({settings, status, busy, onChange, onPrepare
       const raw = mode === 'regions' ? status.pad_region_capture?.chord ?? [] :
         status.input_chord?.length ? status.input_chord : status.last_input ? [status.last_input] : [];
       const next = padBindingCandidates(raw, split);
-      const failure = validation(next);
+      const failure = validatePadShortcut(next.join('+'));
       if (failure) {
         setError(failure);
         peak.current = [];
@@ -120,10 +119,10 @@ export function PadShortcutSettings({settings, status, busy, onChange, onPrepare
       }
     }
     if (peak.current.length && neutral) {
-      setDraft(peak.current.join('+'));
+      onChange(peak.current.join('+'));
       cancel();
     }
-  }, [recording, status, mode, split]);
+  }, [recording, status, mode, split, onChange]);
 
   async function record() {
     setStarting(true);
@@ -144,6 +143,7 @@ export function PadShortcutSettings({settings, status, busy, onChange, onPrepare
       setCandidate([]);
       setRecording(true);
     } catch (error) {
+      lease.current = true;
       release();
       if (mounted.current) setError(String(error));
     } finally {
@@ -152,15 +152,15 @@ export function PadShortcutSettings({settings, status, busy, onChange, onPrepare
   }
 
   const locked = busy || recording || starting;
-  const changeDraft = (value: string) => { setDraft(value); setError(null); };
+  const changeDraft = (value: string) => { onChange(value); setError(null); };
   return <section className={styles.card}>
     <div className={styles.heading}><h5>手柄快捷键</h5>
-      {settings.shortcut_pad ? <kbd translate="no">{label(chordParts(settings.shortcut_pad))}</kbd> : <span>未绑定</span>}
+      {input ? <kbd translate="no">{label(chordParts(input))}</kbd> : <span>未绑定</span>}
     </div>
     <p className={styles.hint}>支持手柄单键、触摸、摇杆方向与内外圈，最多可组合 4 个输入。</p>
     <button type="button" className="secondary-btn" disabled={locked} onClick={() => changeDraft('left_stick_outer')}>使用左摇杆外圈</button>
     <fieldset disabled={locked} aria-label="手柄快捷键输入">
-      <InputChordFields value={draft} split={split} onChange={changeDraft} showHint={false}/>
+      <InputChordFields value={input} split={split} onChange={changeDraft} showHint={false}/>
     </fieldset>
     <div className={styles.recordMode} role="group" aria-label="手柄录入方式">
       {modes.map(([id, name]) => <button key={id} type="button" className="secondary-btn" disabled={locked}
@@ -169,12 +169,9 @@ export function PadShortcutSettings({settings, status, busy, onChange, onPrepare
         onClick={() => void record()}>{starting ? '正在准备…' : recording ? '正在录入手柄…' : '监听手柄'}</button>
     </div>
     <div className={styles.shortcutActions}>
-      {recording ? <button type="button" className="ghost-btn" onClick={() => { cancel(); setError(null); }}>取消录入</button> : <>
-        <button type="button" className="primary-btn" disabled={locked || !draft || draft === settings.shortcut_pad}
-          onClick={() => { const failure = validation(chordParts(draft)); setError(failure); if (!failure) onChange({shortcut_pad:draft}); }}>保存手柄快捷键</button>
-        <button type="button" className="ghost-btn" disabled={locked || !settings.shortcut_pad}
-          onClick={() => { setError(null); onChange({shortcut_pad:null}); }}>清除手柄快捷键</button>
-      </>}
+      {recording ? <button type="button" className="ghost-btn" onClick={() => { cancel(); setError(null); }}>取消录入</button> :
+        <button type="button" className="ghost-btn" disabled={locked || !input}
+          onClick={() => changeDraft('')}>清除手柄快捷键</button>}
     </div>
     {recording && <p className={styles.hint} role="status">
       {candidate.length ? <strong translate="no">{label(candidate)}</strong> : mode === 'regions' ?

@@ -344,6 +344,7 @@ async fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), St
         }
         state.store.delete(&id).map_err(text)?;
         let mut settings = state.settings.lock().map_err(text)?;
+        let shortcuts_before = settings.effective_shortcut_rules();
         if settings.cursor_shown == SwitchTarget::Profile(id.clone()) {
             settings.cursor_shown = SwitchTarget::None;
         }
@@ -352,6 +353,9 @@ async fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), St
         }
         if settings.shortcut_profile.as_deref() == Some(&id) {
             settings.shortcut_profile = None;
+        }
+        if let Some(rules) = &mut settings.shortcut_rules {
+            rules.retain(|rule| rule.target != id);
         }
         if settings.selected_profile == id {
             settings.selected_profile = state
@@ -363,7 +367,11 @@ async fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), St
                 .map(|p| p.id.clone())
                 .unwrap_or_default();
         }
-        state.store.save_settings(&settings).map_err(text)
+        state.store.save_settings(&settings).map_err(text)?;
+        if shortcuts_before != settings.effective_shortcut_rules() {
+            state.history.lock().unwrap().clear();
+        }
+        Ok(())
     })
     .await
 }
@@ -380,8 +388,13 @@ async fn save_settings(
                 state.store.load(id).map_err(text)?;
             }
         }
-        if let Some(id) = &settings.shortcut_profile {
-            state.store.load(id).map_err(text)?;
+        let rules = settings.effective_shortcut_rules();
+        motion_core::shortcut::validate_shortcut_rules(&rules).map_err(text)?;
+        let mut validated_targets = std::collections::HashSet::new();
+        for rule in &rules {
+            if validated_targets.insert(&rule.target) {
+                state.store.load(&rule.target).map_err(text)?;
+            }
         }
         let mut current = state.settings.lock().map_err(text)?;
         if settings.mouse_display_sync != current.mouse_display_sync && active(&state) {
@@ -394,10 +407,13 @@ async fn save_settings(
         {
             return Err("请先停止映射，再切换输出后端或自动隐藏设置".into());
         }
+        let previous_rules = current.effective_shortcut_rules();
+        let previous_targets: std::collections::HashSet<_> =
+            previous_rules.iter().map(|rule| &rule.target).collect();
         let switching_changed = settings.cursor_enabled != current.cursor_enabled
             || settings.cursor_shown != current.cursor_shown
             || settings.cursor_hidden != current.cursor_hidden
-            || settings.shortcut_profile != current.shortcut_profile;
+            || validated_targets != previous_targets;
         settings.calibrations = current.calibrations.clone();
         settings.motion_calibrations = current.motion_calibrations.clone();
         settings.selected_profile = current.selected_profile.clone();

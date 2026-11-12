@@ -18,7 +18,6 @@ import { SystemPage, type ComponentAction } from './studio/SystemPage';
 import { SoftwareUpdate } from './studio/SoftwareUpdate';
 import { useStudioUpdate } from './studio/software-update';
 import { SwitchSettings } from './studio/SwitchSettings';
-import {shortcutLabel} from './shortcuts';
 import { Dialog } from './studio/Controls';
 import {ActionEditor} from './studio/ActionEditor';
 import {modifierOutputs} from './keyboard';
@@ -30,7 +29,7 @@ import {LayerToolbar} from './studio/LayerToolbar';
 import {editingProfile,updateLayer} from './layers';
 import {useLanguage,setLanguage,getLanguage,t} from './i18n';
 import { chordParts,inputLabel,outputLabel, type Action, type ComponentStatus, type Entry, type Profile, type Settings, type Snapshot, type Workspace } from './types';
-import { padBindingCandidates, gyroInputNeutral, heldPadInputs, type GyroBindingField, type GyroBindingRecording } from './pad-capture';
+import { padBindingCandidates, padInputNeutral, heldPadInputs, recordedSticks, type GamepadBindingRecording, type GyroBindingField, type GyroBindingRecording } from './pad-capture';
 import dialogStyles from './studio/CreateProfileDialog.module.css';
 
 const DevicePage = lazy(() => import('./studio/DevicePage'));
@@ -48,9 +47,12 @@ const templates = [
 type Template = (typeof templates)[number][0];
 type Editor = { index: number | null; action: Action };
 type SaveResult = { entry: Entry; applied: boolean; warning: string | null };
-type GyroCapture = GyroBindingRecording & {kind:'pad'; index:null; deviceId:number; restartCount:number; split:boolean};
-type ActiveCapture = Capture | GyroCapture;
-type CaptureRequest = Capture | Pick<GyroCapture,'kind'|'index'|'gyroField'>;
+type PadCaptureSession = {kind:'pad'; index:null; deviceId:number; restartCount:number};
+type GyroCapture = PadCaptureSession & GyroBindingRecording & {split:boolean};
+type GamepadCapture = PadCaptureSession & GamepadBindingRecording & {onGamepadInput:(input:string)=>void};
+type ActiveCapture = Capture | GyroCapture | GamepadCapture;
+type CaptureRequest = Capture | Pick<GyroCapture,'kind'|'index'|'gyroField'>
+  | Pick<GamepadCapture,'kind'|'index'|'wholeStick'|'onGamepadInput'>;
 
 function suggestedDevicePath(devices: Snapshot['devices']) {
   const physical = devices.filter(device => device.origin === 'physical' && device.path && device.gamepad && !device.open_error);
@@ -140,7 +142,8 @@ export default function App() {
   dirtyRef.current = dirty;
   const status = snapshot?.status;
   const gyroRecording = capture && 'gyroField' in capture ? capture : undefined;
-  const actionRecording = capture && !('gyroField' in capture) ? capture : null;
+  const gamepadRecording = capture && 'onGamepadInput' in capture ? capture : undefined;
+  const actionRecording = capture && !('deviceId' in capture) ? capture : null;
   const captureActive = !!capture || !!status?.binding_capture;
   const measuringRef=useRef(false);
   measuringRef.current=!!status?.motion?.measuring;
@@ -184,14 +187,18 @@ export default function App() {
     setDevicePath(previous => previous || (!unusable && remembered) || suggestedDevicePath(data.snapshot.devices));
   }, []);
 
-  async function run(task: () => Promise<unknown>, message?: string) {
-    if (inFlight.current) return;
+  async function run(task: () => Promise<unknown>, message?: string, propagateError = false) {
+    if (inFlight.current) {
+      if (propagateError) throw new Error('请等待当前操作完成。');
+      return;
+    }
     inFlight.current = true;
     setBusy(true);
     try {
       await task();
       if (message) notify(message);
     } catch (error) {
+      if (propagateError) throw error;
       notify(String(error), true);
     } finally {
       inFlight.current = false;
@@ -330,6 +337,8 @@ export default function App() {
   const finishCapture = useCallback((target: ActiveCapture, value: string) => {
     if ('gyroField' in target) {
       update(profile => { profile.gyro[target.gyroField] = value; });
+    } else if ('onGamepadInput' in target) {
+      target.onGamepadInput(value);
     } else {
       const patch = target.kind === 'key' ? { output: value,...(!chordParts(value).some(v=>v.startsWith('wheel:'))?{repeat_ms:null}:{}) } : { input: value };
       const index = target.index;
@@ -355,20 +364,21 @@ export default function App() {
       (status.input_chord?.length ? status.input_chord : [status.last_input]) : null;
     previousInput.current = Math.max(previousInput.current,serial);
     if (capture?.kind !== 'pad' || !status) return;
-    const lostGyroCapture = 'gyroField' in capture && (!status.binding_capture ||
+    const scoped = 'deviceId' in capture;
+    const lostScopedCapture = scoped && (!status.binding_capture ||
       status.device?.id !== capture.deviceId || snapshot?.restart_count !== capture.restartCount);
-    if (lostGyroCapture || ['faulted','calibrating'].includes(status.state) || padPreview.current.length && !status.device) {
+    if (lostScopedCapture || ['faulted','calibrating'].includes(status.state) || padPreview.current.length && !status.device) {
       padPreview.current = [];
       cancelCapture();
       notify('手柄连接或观察状态已改变，录入已取消。', true);
       return;
     }
+    const neutral = scoped && padInputNeutral(status);
+    if (scoped && capture.waitingForNeutral) {
+      if (neutral) setCapture({...capture, waitingForNeutral:false});
+      return;
+    }
     if ('gyroField' in capture) {
-      const neutral = gyroInputNeutral(status);
-      if (capture.waitingForNeutral) {
-        if (neutral) setCapture({...capture, waitingForNeutral:false});
-        return;
-      }
       if (edge) padPreview.current = [...new Set([...padPreview.current, ...edge])];
       const candidates = padBindingCandidates(padPreview.current, capture.split);
       if (candidates.length && neutral) {
@@ -380,12 +390,25 @@ export default function App() {
       } else if (edge) setCapture({...capture, preview:candidates, issue:undefined});
       return;
     }
+    if ('onGamepadInput' in capture && capture.wholeStick) {
+      if (edge) padPreview.current = [...new Set([...padPreview.current, ...recordedSticks(edge)])];
+      if (neutral && padPreview.current.length) {
+        const sticks = padPreview.current;
+        padPreview.current = [];
+        if (sticks.length === 1) finishCapture(capture, sticks[0]);
+        else {
+          setCapture({...capture, preview:[]});
+          notify('一次只录入一根摇杆，请重试。', true);
+        }
+      } else if (edge) setCapture({...capture, preview:padPreview.current});
+      return;
+    }
     if (edge) {
       if (edge.length <= 4) { padPreview.current = edge; setCapture({...capture, preview:edge}); }
       else { padPreview.current = []; notify('组合键最多支持 4 个手柄输入，请松开后重新录入。', true); }
     }
     const pressed = heldPadInputs(status);
-    if (padPreview.current.length && padPreview.current.every(value => !pressed.has(value))) {
+    if (padPreview.current.length && (scoped ? neutral : padPreview.current.every(value => !pressed.has(value)))) {
       const value = padPreview.current.join('+');
       padPreview.current = [];
       finishCapture(capture, value);
@@ -504,7 +527,8 @@ export default function App() {
     if (busy || calibrating || status?.motion?.measuring) return;
     if (capture) { cancelCapture(); return; }
     const gyro = 'gyroField' in target;
-    if (gyro && (!canRecordGyro || status?.binding_capture)) return;
+    const gamepad = 'onGamepadInput' in target;
+    if ((gyro && !canRecordGyro) || ((gyro || gamepad) && status?.binding_capture)) return;
     if (target.kind === 'pad' && !devicePath) {
       if (target.index === null) setEditor(null);
       navigate('controllerStatus');
@@ -527,16 +551,19 @@ export default function App() {
         const current = await invoke<Snapshot>('snapshot');
         if (generation !== captureGeneration.current) return;
         const liveDevice = current.status.device;
-        if ('gyroField' in target && (!current.status.binding_capture || !liveDevice || liveDevice.path.toLowerCase() !== devicePath.toLowerCase())) {
-          throw new Error('所选手柄未连接，无法录入体感输入。');
+        if ((gyro || gamepad) && (!current.status.binding_capture || !liveDevice || liveDevice.path.toLowerCase() !== devicePath.toLowerCase())) {
+          throw new Error(gyro ? '所选手柄未连接，无法录入体感输入。' : '所选手柄未连接，无法录入手柄输入。');
         }
         setSnapshot(current);
         previousInput.current = current.status.input_serial;
         padPreview.current = [];
         if ('gyroField' in target && liveDevice) {
-          setCapture({...target, waitingForNeutral:!gyroInputNeutral(current.status), deviceId:liveDevice.id,
+          setCapture({...target, waitingForNeutral:!padInputNeutral(current.status), deviceId:liveDevice.id,
             restartCount:current.restart_count, split:(liveDevice.touchpads ?? 0) >= 2});
-        } else if (!('gyroField' in target)) setCapture(target);
+        } else if ('onGamepadInput' in target && liveDevice) {
+          setCapture({...target, waitingForNeutral:!padInputNeutral(current.status), deviceId:liveDevice.id,
+            restartCount:current.restart_count});
+        } else if (!('gyroField' in target) && !('onGamepadInput' in target)) setCapture(target);
         listening = true;
       } finally {
         if (!listening) await Promise.allSettled([
@@ -778,6 +805,8 @@ export default function App() {
               blocked={locked||!!capture||!!editor||!!batch||!!status?.motion?.measuring} status={status}
               onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
             blocked={locked} capture={actionRecording} onCapture={startCapture} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
+            gamepadRecording={gamepadRecording} canRecordGamepad={!!snapshot?.engine_ready && !waiting && !status?.motion?.measuring && !status?.binding_capture}
+            onRecordGamepad={(wholeStick,onGamepadInput)=>beginCapture({kind:'pad',index:null,wholeStick,onGamepadInput})}
             onUpdate={update} onEdit={openEditor} onBatch={openBatch} onTab={tab=>navigate('games',tab)}
             onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={openJsmImport}
             motion={<MotionSettings profile={profile} profileId={draft.id} update={update} device={device}
@@ -824,6 +853,7 @@ export default function App() {
         onSwitching={() => navigate('switching')} onFolder={() => openLocation('profiles')} />}
       {page === 'switching' && workspace && <SwitchSettings entries={entries} settings={workspace.settings} busy={busy}
         onChange={patch => void run(() => changeSettings(patch))} status={status} onPadCapture={bindingCapture}
+        onSaveRules={rules=>run(()=>changeSettings({shortcut_rules:rules}),undefined,true)}
         onPreparePad={async()=>{
           if(calibrating||status?.motion?.measuring)throw new Error('请先结束校准或转角测量');
           if(!active&&!status?.ui_navigation&&!(await startMapping(false)))throw new Error('请先选择一个手柄接口');
@@ -934,7 +964,7 @@ export default function App() {
         <div><dt><kbd>Ctrl K</kbd></dt><dd>搜索页面和操作</dd></div>
         <div><dt><kbd>Ctrl S</kbd></dt><dd>保存当前配置</dd></div>
         <div><dt><kbd>Ctrl ↵</kbd></dt><dd>应用当前配置</dd></div>
-        <div><dt><kbd>{shortcutLabel(workspace?.settings.shortcut_key)}</kbd></dt><dd>切换到指定配置或返回，可在「自动切换」中修改</dd></div>
+        <div><dt>快捷键切换</dt><dd>切换到指定配置或返回，可在「自动切换」中修改</dd></div>
         <div><dt><kbd>F12</kbd></dt><dd>停止映射并释放输出</dd></div>
         <div><dt><kbd>方向 / 左摇杆</kbd></dt><dd>移动界面焦点；右摇杆滚动页面</dd></div>
         <div><dt><kbd>A / B</kbd></dt><dd>确认或编辑／返回或取消调整</dd></div>

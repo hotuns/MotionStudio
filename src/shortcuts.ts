@@ -1,10 +1,30 @@
 import {t} from './i18n';
 import {keyboardKeyFromEvent, keyboardKeys} from './keyboard';
-import type {Shortcut} from './types';
+import {chordParts, type Settings, type Shortcut, type ShortcutRule} from './types';
 
 const byName = new Map(keyboardKeys.map(key => [key.name, key]));
 export const shortcutKeys = keyboardKeys.map(key => key.name).filter(name => !['WIN', 'RWIN', 'NUMPADENTER'].includes(name));
 export const defaultShortcut = (): Shortcut => ({key:'F9', ctrl:false, alt:false, shift:false});
+
+export function shortcutRules(settings?: Settings): ShortcutRule[] {
+  if (!settings) return [];
+  if (settings.shortcut_rules != null) return settings.shortcut_rules;
+  const target = settings.shortcut_profile;
+  if (!target) return [];
+  const key = settings.shortcut_key === undefined ? defaultShortcut() : settings.shortcut_key;
+  const rules: ShortcutRule[] = [];
+  if (key) rules.push({trigger:{kind:'keyboard',key},target});
+  if (settings.shortcut_pad) rules.push({trigger:{kind:'gamepad',input:settings.shortcut_pad},target});
+  return rules;
+}
+
+export function shortcutTriggerIdentity(trigger: ShortcutRule['trigger']): string {
+  if (trigger.kind === 'gamepad') return `gamepad:${chordParts(trigger.input).sort().join('+')}`;
+  const {key, ctrl, alt, shift} = trigger.key;
+  const binding = byName.get(key);
+  const modifier = binding?.modifier ?? 0;
+  return ['keyboard', binding?.vk ?? key, ctrl || !!(modifier & 0x11), alt || !!(modifier & 0x44), shift || !!(modifier & 0x22)].join(':');
+}
 
 export function shortcutLabel(shortcut: Shortcut | null = defaultShortcut()) {
   if (!shortcut) return t('未绑定');

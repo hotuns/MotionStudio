@@ -23,8 +23,11 @@ puffin = "0.20"
 [profile.dev]
 opt-level = 1
 
-# Rebuild the desktop binary without reusing incremental LLVM objects on MSVC.
+# Avoid unresolved LLVM symbols from incremental objects on MSVC.
 [profile.dev.package.motion-studio]
+incremental = false
+
+[profile.dev.package.motion-core]
 incremental = false
 
 [profile.release]

@@ -155,7 +155,9 @@ The real-DLL synthetic check caught the upstream initializer disabling all gamep
 
 ## 0.12.0 shortcut inputs
 
-The shortcut path reads the existing base-profile physical source from FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Stick calibration and deadzones come from `crates/engine/src/eval/device_cal.rs`. The same `crates/core/src/area.rs` `AreaLayout::band_of` call classifies rings for actions, hold layers, and shortcuts. Touch contacts use the existing SDL event and field mapping. Studio supplies the base-profile ring bounds, hysteresis state, capture telemetry and profile toggle policy. Vendor files and hashes are unchanged.
+The shortcut path reads the existing base-profile physical source from FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Stick calibration and deadzones come from `crates/engine/src/eval/device_cal.rs`. The same `crates/core/src/area.rs` `AreaLayout::band_of` call classifies rings for actions, hold layers, and shortcuts. Touch contacts use the existing SDL event and field mapping. Studio supplies the base-profile ring bounds, hysteresis state, capture telemetry and per-rule profile switching policy, including the optional restore on a repeat trigger. Vendor files and hashes are unchanged.
+
+Studio runs the same shortcut edge evaluator once per configured controller rule against that base-profile input. The host publishes the ordered rule indices with a serial and baseline so desktop policy can apply the final target across multiple presses. Each rule has its own profile destination in local settings. The input source, calibrations and ring classification remain on the pinned FlexInput paths above.
 
 ## 0.13.1 JSM conversion and two-stage triggers
 

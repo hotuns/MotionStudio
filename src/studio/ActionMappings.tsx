@@ -6,6 +6,7 @@ import {triggerNames} from './BindingFields';
 import {padInputLabel} from './binding-choices';
 import {modifierOutputs} from '../keyboard';
 import {isAnalogGamepadBinding} from '../mapping-triggers';
+import type {GamepadBindingRecording} from '../pad-capture';
 import {MotionActionEditor,motionActionLabels,newMotionAction,type MotionAction} from './MotionActionEditor';
 import {
   fillStandardGamepadBindings, GamepadBindingEditor, gamepadControlLabel, isAnalogGamepadOutput,
@@ -22,9 +23,12 @@ export type ActionMappingsProps = {
   status?: Status;
   blocked: boolean;
   capture: Capture | null;
+  gamepadRecording?: GamepadBindingRecording;
+  canRecordGamepad: boolean;
   touchOnly: boolean;
   onClearTouch: () => void;
   onCapture: (kind: CaptureKind, index: number) => void;
+  onRecordGamepad: (wholeStick: boolean, onInput: (input: string) => void) => void;
   onCancelCapture: () => void;
   onAssignEscape: () => void;
   onBatch: (floating?:boolean) => void;
@@ -44,8 +48,8 @@ function physicalControl(input: string): string {
 const actionCountLabel = (count: number) => count === 1
   ? t('1 个动作') : t('{0} 个动作').replace('{0}', String(count));
 
-export function ActionMappings({profile, status, device, blocked, capture, touchOnly, onClearTouch,
-  onUpdate, onEdit, onCapture, onCancelCapture, onAssignEscape, onBatch}: ActionMappingsProps) {
+export function ActionMappings({profile, status, device, blocked, capture, gamepadRecording, canRecordGamepad,
+  touchOnly, onClearTouch, onUpdate, onEdit, onCapture, onRecordGamepad, onCancelCapture, onAssignEscape, onBatch}: ActionMappingsProps) {
   const [query,setQuery] = useState('');
   const [controlFilter,setControlFilter] = useState<string | null>(null);
   const [selected,setSelected] = useState<number | null>(null);
@@ -277,7 +281,8 @@ export function ActionMappings({profile, status, device, blocked, capture, touch
     {gamepadEdit&&virtual&&<GamepadBindingEditor profile={profile}
       value={gamepadEdit.value} index={gamepadEdit.index} bindings={gamepadBindings}
       target={profile.virtual_gamepad} split={split} locked={locked}
-      onClose={()=>setGamepadEdit(null)}
+      recording={gamepadRecording} canRecord={canRecordGamepad} onRecord={onRecordGamepad} onCancelRecording={onCancelCapture}
+      onClose={()=>{onCancelCapture();setGamepadEdit(null);}}
       onSave={binding=>{
         onUpdate(draft=>{
           const bindings = draft.gamepad_bindings ??= [];

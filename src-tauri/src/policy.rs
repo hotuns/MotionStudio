@@ -1,6 +1,7 @@
 use crate::{apply_profile, AppState};
 use motion_core::protocol::{Command, Status};
-use motion_core::shortcut::{Modifiers, PadShortcut, ShortcutEdges};
+use motion_core::shortcut::{Modifiers, PadShortcut, ShortcutEdges, ShortcutTrigger};
+use motion_core::storage::SwitchTarget;
 use motion_core::switching::CursorEdges;
 use std::{
     sync::atomic::Ordering,
@@ -10,41 +11,45 @@ use std::{
 pub fn start(state: AppState) {
     std::thread::spawn(move || {
         let mut cursor = CursorEdges::default();
-        let mut shortcut_edges = ShortcutEdges::default();
+        let mut shortcut_edges = Vec::new();
         let mut capture_revision = 0;
-        let mut last_binding = None;
+        let mut last_rules = Vec::new();
         let mut last_cursor_settings = None;
         let mut pending_edge = None;
-        let mut pending_shortcut = false;
-        let mut pending_pad = 0u64;
+        let mut pending_shortcuts = Vec::new();
         let mut pad_cursor = PadShortcutCursor::default();
         while !state.client.stopping.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
             let settings = state.settings.lock().unwrap().clone();
             let snapshot = state.client.snapshot.lock().unwrap().clone();
-            let desired_pad = settings
-                .shortcut_pad
-                .as_ref()
-                .zip(settings.shortcut_profile.as_ref())
-                .map(|(input, target)| PadShortcut {
-                    input: input.clone(),
-                    target: target.clone(),
-                });
-            if snapshot.engine_ready && snapshot.status.pad_shortcut != desired_pad {
+            let rules = settings.effective_shortcut_rules();
+            let (pad_rule_indices, desired_pad): (Vec<_>, Vec<_>) = rules
+                .iter()
+                .enumerate()
+                .filter_map(|(index, rule)| match &rule.trigger {
+                    ShortcutTrigger::Gamepad { input } => Some((
+                        index,
+                        PadShortcut {
+                            input: input.clone(),
+                            target: rule.target.clone(),
+                        },
+                    )),
+                    ShortcutTrigger::Keyboard { .. } => None,
+                })
+                .unzip();
+            if snapshot.engine_ready && snapshot.status.pad_shortcuts != desired_pad {
                 if let Ok(_operation) = state.operations.try_lock() {
-                    let latest = state.settings.lock().unwrap().clone();
-                    if latest.shortcut_pad == settings.shortcut_pad
-                        && latest.shortcut_profile == settings.shortcut_profile
-                    {
-                        if let Err(error) = state.client.request(Command::SetPadShortcut {
-                            binding: desired_pad.clone(),
+                    let rules_current = state.settings.lock().unwrap().effective_shortcut_rules() == rules;
+                    if rules_current {
+                        if let Err(error) = state.client.request(Command::SetPadShortcuts {
+                            bindings: desired_pad,
                         }) {
                             state.client.snapshot.lock().unwrap().policy_error =
                                 Some(format!("手柄快捷键未配置：{error}"));
                         }
                     }
                 }
-                pending_pad = 0;
+                pending_shortcuts.clear();
                 continue;
             }
             let running = matches!(snapshot.status.state.as_str(), "running" | "observing")
@@ -63,53 +68,58 @@ pub fn start(state: AppState) {
                 &mut capture_revision,
                 current_capture_revision,
             ) {
-                pending_shortcut = false;
-                pending_pad = 0;
+                pending_shortcuts.clear();
             }
             let down = |key: u16| unsafe {
                 windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(key))
                     < 0
             };
-            let binding = (
-                settings.shortcut_key.clone(),
-                settings.shortcut_profile.clone(),
-                settings.shortcut_pad.clone(),
-            );
-            let changed = last_binding.as_ref() != Some(&binding);
-            if changed {
-                shortcut_edges = ShortcutEdges::default();
+            if last_rules != rules {
+                shortcut_edges.clear();
+                shortcut_edges.resize_with(rules.len(), ShortcutEdges::default);
+                pending_shortcuts.clear();
+                last_rules.clone_from(&rules);
             }
-            if changed || capture {
-                pending_shortcut = false;
-                pending_pad = 0;
-            }
-            last_binding = Some(binding);
-            let pad_presses = pad_cursor.update(
-                &snapshot.status,
-                desired_pad.as_ref(),
-                snapshot.restart_count,
-                running && !capture,
-            );
-            let shortcut = settings.shortcut_key.as_ref().is_some_and(|key| {
-                shortcut_edges.update(
-                    key,
-                    settings.shortcut_profile.as_deref(),
-                    key.virtual_key().is_some_and(down),
-                    Modifiers {
-                        ctrl: down(0x11),
-                        alt: down(0x12),
-                        shift: down(0x10),
-                        windows: down(0x5b) || down(0x5c),
-                    },
+            let mut presses: Vec<_> = pad_cursor
+                .update(
+                    &snapshot.status,
+                    &desired_pad,
+                    snapshot.restart_count,
                     running && !capture,
                 )
-            });
+                .into_iter()
+                .map(|index| pad_rule_indices[index])
+                .collect();
+            let modifiers = Modifiers {
+                ctrl: down(0x11),
+                alt: down(0x12),
+                shift: down(0x10),
+                windows: down(0x5b) || down(0x5c),
+            };
+            for (index, (rule, edges)) in rules.iter().zip(&mut shortcut_edges).enumerate() {
+                let ShortcutTrigger::Keyboard { key } = &rule.trigger else {
+                    continue;
+                };
+                let pressed = edges.update(
+                    key,
+                    Some(&rule.target),
+                    key.virtual_key().is_some_and(down),
+                    modifiers,
+                    running && !capture,
+                );
+                // Coalesce simultaneous presses only when their actions match.
+                if pressed && !presses.iter().any(|&other| {
+                    rules[other].target == rule.target
+                        && rules[other].return_on_repeat == rule.return_on_repeat
+                }) {
+                    presses.push(index);
+                }
+            }
             if !running || capture {
                 cursor = CursorEdges::default();
                 last_cursor_settings = None;
                 pending_edge = None;
-                pending_shortcut = false;
-                pending_pad = 0;
+                pending_shortcuts.clear();
                 continue;
             }
             let cursor_settings = (
@@ -144,21 +154,18 @@ pub fn start(state: AppState) {
             if edge.is_some() {
                 pending_edge = edge;
             }
-            pending_shortcut |= shortcut && settings.shortcut_profile.is_some();
-            pending_pad = pending_pad.saturating_add(pad_presses);
-            if pending_edge.is_none() && !pending_shortcut && pending_pad == 0 {
+            pending_shortcuts.extend(presses);
+            let overflow = pending_shortcuts.len().saturating_sub(64);
+            pending_shortcuts.drain(..overflow);
+            if pending_edge.is_none() && pending_shortcuts.is_empty() {
                 continue;
             }
             let Ok(_operation) = state.operations.try_lock() else {
                 continue;
             };
             let current_settings = state.settings.lock().unwrap().clone();
-            if current_settings.shortcut_key != settings.shortcut_key
-                || current_settings.shortcut_profile != settings.shortcut_profile
-                || current_settings.shortcut_pad != settings.shortcut_pad
-            {
-                pending_shortcut = false;
-                pending_pad = 0;
+            if current_settings.effective_shortcut_rules() != rules {
+                pending_shortcuts.clear();
                 continue;
             }
             if current_settings.cursor_enabled != settings.cursor_enabled
@@ -169,10 +176,8 @@ pub fn start(state: AppState) {
                 pending_edge = None;
             }
             let edge = pending_edge.take();
-            let keyboard = std::mem::take(&mut pending_shortcut);
-            let pad = std::mem::take(&mut pending_pad);
-            let presses = pad.max(u64::from(keyboard));
-            let shortcut = presses > 0;
+            let shortcuts = std::mem::take(&mut pending_shortcuts);
+            let shortcut = !shortcuts.is_empty();
             if (shortcut || edge.is_some())
                 && (state.shortcut_capture_revision.load(Ordering::Acquire)
                     != current_capture_revision
@@ -199,10 +204,15 @@ pub fn start(state: AppState) {
             };
             let mut history = state.history.lock().unwrap().clone();
             let target = if shortcut {
-                settings
-                    .shortcut_profile
-                    .as_ref()
-                    .and_then(|id| history.toggle_presses(&current, id, presses))
+                Some(shortcuts.into_iter().fold(current.clone(), |from, index| {
+                    let rule = &rules[index];
+                    let next = if rule.return_on_repeat {
+                        history.toggle(&from, &rule.target)
+                    } else {
+                        history.apply(&from, &SwitchTarget::Profile(rule.target.clone()))
+                    };
+                    next.unwrap_or(from)
+                }))
             } else {
                 edge.and_then(|shown| {
                     history.apply(
@@ -238,38 +248,44 @@ pub fn start(state: AppState) {
 
 #[derive(Default)]
 struct PadShortcutCursor {
-    source: Option<(u32, Option<PadShortcut>)>,
+    source: Option<(u32, Vec<PadShortcut>)>,
     serial: u64,
 }
 impl PadShortcutCursor {
     fn update(
         &mut self,
         status: &Status,
-        desired: Option<&PadShortcut>,
+        desired: &[PadShortcut],
         restart: u32,
         enabled: bool,
-    ) -> u64 {
-        let identity = (restart, desired.cloned());
-        if self.source.as_ref() != Some(&identity) {
+    ) -> Vec<usize> {
+        if self.source.as_ref().is_none_or(|(previous_restart, bindings)| {
+            *previous_restart != restart || bindings.as_slice() != desired
+        }) {
             self.serial = status.pad_shortcut_baseline;
-            self.source = Some(identity);
+            self.source = Some((restart, desired.to_vec()));
         }
         let previous = self.serial.max(status.pad_shortcut_baseline);
         self.serial = status.pad_shortcut_serial;
-        if !enabled || desired.is_none() || status.pad_shortcut.as_ref() != desired {
-            return 0;
+        if !enabled || status.pad_shortcuts.as_slice() != desired {
+            return Vec::new();
         }
-        status.pad_shortcut_serial.saturating_sub(previous)
+        status
+            .pad_shortcut_events
+            .iter()
+            .filter(|event| event.serial > previous && event.index < desired.len())
+            .map(|event| event.index)
+            .collect()
     }
 }
 
 // A quick capture can begin and end between two 50 ms polls. A revision still
 // invalidates its old press baseline, including when the same key was recorded.
-fn rebase_after_capture(edges: &mut ShortcutEdges, last: &mut u64, revision: u64) -> bool {
+fn rebase_after_capture(edges: &mut [ShortcutEdges], last: &mut u64, revision: u64) -> bool {
     if *last == revision {
         return false;
     }
-    *edges = ShortcutEdges::default();
+    edges.fill_with(ShortcutEdges::default);
     *last = revision;
     true
 }
@@ -286,9 +302,9 @@ mod tests {
         let m = Modifiers::default();
         assert!(!edges.update(&key, Some("menu"), false, m, true));
         // Start and finish both happened between polls; the key is still down.
-        assert!(rebase_after_capture(&mut edges, &mut revision, 2));
+        assert!(rebase_after_capture(std::slice::from_mut(&mut edges), &mut revision, 2));
         assert!(!edges.update(&key, Some("menu"), true, m, true));
-        assert!(!rebase_after_capture(&mut edges, &mut revision, 2));
+        assert!(!rebase_after_capture(std::slice::from_mut(&mut edges), &mut revision, 2));
         assert!(!edges.update(&key, Some("menu"), false, m, true));
         assert!(edges.update(&key, Some("menu"), true, m, true));
     }
@@ -297,36 +313,41 @@ mod tests {
 #[cfg(test)]
 mod pad_tests {
     use super::*;
+    use motion_core::protocol::PadShortcutEvent;
     #[test]
-    fn event_counter_preserves_short_taps_and_ignores_capture_baselines_and_old_sources() {
-        let b = PadShortcut {
-            input: "south".into(),
-            target: "aim".into(),
-        };
+    fn events_preserve_rule_order_and_ignore_capture_baselines_and_old_sources() {
+        let bindings = vec![
+            PadShortcut { input: "south".into(), target: "aim".into() },
+            PadShortcut { input: "east".into(), target: "aim".into() },
+        ];
         let mut s = Status {
-            pad_shortcut: Some(b.clone()),
+            pad_shortcuts: bindings.clone(),
             ..Default::default()
         };
         let mut cursor = PadShortcutCursor::default();
-        assert_eq!(cursor.update(&s, Some(&b), 0, true), 0);
-        s.pad_shortcut_serial = 2;
-        assert_eq!(cursor.update(&s, Some(&b), 0, true), 2);
-        assert_eq!(cursor.update(&s, Some(&b), 0, true), 0);
-        s.pad_shortcut_serial = 3;
-        s.pad_shortcut_baseline = 3;
-        assert_eq!(cursor.update(&s, Some(&b), 0, true), 0);
-        s.pad_shortcut_serial = 4;
-        assert_eq!(cursor.update(&s, Some(&b), 0, false), 0);
-        assert_eq!(cursor.update(&s, Some(&b), 0, true), 0);
-        s.pad_shortcut_serial = 5;
-        s.pad_shortcut = None;
-        assert_eq!(cursor.update(&s, Some(&b), 0, true), 0);
-        s.pad_shortcut = Some(b.clone());
-        s.pad_shortcut_serial = 0;
-        s.pad_shortcut_baseline = 0;
-        assert_eq!(cursor.update(&s, Some(&b), 1, true), 0);
-        s.pad_shortcut_serial = 1;
-        assert_eq!(cursor.update(&s, Some(&b), 1, true), 1);
+        assert!(cursor.update(&s, &bindings, 0, true).is_empty());
+        let press = |status: &mut Status, index| {
+            status.pad_shortcut_serial += 1;
+            status.pad_shortcut_events.push(PadShortcutEvent { serial: status.pad_shortcut_serial, index });
+        };
+        press(&mut s, 0);
+        press(&mut s, 1);
+        press(&mut s, 0);
+        assert_eq!(cursor.update(&s, &bindings, 0, true), [0, 1, 0]);
+        assert!(cursor.update(&s, &bindings, 0, true).is_empty());
+        press(&mut s, 1);
+        s.pad_shortcut_baseline = s.pad_shortcut_serial;
+        assert!(cursor.update(&s, &bindings, 0, true).is_empty());
+        press(&mut s, 0);
+        assert!(cursor.update(&s, &bindings, 0, false).is_empty());
+        assert!(cursor.update(&s, &bindings, 0, true).is_empty());
+        press(&mut s, 1);
+        s.pad_shortcuts.reverse();
+        assert!(cursor.update(&s, &bindings, 0, true).is_empty());
+        s = Status { pad_shortcuts: bindings.clone(), ..Default::default() };
+        assert!(cursor.update(&s, &bindings, 1, true).is_empty());
+        press(&mut s, 1);
+        assert_eq!(cursor.update(&s, &bindings, 1, true), [1]);
     }
     #[test]
     fn multiple_presses_resolve_a_toggle_and_restore_without_intermediate_devices() {

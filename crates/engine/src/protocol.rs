@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,8 +61,8 @@ pub enum Command {
     SetBindingCapture {
         active: bool,
     },
-    SetPadShortcut {
-        binding: Option<crate::shortcut::PadShortcut>,
+    SetPadShortcuts {
+        bindings: Vec<crate::shortcut::PadShortcut>,
     },
     Scan,
     Calibrate,
@@ -152,7 +152,9 @@ pub struct Status {
     pub motion: crate::motion::MotionTelemetry,
     pub input_serial: u64,
     #[serde(default)]
-    pub pad_shortcut: Option<crate::shortcut::PadShortcut>,
+    pub pad_shortcuts: Vec<crate::shortcut::PadShortcut>,
+    #[serde(default)]
+    pub pad_shortcut_events: Vec<PadShortcutEvent>,
     #[serde(default)]
     pub pad_shortcut_serial: u64,
     #[serde(default)]
@@ -200,7 +202,8 @@ impl Default for Status {
             calibration_progress: 0.0,
             motion: Default::default(),
             input_serial: 0,
-            pad_shortcut: None,
+            pad_shortcuts: vec![],
+            pad_shortcut_events: vec![],
             pad_shortcut_serial: 0,
             pad_shortcut_baseline: 0,
             last_input: None,
@@ -212,6 +215,13 @@ impl Default for Status {
             stats: Stats::default(),
         }
     }
+}
+
+/// A press of the rule at `index` in the same status frame's `pad_shortcuts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PadShortcutEvent {
+    pub serial: u64,
+    pub index: usize,
 }
 
 /// Latest physical chord with stick directions replaced by native ring inputs.

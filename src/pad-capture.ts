@@ -17,10 +17,23 @@ export function heldPadInputs(status: Status) {
   return held;
 }
 
-// Mirror the existing engine release gate for the UI's single-input commit.
-export const gyroInputNeutral = (status: Status) => !status.buttons.some(Boolean) &&
+// Mirror the engine's release gate for recording controls.
+export const padInputNeutral = (status: Status) => !status.buttons.some(Boolean) &&
   !status.touches?.some(pad => pad.some(contact => contact.active)) &&
   status.axes.every((value, i) => i < 4 ? Math.abs(value) <= 0.25 : value <= 0.1);
+
+export type GamepadBindingRecording = {
+  wholeStick: boolean;
+  waitingForNeutral: boolean;
+  preview?: string[];
+};
+
+export function recordedSticks(observed: string[]) {
+  return observed.flatMap(input => {
+    const stick = /^(left_stick|right_stick)_(?:up|down|left|right)$/.exec(input)?.[1];
+    return stick ? [stick] : [];
+  });
+}
 
 export type GyroBindingField = 'activation' | 'pause_input';
 export type GyroBindingRecording = {

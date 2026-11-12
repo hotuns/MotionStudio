@@ -2,6 +2,56 @@
 //! the Windows key polling adapter.
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+
+pub const MAX_SHORTCUT_RULES: usize = 64;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShortcutRule {
+    pub trigger: ShortcutTrigger,
+    pub target: String,
+    #[serde(default = "default_return_on_repeat")]
+    pub return_on_repeat: bool,
+}
+
+fn default_return_on_repeat() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ShortcutTrigger {
+    Keyboard { key: Shortcut },
+    Gamepad { input: String },
+}
+
+pub fn validate_shortcut_rules(rules: &[ShortcutRule]) -> Result<()> {
+    if rules.len() > MAX_SHORTCUT_RULES {
+        bail!("最多支持 {MAX_SHORTCUT_RULES} 条快捷键规则");
+    }
+    let mut keyboard = HashSet::new();
+    let mut gamepad = HashSet::new();
+    for rule in rules {
+        crate::storage::validate_profile_id(&rule.target)?;
+        match &rule.trigger {
+            ShortcutTrigger::Keyboard { key } => {
+                key.validate()?;
+                if !keyboard.insert((key.virtual_key(), key.required_modifiers())) {
+                    bail!("同一个键盘快捷键只能用于一条切换规则");
+                }
+            }
+            ShortcutTrigger::Gamepad { input } => {
+                let mut parts = pad_shortcut_parts(input)?;
+                parts.sort_unstable();
+                if !gamepad.insert(parts) {
+                    bail!("同一个手柄快捷键只能用于一条切换规则");
+                }
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Identity includes the destination so changing targets cannot replay an old press.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -10,6 +60,10 @@ pub struct PadShortcut {
     pub target: String,
 }
 pub fn validate_pad_input(input: &str) -> Result<()> {
+    pad_shortcut_parts(input).map(drop)
+}
+
+fn pad_shortcut_parts(input: &str) -> Result<Vec<&str>> {
     let parts = crate::bindings::input_chord(input)
         .ok_or_else(|| anyhow::anyhow!("手柄快捷键需要 1–4 个有效且不冲突的输入"))?;
     if parts.iter().any(|p| crate::profile::AXES[..4].contains(p)) {
@@ -18,7 +72,7 @@ pub fn validate_pad_input(input: &str) -> Result<()> {
     if parts.contains(&"back") && parts.contains(&"start") {
         bail!("View + Menu 已用于进入手柄界面操作，请选择其他组合");
     }
-    Ok(())
+    Ok(parts)
 }
 
 /// Runs on every raw controls event, independently of profile engine replacement.
@@ -39,6 +93,20 @@ impl PadShortcutEdges {
         enabled: bool,
         snapshot: bool,
     ) -> bool {
+        let held = crate::profile::pressed_inputs(buttons, axes, if self.down { 0.5 } else { 0.6 });
+        self.update_with_held(binding, &held, &held, extra, enabled, snapshot)
+    }
+
+    /// Reuse precomputed controls when checking several shortcuts for one event.
+    pub fn update_with_held(
+        &mut self,
+        binding: Option<&PadShortcut>,
+        pressed: &[String],
+        released: &[String],
+        extra: &[Option<&str>],
+        enabled: bool,
+        snapshot: bool,
+    ) -> bool {
         let changed = self.binding.as_ref() != binding;
         if changed {
             self.binding = binding.cloned();
@@ -49,7 +117,7 @@ impl PadShortcutEdges {
                 .map(String::from)
                 .collect();
         }
-        let held = crate::profile::pressed_inputs(buttons, axes, if self.down { 0.5 } else { 0.6 });
+        let held = if self.down { released } else { pressed };
         let down = !self.parts.is_empty()
             && self.parts.iter().all(|part| {
                 held.contains(part) || extra.iter().flatten().any(|input| *input == part.as_str())
@@ -114,11 +182,15 @@ impl Shortcut {
         Ok(())
     }
     pub fn matches_modifiers(&self, m: Modifiers) -> bool {
+        self.required_modifiers() == (m.ctrl, m.alt, m.shift) && !m.windows
+    }
+    fn required_modifiers(&self) -> (bool, bool, bool) {
         let primary = crate::keyboard::key(&self.key).map_or(0, |key| key.modifier);
-        (self.ctrl || primary & 0x11 != 0) == m.ctrl
-            && (self.alt || primary & 0x44 != 0) == m.alt
-            && (self.shift || primary & 0x22 != 0) == m.shift
-            && !m.windows
+        (
+            self.ctrl || primary & 0x11 != 0,
+            self.alt || primary & 0x44 != 0,
+            self.shift || primary & 0x22 != 0,
+        )
     }
 }
 
