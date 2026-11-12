@@ -217,6 +217,33 @@ impl GraphRunner {
     pub(crate) fn eval(&mut self, signals: &SigMap, dt: f32) {
         eval_graph_tick(&self.graph, &mut self.state, signals, dt, &mut self.result);
     }
+
+    fn eval_with_stick_block(&mut self, signals: &mut SigMap, blocked: Option<Stick>, dt: f32) {
+        let Some(stick) = blocked else {
+            self.eval(signals, dt);
+            return;
+        };
+        let (vector, directions) = match stick {
+            Stick::Left => ("left_stick", &DIRECTIONS[..4]),
+            Stick::Right => ("right_stick", &DIRECTIONS[4..]),
+        };
+        let [x, y] = pad_binding::stick_pins(stick);
+        let pins = [vector, x, y, directions[0], directions[1], directions[2], directions[3]];
+        // Block the same pins as RWS, only for the mapping graph being evaluated.
+        let original = pins.map(|pin| {
+            signals.get_pin_mut(SOURCE, pin).map(|signal| {
+                let original = *signal;
+                *signal = original.zeroed();
+                original
+            })
+        });
+        self.eval(signals, dt);
+        for (pin, signal) in pins.into_iter().zip(original) {
+            if let Some(signal) = signal {
+                signals.set_pin(SOURCE, pin, signal);
+            }
+        }
+    }
 }
 
 fn button_condition(
@@ -534,7 +561,11 @@ pub struct Engine {
     action_time_ns: u64,
     rotated_stick: Option<(Stick, Vec2)>,
     flick: GraphRunner,
+    flick_input_ns: Option<u64>,
     flick_stick: Vec2,
+    flick_turn_stick: f32,
+    turn_stick: f32,
+    flick_stick_owed: f32,
     flick_snapshot_blocked: bool,
     turn_held: Vec<bool>,
     turns: Vec<PendingTurn>,
@@ -717,7 +748,11 @@ impl Engine {
             motion_pad: vec![],
             controls_held: BTreeSet::new(),
             rotated_stick: None,
+            flick_input_ns: None,
             flick_stick: Vec2::ZERO,
+            flick_turn_stick: 0.,
+            turn_stick: 0.,
+            flick_stick_owed: 0.0,
             flick_snapshot_blocked: false,
             turns: vec![],
             turn_stick_owed: 0.0,
@@ -839,41 +874,46 @@ impl Engine {
         {
             self.clock = SampleClock::new(profile.gyro.timestamp_source);
         }
-        if serde_json::to_value(&profile.gyro.motion)?
-            != serde_json::to_value(&self.profile.gyro.motion)?
-        {
+        let motion = serde_json::to_value(&profile.gyro.motion)?;
+        let previous_motion = serde_json::to_value(&self.profile.gyro.motion)?;
+        let gyro_enabled_changed = profile.gyro.enabled != self.profile.gyro.enabled;
+        let gyro_disabled = gyro_enabled_changed && !profile.gyro.enabled;
+        let builtin_changed = motion.as_object().unwrap().iter().any(|(key, value)| {
+            !matches!(key.as_str(), "flick" | "bindings" | "turns" | "custom_filters")
+                && previous_motion.get(key.as_str()) != Some(value)
+        });
+        if builtin_changed {
             self.motion.rebuild_builtin(&profile.gyro);
-            self.flick = flick_graph(&profile);
+        }
+        if motion["bindings"] != previous_motion["bindings"] || gyro_disabled {
             self.binding_states = (0..profile.gyro.motion.bindings.len())
                 .map(|_| BindingState::default())
                 .collect();
-            self.turn_held = profile
-                .gyro
-                .motion
-                .turns
-                .iter()
-                .map(|turn| self.input_value(&turn.input) > profile.gyro.activation_threshold)
-                .collect();
-            self.turns.clear();
-            self.turn_stick_owed = 0.;
-            self.flick_stick = Vec2::ZERO;
-            self.flick_snapshot_blocked =
-                self.stick_value(profile.gyro.motion.flick.stick).length()
-                    >= profile.gyro.motion.flick.deadzone;
+            self.motion_held.clear();
+            self.motion_pad.clear();
+        }
+        if motion["turns"] != previous_motion["turns"] || gyro_disabled {
+            self.clear_turn_output();
+        }
+        let flick_changed = motion["flick"] != previous_motion["flick"];
+        if flick_changed {
+            self.flick = flick_graph(&profile);
+        }
+        if profile.gyro.motion.mode != self.profile.gyro.motion.mode || gyro_disabled {
+            self.gyro.state.clear();
+            self.gyro_stick = Vec2::ZERO;
+            self.rotated_stick = None;
         }
         if profile.gyro.activation != self.profile.gyro.activation
             || profile.gyro.activation_mode != self.profile.gyro.activation_mode
         {
-            self.activation_pressed =
-                self.input_value(&profile.gyro.activation) > profile.gyro.activation_threshold;
+            self.activation_pressed = false;
             self.gyro_latched = false;
         }
         let gyro_output_changed = profile.gyro.output != self.profile.gyro.output;
         if gyro_output_changed {
             self.gyro = gyro_graph(&profile);
             self.gyro_stick = Vec2::ZERO;
-            self.flick_stick = Vec2::ZERO;
-            self.turn_stick_owed = 0.;
         } else {
             for (key, value) in [
                 ("scale", profile.gyro.counts_per_degree),
@@ -894,12 +934,25 @@ impl Engine {
         );
         self.profile = profile;
         self.refresh_sticks(self.stick_time, true);
-        if input_changed || gyro_output_changed {
-            self.flick.state.clear();
-            self.flick_snapshot_blocked = self
-                .stick_value(self.profile.gyro.motion.flick.stick)
-                .length()
-                >= self.profile.gyro.motion.flick.deadzone;
+        // A new threshold or input geometry is not a physical button edge.
+        self.activation_pressed = self.gyro_activation_pressed();
+        self.turn_held = self
+            .profile
+            .gyro
+            .motion
+            .turns
+            .iter()
+            .map(|turn| self.input_value(&turn.input) > self.profile.gyro.activation_threshold)
+            .collect();
+        if flick_changed
+            || (gyro_enabled_changed && !self.profile.gyro.motion.flick.standalone)
+            || gyro_output_changed
+            || input_changed
+        {
+            self.clear_flick_output();
+            let flick = &self.profile.gyro.motion.flick;
+            self.flick_snapshot_blocked =
+                flick.enabled && self.stick_value(flick.stick).length() >= flick.deadzone;
         }
         self.eval_controls(true, self.action_time_ns);
         if touch_changed {
@@ -1044,12 +1097,11 @@ impl Engine {
         }
         self.clear_gyro_motion();
         self.accel = None;
-        self.flick.state.clear();
-        self.flick_stick = Vec2::ZERO;
+        self.flick_input_ns = None;
+        self.clear_flick_output();
         self.flick_snapshot_blocked = false;
-        self.turns.clear();
+        self.clear_turn_output();
         self.turn_held.fill(false);
-        self.turn_stick_owed = 0.;
         self.measuring = None;
         self.gyro.graph.nodes[1].params.remove("cal_measure");
         self.activation_pressed = false;
@@ -1066,12 +1118,7 @@ impl Engine {
                 pad.right_x = 0;
                 pad.right_y = 0;
             }
-            let f = &self.profile.gyro.motion.flick;
-            let suppress_flick = self.flick_active()
-                && (f.suppress == Suppress::Full
-                    || (f.suppress == Suppress::Deadzone
-                        && self.stick_value(f.stick).length() >= f.deadzone));
-            if suppress_flick || self.rotated_stick.is_some() {
+            if let Some((rotated, value)) = self.rotated_stick {
                 for binding in self.profile.gamepad_bindings.iter().flatten() {
                     let (Some(input), Some(output)) = (
                         pad_binding::stick(&binding.input),
@@ -1079,12 +1126,7 @@ impl Engine {
                     ) else {
                         continue;
                     };
-                    let value = self
-                        .rotated_stick
-                        .filter(|(stick, _)| *stick == input)
-                        .map(|(_, value)| value)
-                        .or_else(|| (suppress_flick && input == f.stick).then_some(Vec2::ZERO));
-                    if let Some(value) = value {
+                    if input == rotated {
                         for (pin, component) in pad_binding::stick_pins(output)
                             .into_iter()
                             .zip([value.x, value.y])
@@ -1095,13 +1137,13 @@ impl Engine {
                 }
             }
             let aim = self.gyro_stick + self.flick_stick;
-            pad.right_x = axis_to_i16(axis_from_i16(pad.right_x) + aim.x);
+            let mut right_x = axis_from_i16(pad.right_x) + aim.x;
             pad.right_y = axis_to_i16(axis_from_i16(pad.right_y) + aim.y);
             for (pin, v) in &self.motion_pad {
                 match pin.as_str() {
                     "left_stick_x" => pad.left_x = axis_to_i16(axis_from_i16(pad.left_x) + v),
                     "left_stick_y" => pad.left_y = axis_to_i16(axis_from_i16(pad.left_y) + v),
-                    "right_stick_x" => pad.right_x = axis_to_i16(axis_from_i16(pad.right_x) + v),
+                    "right_stick_x" => right_x += v,
                     "right_stick_y" => pad.right_y = axis_to_i16(axis_from_i16(pad.right_y) + v),
                     "left_trigger" => {
                         pad.left_trigger = pad.left_trigger.max((v.max(0.) * 255.).round() as u8)
@@ -1116,6 +1158,9 @@ impl Engine {
                     }
                 }
             }
+            // Fit and apply queued angles against the same clamped base axis.
+            let base_x = axis_from_i16(axis_to_i16(right_x));
+            pad.right_x = axis_to_i16(base_x + self.flick_turn_stick + self.turn_stick);
             pad
         });
         self.frame.held = self
@@ -1160,11 +1205,30 @@ impl Engine {
     fn flick_active(&self) -> bool {
         let g = &self.profile.gyro;
         let f = &g.motion.flick;
-        g.enabled
-            && !self.paused()
+        g.flick_available()
             && self.measuring.is_none()
-            && (f.enabled || f.stick_aim)
             && (f.enable_input.is_none() || self.pressed(&f.enable_input))
+    }
+    fn flick_source_block(&self) -> Option<Stick> {
+        let f = &self.profile.gyro.motion.flick;
+        (self.flick_active()
+            && match f.suppress {
+                Suppress::Full => true,
+                Suppress::Deadzone => f.enabled && self.stick_value(f.stick).length() >= f.deadzone,
+                Suppress::Off => false,
+            })
+        .then_some(f.stick)
+    }
+    fn clear_flick_output(&mut self) {
+        self.flick.state.clear();
+        self.flick_stick = Vec2::ZERO;
+        self.flick_turn_stick = 0.;
+        self.flick_stick_owed = 0.;
+    }
+    fn clear_turn_output(&mut self) {
+        self.turns.clear();
+        self.turn_stick = 0.;
+        self.turn_stick_owed = 0.;
     }
     fn stick_value(&self, stick: Stick) -> Vec2 {
         let (x, y) = match stick {
@@ -1181,14 +1245,17 @@ impl Engine {
     /// Hold modifiers use physical values and base ring geometry. A layer may
     /// change filtering, deadzones or rings without changing its own trigger.
     pub fn layer_input_value(&self, input: &str, base: &Profile, active: bool) -> f32 {
+        let base_value = || {
+            input_pin(input)
+                .and_then(|pin| self.base_input.signals.get_pin(SOURCE, pin))
+                .map_or(0., |v| v.as_float())
+        };
         let (index, part) = if let Some(part) = input.strip_prefix("left_stick_") {
             (0, part)
         } else if let Some(part) = input.strip_prefix("right_stick_") {
             (1, part)
         } else {
-            return input_pin(input)
-                .and_then(|pin| self.base_input.signals.get_pin(SOURCE, pin))
-                .map_or(0., |v| v.as_float());
+            return base_value();
         };
         let value = self.base_input.stick(if index == 0 {
             "left_stick"
@@ -1225,12 +1292,26 @@ impl Engine {
                     0.
                 }
             }
-            _ => self.input_value(input),
+            _ => base_value(),
         }
+    }
+    fn gyro_activation_pressed(&self) -> bool {
+        let gyro = &self.profile.gyro;
+        // Hysteresis prevents an analog input from repeatedly toggling.
+        let release_band = if gyro.activation_mode == GyroActivationMode::Toggle
+            && self.activation_pressed
+        {
+            0.1
+        } else {
+            0.
+        };
+        self.input_value(&gyro.activation) > (gyro.activation_threshold - release_band).max(0.)
     }
     fn eval_controls(&mut self, allow_toggle: bool, now_ns: u64) {
         self.action_time_ns = self.action_time_ns.max(now_ns);
-        self.controls.eval(&self.signals, 0.0);
+        let blocked = self.flick_source_block();
+        self.controls
+            .eval_with_stick_block(&mut self.signals, blocked, 0.0);
         self.controls_held.clear();
         if let Some(pad) = &mut self.physical_pad {
             *pad = PadState::default();
@@ -1321,15 +1402,7 @@ impl Engine {
         }
         let gyro = &self.profile.gyro;
         let toggle = gyro.activation_mode == GyroActivationMode::Toggle;
-        // A lower release threshold prevents an analog input from repeatedly
-        // toggling while it hovers around the press threshold.
-        let release_band = if toggle && self.activation_pressed {
-            0.1
-        } else {
-            0.0
-        };
-        let pressed = self.input_value(&gyro.activation)
-            > (gyro.activation_threshold - release_band).max(0.0);
+        let pressed = self.gyro_activation_pressed();
         if toggle && allow_toggle && pressed && !self.activation_pressed {
             self.gyro_latched = !self.gyro_latched;
         }
@@ -1373,7 +1446,7 @@ impl Engine {
                 && pressed
                 && !self.turn_held[i]
                 && self.profile.gyro.enabled
-                && !self.paused()
+                && !paused
                 && self.measuring.is_none()
             {
                 self.turns.push(PendingTurn {
@@ -1384,11 +1457,11 @@ impl Engine {
             }
             self.turn_held[i] = pressed;
         }
-        if self.paused() {
-            self.flick.state.clear();
-            self.flick_stick = Vec2::ZERO;
-            self.turns.clear();
-            self.turn_stick_owed = 0.;
+        if paused {
+            self.clear_turn_output();
+        }
+        if !self.flick_active() {
+            self.clear_flick_output();
         }
         self.update_pad();
     }
@@ -1476,7 +1549,13 @@ impl Engine {
                     }
                 } else {
                     self.accel = None;
-                    self.clear_gyro_motion();
+                    if self.profile.gyro.motion.needs_accel() {
+                        self.clear_gyro_motion();
+                        if self.measuring.is_some() {
+                            self.motion.telemetry.measurement_error =
+                                Some("加速度采样中断，请重新测量".into());
+                        }
+                    }
                 }
             }
             InputEvent::Disconnected { .. } => self.reset(),
@@ -1770,10 +1849,8 @@ impl Engine {
         }
         self.clear_gyro_motion();
         self.clock.reset();
-        self.turns.clear();
-        self.turn_stick_owed = 0.;
-        self.flick.state.clear();
-        self.flick_stick = Vec2::ZERO;
+        self.clear_turn_output();
+        self.clear_flick_output();
         self.measuring = Some(axis.into());
         self.motion.measurement_mode();
         self.gyro.graph.nodes[1]
@@ -1823,15 +1900,15 @@ impl Engine {
         self.motion.telemetry.measuring = None;
         self.refresh_sticks(self.stick_time, true);
         let flick = &self.profile.gyro.motion.flick;
-        self.flick_snapshot_blocked = self.stick_value(flick.stick).length() >= flick.deadzone;
+        self.flick_snapshot_blocked =
+            flick.enabled && self.stick_value(flick.stick).length() >= flick.deadzone;
         self.eval_controls(false, self.action_time_ns);
         Some(result)
     }
 
-    fn advance_aim(&mut self, dt: f32) {
-        if !self.profile.gyro.enabled || self.paused() || self.measuring.is_some() {
-            self.flick_stick = Vec2::ZERO;
-            self.update_pad();
+    fn advance_flick(&mut self, dt: f32, input_dt: f32) {
+        if !self.flick_active() {
+            self.clear_flick_output();
             return;
         }
         let f = &self.profile.gyro.motion.flick;
@@ -1840,7 +1917,6 @@ impl Engine {
         } else {
             self.stick_value(f.stick)
         };
-        let on = self.flick_active();
         self.gyro_signals.set_pin(
             SOURCE,
             if f.stick == Stick::Left {
@@ -1851,33 +1927,48 @@ impl Engine {
             Signal::Vec2(value),
         );
         self.gyro_signals
-            .set_pin(SOURCE, "flick_on", Signal::Bool(on));
+            .set_pin(SOURCE, "flick_on", Signal::Bool(true));
+        self.flick.graph.nodes[1]
+            .params
+            .insert("flick_input_dt".into(), json!(input_dt));
         self.flick.eval(&self.gyro_signals, dt);
         self.flick_stick = Vec2::ZERO;
-        if !on {
-            self.flick.state.clear();
-        } else {
-            let outputs = &self.flick.result.sink_outputs;
-            let flick_counts = match outputs.get_pin(GYRO, "flick_angle") {
-                Some(Signal::Vec2(v)) => v.x,
-                _ => 0.,
-            };
-            match self.profile.gyro.output {
-                GyroOutput::Mouse => {
-                    if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_mouse") {
-                        self.frame.mouse_delta[0] += f64::from(v.x);
-                        self.frame.mouse_delta[1] -= f64::from(v.y);
-                    }
-                    self.frame.mouse_delta[0] += f64::from(flick_counts);
+        let outputs = &self.flick.result.sink_outputs;
+        let flick_counts = match outputs.get_pin(GYRO, "flick_angle") {
+            Some(Signal::Vec2(v)) => v.x,
+            _ => 0.,
+        };
+        match self.profile.gyro.output {
+            GyroOutput::Mouse => {
+                if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_mouse") {
+                    self.frame.mouse_delta[0] += f64::from(v.x);
+                    self.frame.mouse_delta[1] -= f64::from(v.y);
                 }
-                GyroOutput::RightStick => {
-                    self.turn_stick_owed += flick_counts / self.profile.gyro.counts_per_degree;
-                    if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_pad") {
-                        self.flick_stick = *v;
-                    }
+                self.frame.mouse_delta[0] += f64::from(flick_counts);
+            }
+            GyroOutput::RightStick => {
+                self.flick_stick_owed += flick_counts / self.profile.gyro.counts_per_degree;
+                if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_pad") {
+                    self.flick_stick = *v;
                 }
             }
         }
+    }
+
+    /// Observe Flick input after FIFO events and layer changes.
+    pub fn advance_flick_input(&mut self) {
+        let now = self.action_time_ns;
+        let input_dt = self
+            .flick_input_ns
+            .replace(now)
+            .map_or(0., |last| (now.saturating_sub(last) as f32 / 1e9).min(0.05));
+        self.advance_flick(0., input_dt);
+        self.update_pad();
+    }
+
+    fn advance_turns(&mut self, dt: f32) {
+        self.flick_turn_stick = 0.;
+        self.turn_stick = 0.;
         self.turns.retain_mut(|t| {
             let step = if t.seconds <= dt {
                 t.degrees
@@ -1895,13 +1986,25 @@ impl Engine {
             t.seconds > 0.
         });
         self.update_pad();
-        if self.turn_stick_owed != 0. {
+        let owed = self.flick_stick_owed + self.turn_stick_owed;
+        if owed == 0. {
+            self.flick_stick_owed = 0.;
+            self.turn_stick_owed = 0.;
+        } else {
             let base = self.frame.pad.map_or(0., |p| axis_from_i16(p.right_x));
             let cap = self.profile.gyro.stick_full_scale_dps * dt;
-            let room = (1. - base * self.turn_stick_owed.signum()).max(0.) * cap;
-            let emit = self.turn_stick_owed.abs().min(room) * self.turn_stick_owed.signum();
-            self.flick_stick.x += emit / cap;
-            self.turn_stick_owed -= emit;
+            let room = (1. - base * owed.signum()).max(0.) * cap;
+            let emit = owed.abs().min(room) * owed.signum();
+            // Allocate the shared stick capacity while retaining ownership of
+            // the current output and pending angle for each turn source.
+            let remaining = owed - emit;
+            let flick_share = (self.flick_stick_owed / owed).clamp(0., 1.);
+            let emitted_stick = emit / cap;
+            let flick_stick = emitted_stick * flick_share;
+            self.flick_turn_stick = flick_stick;
+            self.turn_stick = emitted_stick - flick_stick;
+            self.flick_stick_owed = remaining * flick_share;
+            self.turn_stick_owed = remaining - self.flick_stick_owed;
             self.update_pad();
         }
     }
@@ -1909,18 +2012,21 @@ impl Engine {
     fn tick_input(&mut self, now_ns: u64) {
         self.refresh_sticks(now_ns as f64 / 1e9, true);
         self.eval_controls(true, now_ns);
+        self.advance_touch(self.action_time_ns, false);
     }
 
     /// Advance mapping timers through a drained input timestamp. Returns
-    /// whether the frame contains a discrete output change to dispatch now.
+    /// whether the frame contains an output change to dispatch now.
     pub fn advance_input(&mut self, now_ns: u64) -> bool {
         self.clear_frame_deltas();
         let previous_held = std::mem::take(&mut self.frame.held);
         let previous_pad = self.frame.pad;
         self.tick_input(now_ns);
+        self.advance_flick_input();
         self.frame.held != previous_held
             || self.frame.pad != previous_pad
             || self.frame.scroll != [0; 2]
+            || self.frame.mouse_delta != [0.; 2]
     }
 
     /// Combined tick for callers supplying a single input and output clock.
@@ -1935,16 +2041,16 @@ impl Engine {
             };
             self.tick_input(input_ns);
         }
-        self.tick_output(dt, now_ns)
+        self.tick_output(dt, now_ns, dt)
     }
 
     /// Advance continuous output without deciding gestures ahead of SDL.
     pub fn advance_output(&mut self, dt: f32, now_ns: u64) -> &Frame {
         self.clear_frame_deltas();
-        self.tick_output(dt, now_ns)
+        self.tick_output(dt, now_ns, 0.)
     }
 
-    fn tick_output(&mut self, dt: f32, now_ns: u64) -> &Frame {
+    fn tick_output(&mut self, dt: f32, now_ns: u64, flick_input_dt: f32) -> &Frame {
         if self
             .last_stick_gyro_ns
             .is_some_and(|last| now_ns.checked_sub(last).is_none_or(|age| age >= MAX_GAP_NS))
@@ -1959,10 +2065,8 @@ impl Engine {
             for state in &mut self.action_states {
                 state.elapsed = 0.;
             }
-            self.flick.state.clear();
-            self.flick_stick = Vec2::ZERO;
-            self.turns.clear();
-            self.turn_stick_owed = 0.;
+            self.flick_turn_stick = 0.;
+            self.clear_turn_output();
             self.update_pad();
             return &self.frame;
         }
@@ -1987,13 +2091,20 @@ impl Engine {
                 }
             }
         }
-        self.advance_aim(dt);
-        self.advance_touch(now_ns, false);
+        self.advance_flick(dt, flick_input_dt);
+        self.advance_turns(dt);
+        self.advance_stick_mouse(dt);
+        &self.frame
+    }
+
+    fn advance_stick_mouse(&mut self, dt: f32) {
         let options = &self.profile.stick_mouse;
         if self.measuring.is_some() || !options.enabled {
-            return &self.frame;
+            return;
         }
-        self.stick_mouse_graph.eval(&self.signals, dt);
+        let blocked = self.flick_source_block();
+        self.stick_mouse_graph
+            .eval_with_stick_block(&mut self.signals, blocked, dt);
         if let Some(Signal::Vec2(delta)) = self
             .stick_mouse_graph
             .result
@@ -2003,6 +2114,5 @@ impl Engine {
             self.frame.mouse_delta[0] += f64::from(delta.x);
             self.frame.mouse_delta[1] -= f64::from(delta.y);
         }
-        &self.frame
     }
 }

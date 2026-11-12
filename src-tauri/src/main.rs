@@ -596,16 +596,22 @@ async fn save_sensor_calibration(
         if device_path.trim().is_empty() {
             return Err("请先选择设备".into());
         }
-        if state
-            .client
-            .snapshot
-            .lock()
-            .map_err(text)?
-            .status
-            .device
-            .as_ref()
-            .is_some_and(|d| d.path == device_path)
-        {
+        let (device_in_session, waiting_for_device) = {
+            let snapshot = state.client.snapshot.lock().map_err(text)?;
+            let status = &snapshot.status;
+            let has_session = snapshot.engine_ready
+                && !status.ui_navigation
+                && !matches!(status.state.as_str(), "idle" | "faulted");
+            (
+                has_session && status.device.as_ref().is_some_and(|d| d.path == device_path),
+                has_session
+                    && status.device.is_none()
+                    && matches!(status.state.as_str(), "waiting" | "preparing_output"),
+            )
+        };
+        let session_waits_for_this_device = waiting_for_device
+            && state.settings.lock().map_err(text)?.device_path == device_path;
+        if device_in_session || session_waits_for_this_device {
             state.client.request(Command::SetSensorCalibration {
                 calibration: Box::new(calibration),
             })

@@ -1,7 +1,7 @@
 use motion_core::{
     engine::{Engine, InputEvent},
     motion_config::*,
-    profile::{GamepadTarget, GyroOutput, Profile, TimestampSource},
+    profile::{Action, GamepadTarget, GyroActivationMode, GyroOutput, Profile, TimestampSource},
     storage::parse_profile,
     timing::SampleTime,
 };
@@ -220,6 +220,61 @@ fn gyro_rotates_the_stick_preserving_its_length_and_centering_drops_the_offset()
 }
 
 #[test]
+fn a_layer_switching_motion_modes_releases_the_previous_stick_output() {
+    let mut pointer = profile();
+    gamepad(&mut pointer);
+    let mut rotation = pointer.clone();
+    rotation.gyro.motion.mode = MotionMode::StickRotation;
+    let mut e = Engine::new(pointer.clone()).unwrap();
+    gyro(&mut e, 1, 0., 0., 90.);
+    gyro(&mut e, 2, 0., 0., 90.);
+    assert!(e.frame.pad.unwrap().right_x > 0);
+
+    e.apply_layer(rotation).unwrap();
+    assert_eq!(e.frame.pad.unwrap().right_x, 0);
+    axis(&mut e, 3, -26214);
+    for ms in 3..104 {
+        gyro(&mut e, ms, 0., 0., 90.);
+    }
+    assert!(e.frame.pad.unwrap().right_x > 4000);
+
+    e.apply_layer(pointer).unwrap();
+    let pad = e.frame.pad.unwrap();
+    assert_eq!(pad.right_x, 0);
+    assert!(pad.right_y > 25000);
+    axis(&mut e, 3, 0);
+    assert_eq!(e.frame.pad.unwrap().right_y, 0);
+}
+
+#[test]
+fn lowering_a_layer_threshold_does_not_press_a_held_trigger_again() {
+    let mut p = profile();
+    p.gyro.activation = "left_trigger".into();
+    p.gyro.activation_mode = GyroActivationMode::Toggle;
+    p.gyro.activation_threshold = 0.7;
+    p.gyro.motion.turns = vec![TurnBinding {
+        input: "left_trigger".into(),
+        duration_ms: 0.,
+        ..Default::default()
+    }];
+    let mut e = Engine::new(p.clone()).unwrap();
+    axis(&mut e, 4, 16384);
+    p.gyro.activation_threshold = 0.2;
+    e.apply_layer(p).unwrap();
+    assert_eq!(e.advance(0.01, 10_000_000).mouse_delta, [0.; 2]);
+    gyro(&mut e, 11, 0., 0., 90.);
+    gyro(&mut e, 12, 0., 0., 90.);
+    assert_eq!(e.frame.mouse_delta, [0.; 2]);
+
+    axis(&mut e, 4, 0);
+    axis(&mut e, 4, 16384);
+    assert!(e.advance(0.01, 20_000_000).mouse_delta[0] > 0.);
+    gyro(&mut e, 21, 0., 0., 90.);
+    gyro(&mut e, 22, 0., 0., 90.);
+    assert!(e.frame.mouse_delta[0] > 0.);
+}
+
+#[test]
 fn relative_rotation_returns_to_the_thumb_and_takeover_releases_in_the_outer_zone() {
     for relative in [true, false] {
         let mut p = profile();
@@ -321,6 +376,90 @@ fn flick_90_degrees_is_paid_out_once_and_suppresses_the_original_stick() {
 }
 
 #[test]
+fn a_quick_flick_between_output_slots_is_recognized_then_paid_out() {
+    let mut p = profile();
+    p.gyro.motion.flick.enabled = true;
+    let mut e = Engine::new(p).unwrap();
+    e.advance_input(1_000_000);
+    let mut counts = 0.;
+    for (ms, value) in [(2, 32767), (14, 0)] {
+        e.process(&InputEvent::Axis {
+            time: time(ms),
+            index: 2,
+            value,
+        });
+        e.advance_flick_input();
+        assert_eq!(e.frame.mouse_delta, [0.; 2]);
+    }
+    for ms in (16..=160).step_by(2) {
+        e.advance_input(ms * 1_000_000);
+        if ms % 16 == 0 {
+            counts += e.advance_output(0.016, ms * 1_000_000).mouse_delta[0];
+        }
+    }
+    assert!((counts - 900.).abs() < 0.01, "{counts}");
+}
+
+#[test]
+fn flick_source_block_applies_to_normal_mappings_and_keeps_physical_controls() {
+    let mut p = profile();
+    p.virtual_gamepad = GamepadTarget::Xbox360;
+    p.stick_mouse.enabled = true;
+    p.gyro.motion.flick.enabled = true;
+    p.gyro.motion.flick.enable_input = Some("right_stick_right".into());
+    let direction = Action {
+        name: "Right".into(),
+        input: "right_stick_right".into(),
+        output: "key:D".into(),
+        threshold: 0.5,
+        repeat_ms: None,
+        trigger: Default::default(),
+        trigger_ms: 250,
+        sustain: true,
+        turbo_ms: None,
+        allow_simultaneous: false,
+    };
+    p.actions = vec![
+        Action {
+            name: "Outer ring".into(),
+            input: "right_stick_outer".into(),
+            output: "key:O".into(),
+            ..direction.clone()
+        },
+        direction,
+    ];
+    let mut e = Engine::new(p).unwrap();
+    axis(&mut e, 2, 32767);
+    assert_eq!(e.input_value("right_stick_right"), 1.);
+    assert!(!e.frame.held.contains("key:D"));
+    assert!(e.frame.held.contains("key:O"));
+    assert_eq!(e.frame.pad.unwrap().right_x, 0);
+    let total: f64 = (1..101)
+        .map(|n| e.advance(0.01, n * 10_000_000).mouse_delta[0])
+        .sum();
+    assert!((total - 900.).abs() < 0.01, "{total}");
+}
+
+#[test]
+fn aim_without_flick_keeps_native_stick_in_deadzone_mode_and_survives_a_layer_change() {
+    let mut p = profile();
+    p.virtual_gamepad = GamepadTarget::Xbox360;
+    p.gyro.motion.flick.stick_aim = true;
+    p.gyro.motion.flick.suppress = Suppress::Deadzone;
+    let mut e = Engine::new(p.clone()).unwrap();
+    axis(&mut e, 2, 32767);
+    let frame = e.advance(0.01, 10_000_000);
+    assert_eq!(frame.pad.unwrap().right_x, 32767);
+    assert!(frame.mouse_delta[0] > 0.);
+
+    p.gyro.motion.flick.aim_sensitivity = 0.5;
+    e.apply_layer(p).unwrap();
+    let frame = e.advance(0.01, 20_000_000);
+    assert_eq!(frame.pad.unwrap().right_x, 32767);
+    assert!(frame.mouse_delta[0] > 0.);
+}
+
+#[test]
 fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_directions() {
     for (strength, exponent) in [(0., 1), (0.5, 2), (1., 3)] {
         for (value, direction) in [(32767, 1.), (-32768, -1.)] {
@@ -352,25 +491,86 @@ fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_direc
 
 #[test]
 fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
+    for pause_at in [None, Some(0), Some(2)] {
+        let mut p = profile();
+        gamepad(&mut p);
+        p.gyro.activation = "left_trigger".into();
+        p.gyro.pause_input = Some("south".into());
+        p.gyro.stick_full_scale_dps = 90.;
+        p.gyro.motion.flick.enabled = true;
+        p.gyro.motion.flick.smooth_ms = 10.;
+        p.gyro.motion.flick.release_ease = 1.;
+        let mut e = Engine::new(p).unwrap();
+        if pause_at == Some(0) {
+            button(&mut e, 0, true);
+        }
+        axis(&mut e, 2, 32767);
+        let mut degrees = 0.;
+        for n in 1..201 {
+            if pause_at == Some(n) {
+                button(&mut e, 0, true);
+            }
+            let f = e.advance(0.01, n * 10_000_000);
+            degrees += f.pad.unwrap().right_x as f32 / 32767. * 90. * 0.01;
+            assert_eq!(f.mouse_delta, [0.; 2]);
+        }
+        assert!((degrees - 90.).abs() < 0.1, "pause={pause_at:?}: {degrees}");
+    }
+}
+
+#[test]
+fn a_layer_changing_trackball_settings_preserves_a_flick_in_progress() {
     let mut p = profile();
     gamepad(&mut p);
     p.gyro.stick_full_scale_dps = 90.;
     p.gyro.motion.flick.enabled = true;
-    p.gyro.motion.flick.smooth_ms = 10.;
-    p.gyro.motion.flick.release_ease = 1.;
-    let mut e = Engine::new(p).unwrap();
+    let mut e = Engine::new(p.clone()).unwrap();
     axis(&mut e, 2, 32767);
     let mut degrees = 0.;
     for n in 1..201 {
-        let f = e.advance(0.01, n * 10_000_000);
-        degrees += f.pad.unwrap().right_x as f32 / 32767. * 90. * 0.01;
-        assert_eq!(f.mouse_delta, [0.; 2]);
+        if n == 2 {
+            p.gyro.motion.trackball.decay = 2.;
+            e.apply_layer(p.clone()).unwrap();
+        }
+        let pad = e.advance(0.01, n * 10_000_000).pad.unwrap();
+        degrees += pad.right_x as f32 / 32767. * 90. * 0.01;
     }
     assert!((degrees - 90.).abs() < 0.1, "{degrees}");
 }
 
 #[test]
-fn stick_aim_runs_between_axis_events_and_pause_restores_native_input() {
+fn disabling_flick_cancels_the_remaining_stick_angle() {
+    for via_layer in [false, true] {
+        let mut p = profile();
+        gamepad(&mut p);
+        p.gyro.stick_full_scale_dps = 90.;
+        p.gyro.motion.flick.enabled = true;
+        p.gyro.motion.flick.enable_input = Some("east".into());
+        let mut e = Engine::new(p.clone()).unwrap();
+        button(&mut e, 1, true);
+        axis(&mut e, 2, 32767);
+        assert!(e.advance(0.01, 10_000_000).pad.unwrap().right_x > 0);
+        axis(&mut e, 2, 0);
+        if via_layer {
+            let mut disabled = p.clone();
+            disabled.gyro.enabled = false;
+            e.apply_layer(disabled).unwrap();
+        } else {
+            button(&mut e, 1, false);
+        }
+        assert_eq!(e.frame.pad.unwrap().right_x, 0);
+        assert_eq!(e.advance(0.01, 20_000_000).pad.unwrap().right_x, 0);
+        if via_layer {
+            e.apply_layer(p).unwrap();
+        } else {
+            button(&mut e, 1, true);
+        }
+        assert_eq!(e.advance(0.01, 30_000_000).pad.unwrap().right_x, 0);
+    }
+}
+
+#[test]
+fn stick_aim_continues_while_gyro_is_paused_and_restores_native_input_when_disabled() {
     let mut p = profile();
     gamepad(&mut p);
     p.gyro.output = GyroOutput::Mouse;
@@ -379,20 +579,26 @@ fn stick_aim_runs_between_axis_events_and_pause_restores_native_input() {
     axis(&mut native, 2, 16384);
     let native_x = native.frame.pad.unwrap().right_x;
     p.gyro.motion.flick.stick_aim = true;
+    p.gyro.motion.flick.enable_input = Some("east".into());
     p.stick_deadzone = 0.; // Isolate RWS timing from source deadzone.
     let mut e = Engine::new(p).unwrap();
+    button(&mut e, 1, true);
     axis(&mut e, 2, 16384);
     let f = e.advance(0.01, 10_000_000);
     assert!((f.mouse_delta[0] - 18.).abs() < 0.01);
     assert_eq!(f.pad.unwrap().right_x, 0);
     assert!((e.advance(0.01, 20_000_000).mouse_delta[0] - 18.).abs() < 0.01);
     button(&mut e, 0, true);
+    let paused = e.advance(0.01, 30_000_000);
+    assert!((paused.mouse_delta[0] - 18.).abs() < 0.01);
+    assert_eq!(paused.pad.unwrap().right_x, 0);
+    button(&mut e, 1, false);
     assert_eq!(e.frame.pad.unwrap().right_x, native_x);
-    assert_eq!(e.advance(0.01, 30_000_000).mouse_delta, [0.; 2]);
+    assert_eq!(e.advance(0.01, 40_000_000).mouse_delta, [0.; 2]);
 }
 
 #[test]
-fn bound_turns_wait_for_available_stick_capacity_and_snapshot_is_not_a_press() {
+fn bound_stick_turns_survive_gyro_route_changes_and_wait_for_available_capacity() {
     let mut p = profile();
     gamepad(&mut p);
     p.gyro.motion.turns = vec![TurnBinding {
@@ -401,7 +607,7 @@ fn bound_turns_wait_for_available_stick_capacity_and_snapshot_is_not_a_press() {
         output: AimOutput::RightStick,
         ..Default::default()
     }];
-    let mut e = Engine::new(p).unwrap();
+    let mut e = Engine::new(p.clone()).unwrap();
     e.process_snapshot(&InputEvent::Button {
         time: time(1),
         index: 0,
@@ -414,12 +620,38 @@ fn bound_turns_wait_for_available_stick_capacity_and_snapshot_is_not_a_press() {
     for n in 2..10 {
         e.advance(0.01, n * 10_000_000);
     }
+    p.gyro.output = GyroOutput::Mouse;
+    e.apply_layer(p).unwrap();
     axis(&mut e, 2, 0);
     let mut total = 0.;
     for n in 10..110 {
         total += e.advance(0.01, n * 10_000_000).pad.unwrap().right_x as f32 / 32767. * 360. * 0.01;
     }
     assert!((total - 180.).abs() < 0.05, "{total}");
+}
+
+#[test]
+fn an_opposing_stick_turn_uses_the_same_clamped_axis_as_the_capacity_check() {
+    let mut p = profile();
+    gamepad(&mut p);
+    p.gyro.motion.turns = vec![TurnBinding {
+        input: "south".into(),
+        degrees: -90.,
+        duration_ms: 0.,
+        output: AimOutput::RightStick,
+        ..Default::default()
+    }];
+    let mut e = Engine::new(p).unwrap();
+    axis(&mut e, 2, 32767);
+    button(&mut e, 0, true);
+    gyro(&mut e, 1, 0., 0., 180.);
+    let mut degrees = 0.;
+    for ms in (10..=400).step_by(10) {
+        gyro(&mut e, ms, 0., 0., 180.);
+        let x = e.advance(0.01, ms * 1_000_000).pad.unwrap().right_x;
+        degrees += (x as f32 / 32767. - 1.) * 360. * 0.01;
+    }
+    assert!((degrees + 90.).abs() < 0.05, "{degrees}");
 }
 
 #[test]
@@ -514,6 +746,10 @@ fn measurement_uses_base_scale_and_rejects_gaps_and_stick_saturation() {
     e.begin_measurement("yaw").unwrap();
     let mut total = 0.;
     for ms in 1..1002 {
+        if ms == 501 {
+            // Local angle measurement only depends on the gyro stream.
+            accel(&mut e, ms, [f32::NAN, 0., 0.]);
+        }
         gyro(&mut e, ms, 0., 0., 100.);
         total += e.frame.mouse_delta[0];
     }

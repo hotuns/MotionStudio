@@ -118,12 +118,16 @@ fn a_layer_keeps_its_base_activation_when_its_input_deadzone_changes() {
     base.input.deadzone_left = Some(0.1);
     let mut e = Engine::new(base.clone()).unwrap();
     axis(&mut e, 1, 0, 0.6);
-    let before = e.layer_input_value("left_stick_right", &base, false);
+    let inputs = ["left_stick_right", "left_stick_x"];
+    let before = inputs.map(|input| e.layer_input_value(input, &base, false));
     let mut layer = base.clone();
     layer.input.deadzone_left = Some(0.8);
     e.apply_layer(layer).unwrap();
-    assert_eq!(e.input_value("left_stick_right"), 0.);
-    assert!((e.layer_input_value("left_stick_right", &base, true) - before).abs() < 0.00001);
+    for (input, before) in inputs.into_iter().zip(before) {
+        assert!(before > 0.);
+        assert_eq!(e.input_value(input), 0.);
+        assert!((e.layer_input_value(input, &base, true) - before).abs() < 0.00001);
+    }
 }
 
 #[test]

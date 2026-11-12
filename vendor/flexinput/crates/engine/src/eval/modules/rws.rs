@@ -360,6 +360,10 @@ pub(crate) fn compute_rws(
     // separately for the gyro source and stick sources. 1.0 = equal.
     let gyro_vh_ratio = pf("gyro_vh_ratio", 1.0).max(0.0);
     let stick_vh_ratio = pf("stick_vh_ratio", 1.0).max(0.0);
+    // A timestamped caller can observe stick edges and gesture time between
+    // output ticks. The default keeps the original single-clock behavior.
+    let flick_input_dt = pf("flick_input_dt", dt);
+    let observe_only = dt == 0.0 && params.contains_key("flick_input_dt");
     // User-driven MEASURE calibration ("pitch"|"yaw"|"off"): the user turns the
     // camera a known amount (180° down→up, or 360°) while we drive the game at the
     // BASE scale (rws = 1, no V/H bias, off-axis blocked, no flick/stick-aim). The
@@ -440,11 +444,11 @@ pub(crate) fn compute_rws(
     };
     let gated = flick_on && speed_s > 0.0 && !measuring;
     let catch_s = (flick_smooth_ms / 1000.0).max(0.0);
-    gesture_before_flick(state, gated, flick_stick.length(), speed_s, catch_s, dt);
+    gesture_before_flick(state, gated, flick_stick.length(), speed_s, catch_s, flick_input_dt);
     let allow_flick = !(gated && slow_lock && state.aux_f32[GST] == GST_STEERING);
 
     let flick_deg = if flick_on && !measuring {
-        compute_flick(inputs, state, flick_deadzone, flick_smooth_ms, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt)
+        compute_flick(inputs, state, flick_deadzone, flick_smooth_ms, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt, flick_input_dt, observe_only)
     } else {
         reset_flick(state);
         0.0
@@ -546,8 +550,8 @@ pub(crate) fn compute_rws(
             let a_yaw = dir.x * t * max_rate * aim_rws;
             let a_pitch = dir.y * t * max_rate * stick_vh_ratio * aim_rws;
             if gesture == GST_DECIDING {
-                state.aux_f32[GST_HELD] += a_yaw * dt;
-                state.aux_f32[GST_HELD + 1] += a_pitch * dt;
+                state.aux_f32[GST_HELD] += a_yaw * flick_input_dt;
+                state.aux_f32[GST_HELD + 1] += a_pitch * flick_input_dt;
             } else {
                 dx += a_yaw * dt * scale;
                 dy += a_pitch * dt * scale;
@@ -559,7 +563,7 @@ pub(crate) fn compute_rws(
 
     // Held-back aim released by a steering gesture, paid out over the smoothing
     // time — a rotation, so into both outputs like the aim it stands in for.
-    let catch = gesture_catch_up(state, dt);
+    let catch = if observe_only { glam::Vec2::ZERO } else { gesture_catch_up(state, dt) };
     if catch != glam::Vec2::ZERO {
         dx += catch.x * scale;
         dy += catch.y * scale;
@@ -642,6 +646,8 @@ fn compute_flick(
     stab_s: f32,
     allow_engage: bool,
     dt: f32,
+    input_dt: f32,
+    observe_only: bool,
 ) -> f32 {
     while state.aux_f32.len() <= FLK_TOTAL_S {
         state.aux_f32.push(0.0);
@@ -717,7 +723,7 @@ fn compute_flick(
     } else if engaged {
         // Below the release floor: hold the heading (no spurious rotation) and
         // disengage only after a sustained release, so brief dropouts are ignored.
-        state.aux_f32[FLK_BELOW_S] += dt;
+        state.aux_f32[FLK_BELOW_S] += input_dt;
         if state.aux_f32[FLK_BELOW_S] >= FLK_DISENGAGE_HOLD_S {
             state.aux_f32[FLK_ENGAGED] = 0.0;
             // Let go: turn whatever the stabiliser was still holding back.
@@ -732,7 +738,7 @@ fn compute_flick(
     // Stabilised tracking: filter the tracked heading every tick while engaged
     // (also between stick polls, so the filter settles onto a held heading) and
     // turn by its change.
-    if stab_s > 0.0 && state.aux_f32[FLK_ENGAGED] > 0.5 {
+    if !observe_only && stab_s > 0.0 && state.aux_f32[FLK_ENGAGED] > 0.5 {
         let raw = state.aux_f32[FLK_STAB_RAW];
         let filt = state.rws_flick_stab.get_or_insert_with(Default::default);
         let out = filt.filter(raw, dt, 1.0 / (std::f32::consts::TAU * stab_s));

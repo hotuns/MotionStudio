@@ -153,23 +153,31 @@ pub struct Runtime {
     capture_releasing: bool,
     active_layers: Vec<usize>,
     seeding: bool,
+    resync_input: bool,
+    measurement_input_interrupted: bool,
     pad_shortcut: motion_core::shortcut::PadShortcutEdges,
     feedback: motion_core::feedback::FeedbackRouter,
     last_feedback: Instant,
 }
 impl Runtime {
-    fn publish_status(&self) {
+    fn gamepad_output_configured(&self) -> bool {
+        self.config.as_ref().is_some_and(|config| {
+            config.emit && config.profile.virtual_gamepad != GamepadTarget::None
+        })
+    }
+
+    fn status_snapshot(&self) -> Status {
         let mut status = self.status.clone();
         status.mouse_display_sync = self.io_clock.status();
         status.feedback = self.feedback.status.clone();
         status.output_gamepad = self
             .output
             .as_ref()
+            .filter(|_| self.gamepad_output_configured())
             .and_then(|output| output.gamepad_status());
         if (status.emitting || status.state == "observing")
-            && !status.binding_capture
+            && !self.output_paused()
             && !status.ui_navigation
-            && self.calibration.is_none()
         {
             status.output_preview = self.output.as_ref().map(Dispatcher::preview);
         }
@@ -178,7 +186,10 @@ impl Runtime {
             .as_ref()
             .map(|engine| engine.motion.custom_filters.statuses())
             .unwrap_or_default();
-        self.publisher.status(&status);
+        status
+    }
+    fn publish_status(&self) {
+        self.publisher.status(&self.status_snapshot());
     }
     pub fn new(dll: PathBuf, publisher: Publisher, watch: Arc<Mutex<Option<PathBuf>>>) -> Self {
         let now = Instant::now();
@@ -208,6 +219,8 @@ impl Runtime {
             capture_releasing: false,
             active_layers: vec![],
             seeding: false,
+            resync_input: false,
+            measurement_input_interrupted: false,
             pad_shortcut: Default::default(),
             feedback: Default::default(),
             last_feedback: Instant::now(),
@@ -220,6 +233,13 @@ impl Runtime {
         }
         if let Some(guard) = &mut self.guard {
             guard.after(&BTreeSet::new())?;
+        }
+        Ok(())
+    }
+    fn clear_outputs_or_fault(&mut self) -> Result<()> {
+        if let Err(error) = self.clear_outputs() {
+            self.fault(format!("输出已暂停：{error:#}"));
+            return Err(error);
         }
         Ok(())
     }
@@ -242,10 +262,16 @@ impl Runtime {
             sdl.stop_feedback();
         }
     }
+    fn output_paused(&self) -> bool {
+        self.calibration.is_some()
+            || self.status.binding_capture
+            || self.resync_input
+            || self.measurement_input_interrupted
+    }
     fn update_feedback(&mut self) {
         let active = self.status.emitting
-            && !self.status.binding_capture
-            && self.calibration.is_none()
+            && self.gamepad_output_configured()
+            && !self.output_paused()
             && !self.status.ui_navigation;
         if let Some(frame) = self.output.as_mut().and_then(|output| output.feedback()) {
             let cfg = self
@@ -277,6 +303,8 @@ impl Runtime {
     }
     fn close_input(&mut self) {
         self.sdl.take();
+        self.resync_input = false;
+        self.measurement_input_interrupted = false;
         self.status.device = None;
         self.status.buttons.fill(false);
         self.status.axes = [0.0; 6];
@@ -315,6 +343,8 @@ impl Runtime {
         self.active_layers.clear();
         self.status.active_layers.clear();
         self.seeding = false;
+        self.resync_input = false;
+        self.measurement_input_interrupted = false;
         if self.status.visibility.requested
             || self.status.visibility.active
             || self.status.visibility.error.is_some()
@@ -568,6 +598,8 @@ impl Runtime {
             self.input(event, true)?;
         }
         self.seeding = false;
+        self.resync_input = false;
+        self.measurement_input_interrupted = false;
         self.sync_layers()?;
         self.track_pad_shortcut(true);
         if let Some(engine) = &self.engine {
@@ -689,13 +721,6 @@ impl Runtime {
         {
             bail!("当前接口没有体感，请停止并选择支持体感的接口");
         }
-        if config.emit {
-            probe_output(
-                config.output_backend,
-                config.gamepad_backend,
-                profile.virtual_gamepad,
-            )?;
-        }
         if self.status.device.as_ref().is_some_and(|d| {
             profile.gyro.enabled && profile.gyro.motion.needs_accel() && !d.accelerometer
         }) {
@@ -707,7 +732,27 @@ impl Runtime {
             self.status.reload_error = None;
             return Ok(());
         }
-        let recreate = config.profile.virtual_gamepad != profile.virtual_gamepad;
+        // The attached device may outlive a keyboard/mouse-only profile. Reuse
+        // the neutral device when returning to its type within this session.
+        let recreate = if config.emit {
+            match self.output.as_ref().and_then(Dispatcher::gamepad_status) {
+                Some(pad) => {
+                    !pad.connected
+                        || (profile.virtual_gamepad != GamepadTarget::None
+                            && pad.target != profile.virtual_gamepad)
+                }
+                None => profile.virtual_gamepad != GamepadTarget::None,
+            }
+        } else {
+            config.profile.virtual_gamepad != profile.virtual_gamepad
+        };
+        if config.emit && (recreate || self.output.is_none()) {
+            probe_output(
+                config.output_backend,
+                config.gamepad_backend,
+                profile.virtual_gamepad,
+            )?;
+        }
         if let Err(error) = self.clear_outputs() {
             let message = format!("切换时无法释放旧输出，已暂停：{error:#}");
             self.fault(message.clone());
@@ -767,6 +812,10 @@ impl Runtime {
             }
             Control::Request(request) => {
                 let shutdown = matches!(request.command, Command::Shutdown);
+                let changes_session = matches!(
+                    &request.command,
+                    Command::Start { .. } | Command::Navigate { .. } | Command::Stop
+                );
                 let mut measurement = None;
                 let result = (|| -> Result<()> {
                     match request.command {
@@ -841,7 +890,7 @@ impl Runtime {
                             {
                                 Err(anyhow::anyhow!("请先选择体感手柄并开始观察或映射"))
                             } else {
-                                self.clear_outputs()?;
+                                self.clear_outputs_or_fault()?;
                                 self.engine.as_mut().unwrap().reset();
                                 self.calibration = Some(Calibration::new());
                                 self.status.state = "calibrating".into();
@@ -852,6 +901,9 @@ impl Runtime {
                             }
                         }
                         Command::CalibrateFace { axis, positive } => {
+                            if self.status.binding_capture {
+                                bail!("请先结束映射录入");
+                            }
                             let c = Calibration::face(axis, positive)?;
                             if self.calibration.is_some()
                                 || self.engine.as_ref().is_some_and(Engine::is_measuring)
@@ -866,7 +918,7 @@ impl Runtime {
                                     "请先连接带加速度计的体感接口，并等待当前校准完成"
                                 ))
                             } else {
-                                self.clear_outputs()?;
+                                self.clear_outputs_or_fault()?;
                                 self.engine.as_mut().unwrap().reset();
                                 self.calibration = Some(c);
                                 self.status.state = "calibrating".into();
@@ -881,20 +933,35 @@ impl Runtime {
                         }
                         Command::SetSensorCalibration { calibration } => {
                             calibration.validate()?;
+                            if self.status.binding_capture {
+                                bail!("请先结束映射录入");
+                            }
                             if self.calibration.is_some()
                                 || self.engine.as_ref().is_some_and(Engine::is_measuring)
                             {
                                 Err(anyhow::anyhow!("请先结束当前校准或转角测量"))
                             } else {
-                                let config = self.config.as_mut().context("请先开始观察或映射")?;
-                                config.sensor_calibration = *calibration;
-                                self.publisher.reliable(Event::Calibration {
+                                if self.config.is_none() {
+                                    bail!("请先开始观察或映射");
+                                }
+                                self.clear_outputs_or_fault()?;
+                                let config = self.config.as_mut().unwrap();
+                                config.sensor_calibration = (*calibration).clone();
+                                let event = Event::Calibration {
                                     device_path: config.device_path.clone(),
                                     bias: config.bias,
-                                    sensor: config.sensor_calibration.clone(),
-                                })?;
-                                self.clear_outputs()?;
-                                self.prepare_engine()
+                                    sensor: *calibration,
+                                };
+                                let prepare = if self.engine.is_some() {
+                                    self.prepare_engine()
+                                } else {
+                                    Ok(())
+                                };
+                                let result = prepare.and_then(|()| self.publisher.reliable(event));
+                                if let Err(error) = &result {
+                                    self.fault(format!("应用设备校准失败，输出已暂停：{error:#}"));
+                                }
+                                result
                             }
                         }
                         Command::BeginMeasure {
@@ -914,6 +981,9 @@ impl Runtime {
                             {
                                 bail!("转角测量需要先保存配置并启用映射输出");
                             }
+                            if self.resync_input {
+                                bail!("正在恢复手柄输入，请稍后重新开始转角测量");
+                            }
                             if !self.active_layers.is_empty() {
                                 bail!("请松开配置层按键，切回基础层后再校准。");
                             }
@@ -921,10 +991,7 @@ impl Runtime {
                                 .as_mut()
                                 .context("引擎未运行")?
                                 .begin_measurement(&axis)?;
-                            if let Err(error) = self.clear_outputs() {
-                                self.fault(format!("输出已暂停：{error:#}"));
-                                return Err(error);
-                            }
+                            self.clear_outputs_or_fault()?;
                             self.status.motion =
                                 self.engine.as_ref().unwrap().motion.telemetry.clone();
                             self.publish_status();
@@ -939,16 +1006,17 @@ impl Runtime {
                                 self.status.motion = engine.motion.telemetry.clone();
                             }
                             if measurement.is_some() {
-                                if let Err(error) = self.clear_outputs() {
-                                    self.fault(format!("输出已暂停：{error:#}"));
-                                    return Err(error);
+                                self.clear_outputs_or_fault()?;
+                                self.measurement_input_interrupted = false;
+                                if !self.resync_input {
+                                    self.sync_layers()?;
                                 }
                             }
                             self.publish_status();
                             Ok(())
                         }
                         Command::ResetPose => {
-                            self.clear_outputs()?;
+                            self.clear_outputs_or_fault()?;
                             if let Some(engine) = &mut self.engine {
                                 engine.reset_pose();
                             }
@@ -962,14 +1030,22 @@ impl Runtime {
                         }
                     }
                 })();
+                self.track_pad_shortcut(true);
+                if changes_session {
+                    // The next request may use the selected device from this status.
+                    self.publisher.reliable(Event::Status {
+                        status: Box::new(self.status_snapshot()),
+                    })?;
+                }
                 self.publisher.reliable(Event::Reply {
                     id: request.id,
                     ok: result.is_ok(),
                     error: result.err().map(|e| format!("{e:#}")),
                     measurement,
                 })?;
-                self.track_pad_shortcut(true);
-                self.publish_status();
+                if !changes_session {
+                    self.publish_status();
+                }
                 if shutdown {
                     return Ok(false);
                 }
@@ -1014,6 +1090,8 @@ impl Runtime {
         self.status.navigation_events.clear();
         self.status.navigation_held.clear();
         self.status.input_chord.clear();
+        self.status.motion = Default::default();
+        self.status.calibration_progress = 0.0;
         self.status.message = "手柄已断开，已释放输出，正在等待原接口".into();
         self.next_discovery = Instant::now() + Duration::from_millis(500);
         self.publish_status();
@@ -1203,8 +1281,13 @@ impl Runtime {
         }
         if controls_event && !from_snapshot {
             self.sync_layers()?;
+            if !self.output_paused() {
+                if let Some(engine) = &mut self.engine {
+                    engine.advance_flick_input();
+                }
+            }
         }
-        if self.calibration.is_none() && !self.seeding {
+        if !self.output_paused() && !self.seeding {
             if let Some(engine) = &self.engine {
                 self.dispatch(engine.frame.clone())?;
             }
@@ -1229,8 +1312,7 @@ impl Runtime {
         ];
         let enabled = matches!(self.status.state.as_str(), "running" | "observing")
             && !self.status.ui_navigation
-            && !self.status.binding_capture
-            && self.calibration.is_none()
+            && !self.output_paused()
             && !self.seeding
             && !self.engine.as_ref().is_some_and(Engine::is_measuring);
         if baseline {
@@ -1353,6 +1435,7 @@ impl Runtime {
             self.set_binding_capture(false)?;
         }
         if self.capture_releasing
+            && !self.resync_input
             && !self.status.buttons.iter().any(|v| *v)
             && !self
                 .status
@@ -1386,7 +1469,7 @@ impl Runtime {
             .saturating_duration_since(self.last_advance)
             .as_secs_f32();
         self.last_advance = advance_at;
-        if self.calibration.is_some() || self.status.binding_capture {
+        if self.output_paused() {
             self.io_clock.begin_flush(pass);
             return Ok(());
         }
@@ -1403,6 +1486,38 @@ impl Runtime {
         self.io_clock.begin_flush(pass);
         if let Some(output) = &mut self.output {
             output.flush_output()?;
+        }
+        Ok(())
+    }
+    fn begin_input_resync(&mut self) -> Result<()> {
+        self.resync_input = true;
+        self.clear_outputs()?;
+        if let Some(engine) = &mut self.engine {
+            if engine.is_measuring() {
+                self.measurement_input_interrupted = true;
+                engine.reset_pose();
+                engine.motion.telemetry.measurement_error =
+                    Some("手柄输入积压，当前转角测量已中断，请重新测量".into());
+            } else {
+                engine.reset();
+            }
+            self.status.motion = engine.motion.telemetry.clone();
+        }
+        Ok(())
+    }
+    fn finish_input_resync(&mut self, snapshot: Vec<InputEvent>) -> Result<()> {
+        for event in snapshot {
+            self.input(event, true)?;
+        }
+        self.resync_input = false;
+        if !self.status.binding_capture {
+            self.sync_layers()?;
+        }
+        self.track_pad_shortcut(true);
+        if !self.output_paused() {
+            if let Some(engine) = &self.engine {
+                self.dispatch(engine.frame.clone())?;
+            }
         }
         Ok(())
     }
@@ -1428,26 +1543,41 @@ impl Runtime {
             let age = sdl.now_ns().saturating_sub(event.time().host_ns);
             if age > MAX_EVENT_AGE_NS {
                 self.status.stats.stale_events += 1;
-                self.clear_outputs()?;
-                if let Some(engine) = &mut self.engine {
-                    engine.reset();
+                if !self.resync_input {
+                    self.begin_input_resync()?;
                 }
+            }
+            // Once input continuity is lost, a newer tail event can still depend
+            // on an abandoned press or release. Resume only from a clean baseline.
+            if self.resync_input
+                || (self.measurement_input_interrupted
+                    && matches!(event, InputEvent::Gyro { .. } | InputEvent::Accel { .. }))
+            {
                 continue;
             }
             self.queue.add(age);
             let start = Instant::now();
-            self.input(event, self.config.is_none())?;
+            self.input(
+                event,
+                self.config.is_none() || self.measurement_input_interrupted,
+            )?;
             self.processing.add(start.elapsed().as_nanos() as u64);
         }
         if self.status.device.is_some() && self.connected_input().is_none() {
             self.lost_device()?;
         }
-        if drained
-            && self.config.is_some()
-            && self.calibration.is_none()
-            && !self.seeding
-            && !self.status.binding_capture
-        {
+        if self.resync_input {
+            if let Some(sdl) = self.sdl.as_ref().filter(|_| drained) {
+                let snapshot = sdl.snapshot();
+                match sdl.take_event()? {
+                    Some(InputEvent::Disconnected { .. }) => self.lost_device()?,
+                    Some(_) => {} // More input arrived during the snapshot; keep draining.
+                    None => self.finish_input_resync(snapshot)?,
+                }
+            }
+            return Ok(());
+        }
+        if drained && self.config.is_some() && !self.output_paused() && !self.seeding {
             if let Some(engine) = &mut self.engine {
                 let before = engine.base_trigger_inputs();
                 let changed = engine.advance_input(watermark);
@@ -1669,7 +1799,7 @@ pub fn run(dll: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use motion_core::{engine::PadState, timing::SampleTime};
+    use motion_core::{engine::PadState, output::GamepadStatus, timing::SampleTime};
     use std::{cell::RefCell, rc::Rc};
 
     #[test]
@@ -1715,6 +1845,141 @@ mod tests {
                 assert!(runtime.status.motion.measuring.is_none());
             }
         }
+    }
+
+    #[test]
+    fn input_resync_restores_held_controls_without_new_presses() {
+        let (mut runtime, held, _) = fixture();
+        runtime.input(down(), false).unwrap();
+        let previous = held.borrow().clone();
+        let serial = runtime.status.input_serial;
+        assert!(!previous.is_empty());
+
+        runtime.begin_input_resync().unwrap();
+        assert!(runtime.output_paused());
+        assert!(held.borrow().is_empty());
+
+        runtime.finish_input_resync(vec![down()]).unwrap();
+        assert!(!runtime.output_paused());
+        assert_eq!(*held.borrow(), previous);
+        assert_eq!(runtime.status.input_serial, serial);
+    }
+
+    #[test]
+    fn input_resync_interrupts_angle_measurement_until_finish() {
+        let (mut runtime, held, rx) = fixture();
+        let engine = runtime.engine.as_mut().unwrap();
+        engine.begin_measurement("yaw").unwrap();
+        engine.motion.telemetry.measured_degrees = 180.0;
+
+        runtime.begin_input_resync().unwrap();
+        runtime.finish_input_resync(vec![down()]).unwrap();
+        assert!(runtime.output_paused());
+        assert!(held.borrow().is_empty());
+        assert_eq!(runtime.status.motion.measuring.as_deref(), Some("yaw"));
+        assert!(runtime.status.motion.measurement_error.is_some());
+
+        runtime
+            .control(Control::Request(Request {
+                id: 1,
+                command: Command::EndMeasure {
+                    expected_revision: None,
+                },
+            }))
+            .unwrap();
+        assert!(rx.try_iter().any(|event| matches!(
+            event,
+            Event::Reply {
+                id: 1,
+                ok: true,
+                measurement: Some(result),
+                ..
+            } if result.error.is_some() && result.degrees == 180.0
+        )));
+        assert!(!runtime.output_paused());
+        assert!(runtime.status.motion.measuring.is_none());
+    }
+
+    #[test]
+    fn sensor_calibration_release_failure_stops_mapping_without_persisting() {
+        struct FailFirstRelease {
+            sink: Recording,
+            fail_release: bool,
+        }
+        impl Sink for FailFirstRelease {
+            fn button(&mut self, name: &str, down: bool) -> Result<()> {
+                if !down && std::mem::take(&mut self.fail_release) {
+                    bail!("simulated release failure");
+                }
+                self.sink.button(name, down)
+            }
+            fn mouse(&mut self, dx: i32, dy: i32) -> Result<()> {
+                self.sink.mouse(dx, dy)
+            }
+            fn gamepad(&mut self, pad: PadState) -> Result<()> {
+                self.sink.gamepad(pad)
+            }
+        }
+
+        let (mut runtime, held, rx) = fixture();
+        runtime.config.as_mut().unwrap().emit = true;
+        runtime.status.emitting = true;
+        runtime.output = Some(Dispatcher::new(Box::new(FailFirstRelease {
+            sink: Recording(held.clone()),
+            fail_release: true,
+        })));
+        runtime.input(down(), false).unwrap();
+        assert!(!held.borrow().is_empty());
+        runtime
+            .control(Control::Request(Request {
+                id: 1,
+                command: Command::SetSensorCalibration {
+                    calibration: Default::default(),
+                },
+            }))
+            .unwrap();
+
+        assert_eq!(runtime.status.state, "faulted");
+        assert!(!runtime.status.emitting);
+        assert!(runtime.output.is_none());
+        assert!(held.borrow().is_empty());
+        let events: Vec<_> = rx.try_iter().collect();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, Event::Calibration { .. })));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Reply {
+                id: 1, ok: false, ..
+            }
+        )));
+    }
+
+    #[test]
+    fn sensor_calibration_saved_while_waiting_does_not_block_reconnect() {
+        let (mut runtime, _, rx) = fixture();
+        runtime.lost_device().unwrap();
+        runtime
+            .control(Control::Request(Request {
+                id: 1,
+                command: Command::SetSensorCalibration {
+                    calibration: Box::new(motion_core::motion_config::SensorCalibration {
+                        gyro_noise_dps: 0.25,
+                        ..Default::default()
+                    }),
+                },
+            }))
+            .unwrap();
+
+        assert_eq!(runtime.status.state, "waiting");
+        assert!(runtime.engine.is_none());
+        assert!(runtime.output.is_none());
+        let config = runtime.config.as_ref().unwrap();
+        assert_eq!(config.sensor_calibration.gyro_noise_dps, 0.25);
+        assert!(rx.try_iter().any(|event| matches!(
+            event,
+            Event::Calibration { sensor, .. } if sensor.gyro_noise_dps == 0.25
+        )));
     }
 
     #[test]
@@ -2173,14 +2438,15 @@ mod tests {
                 },
             }))
             .unwrap();
-        let states: Vec<_> = rx
-            .try_iter()
-            .filter_map(|event| match event {
-                Event::Status { status } => Some(status.state),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(states, ["waiting"]);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::Status { status } if status.state == "waiting"
+        ));
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Event::Reply { id: 1, ok: true, .. }
+        ));
+        assert!(rx.try_recv().is_err());
     }
     #[test]
     fn output_is_verified_during_profile_reprepare_and_before_emission() {
@@ -2475,10 +2741,23 @@ mod tests {
         runtime.status.profile_id = Some("combat".into());
         (runtime, held, rx)
     }
+    fn mock_xbox_status() -> GamepadStatus {
+        GamepadStatus {
+            target: GamepadTarget::Xbox360,
+            backend: GamepadBackend::Vigem,
+            connected: true,
+            player_index: Some(0),
+            protected_devices: Vec::new(),
+        }
+    }
+
     #[test]
     fn feedback_capture_waits_for_touch_release_and_requires_a_fresh_game_command() {
         struct FeedbackSink(Arc<Mutex<motion_core::feedback::FeedbackFrame>>);
         impl Sink for FeedbackSink {
+            fn gamepad_status(&self) -> Option<GamepadStatus> {
+                Some(mock_xbox_status())
+            }
             fn feedback(&mut self) -> Option<motion_core::feedback::FeedbackFrame> {
                 Some(self.0.lock().unwrap().clone())
             }
@@ -2499,7 +2778,10 @@ mod tests {
             lightbar: None,
         }));
         runtime.output = Some(Dispatcher::new(Box::new(FeedbackSink(frame.clone()))));
-        runtime.config.as_mut().unwrap().emit = true;
+        let config = runtime.config.as_mut().unwrap();
+        config.emit = true;
+        config.profile.virtual_gamepad = GamepadTarget::Xbox360;
+        runtime.engine = Some(Engine::new(config.profile.clone()).unwrap());
         runtime.status.emitting = true;
         runtime.update_feedback();
         assert_eq!(runtime.feedback.status.rumble, [0.5, 0.25]);
@@ -2682,6 +2964,91 @@ mod tests {
             runtime.engine.as_ref().unwrap().profile.virtual_gamepad,
             GamepadTarget::DualShock4
         );
+    }
+
+    #[test]
+    fn keyboard_mouse_profile_keeps_neutral_pad_connected_until_reused() {
+        struct RecordingPad {
+            reports: Rc<RefCell<Vec<Option<PadState>>>>,
+            feedback_sequence: u64,
+        }
+        impl Sink for RecordingPad {
+            fn gamepad_status(&self) -> Option<GamepadStatus> {
+                Some(mock_xbox_status())
+            }
+            fn feedback(&mut self) -> Option<motion_core::feedback::FeedbackFrame> {
+                self.feedback_sequence += 1;
+                Some(motion_core::feedback::FeedbackFrame {
+                    sequence: self.feedback_sequence,
+                    rumble: [0.5, 0.25],
+                    lightbar: None,
+                })
+            }
+            fn button(&mut self, _: &str, _: bool) -> Result<()> {
+                Ok(())
+            }
+            fn mouse(&mut self, _: i32, _: i32) -> Result<()> {
+                Ok(())
+            }
+            fn gamepad(&mut self, pad: PadState) -> Result<()> {
+                self.reports.borrow_mut().push(Some(pad));
+                Ok(())
+            }
+        }
+        impl Drop for RecordingPad {
+            fn drop(&mut self) {
+                self.reports.borrow_mut().push(None);
+            }
+        }
+
+        let (mut runtime, _, rx) = fixture();
+        let config = runtime.config.as_mut().unwrap();
+        let keyboard_mouse = config.profile.clone();
+        config.emit = true;
+        config.profile.virtual_gamepad = GamepadTarget::Xbox360;
+        let gamepad = config.profile.clone();
+        runtime.engine = Some(Engine::new(gamepad.clone()).unwrap());
+        let reports = Rc::new(RefCell::new(Vec::new()));
+        runtime.output = Some(Dispatcher::new(Box::new(RecordingPad {
+            reports: reports.clone(),
+            feedback_sequence: 0,
+        })));
+        runtime.status.emitting = true;
+        runtime.input(down(), false).unwrap();
+        runtime.update_feedback();
+        assert_eq!(runtime.feedback.status.rumble, [0.5, 0.25]);
+        assert_ne!(reports.borrow()[0], Some(PadState::default()));
+
+        runtime
+            .apply("mouse".into(), keyboard_mouse, "mouse.toml".into())
+            .unwrap();
+        runtime.input(down(), false).unwrap();
+        runtime.update_feedback();
+        assert!(!runtime.feedback.status.active);
+        assert_eq!(runtime.feedback.status.rumble, [0.; 2]);
+        assert_eq!(reports.borrow()[1], Some(PadState::default()));
+        assert!(reports.borrow()[1..]
+            .iter()
+            .all(|report| *report == Some(PadState::default())));
+        runtime.publish_status();
+        assert!(matches!(
+            rx.try_iter().last(),
+            Some(Event::Status { status }) if status.output_gamepad.is_none()
+        ));
+
+        runtime
+            .apply("pad".into(), gamepad, "pad.toml".into())
+            .unwrap();
+        runtime.input(down(), false).unwrap();
+        assert!(matches!(
+            reports.borrow().last(),
+            Some(Some(pad)) if *pad != PadState::default()
+        ));
+        assert!(reports.borrow().iter().all(Option::is_some));
+        runtime.stop("F12").unwrap();
+        assert!(reports
+            .borrow()
+            .ends_with(&[Some(PadState::default()), None]));
     }
 
     #[test]

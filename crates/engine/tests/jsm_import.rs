@@ -11,11 +11,16 @@ fn convert(text: &str) -> motion_core::jsm_import::JsmImport {
     p
 }
 #[test]
-fn imported_flick_uses_jsm_release_curve_and_retains_its_duration() {
-    let p = convert("GYRO_SENS=2\nRIGHT_STICK_MODE=FLICK\nFLICK_TIME=0.15");
+fn imported_flick_preserves_jsm_timing_and_ignores_stick_aim_sensitivity() {
+    let p = convert("GYRO_SENS=2\nRIGHT_STICK_MODE=FLICK\nFLICK_TIME=0.15\nSTICK_SENS=0");
     assert!(p.profile.gyro.motion.flick.enabled);
     assert_eq!(p.profile.gyro.motion.flick.release_ease, 0.5);
     assert_eq!(p.profile.gyro.motion.flick.smooth_ms, 150.);
+    assert_eq!(p.skipped, 0);
+    assert!(p
+        .lines
+        .iter()
+        .any(|line| line.source == "STICK_SENS=0" && line.status == "ignored"));
 }
 
 #[test]
@@ -160,11 +165,29 @@ fn invalid_numbers_do_not_discard_other_supported_actions_or_enable_gyro() {
     assert!(p.skipped >= 4);
 }
 #[test]
-fn gyro_can_be_disabled_without_losing_standalone_buttons() {
-    let p = convert("GYRO_SENS=2\nGYRO_ON=NONE\nS=SPACE\nRIGHT_STICK_MODE=AIM");
-    assert!(!p.profile.gyro.enabled);
-    assert!(!p.profile.gyro.motion.flick.stick_aim);
-    assert_eq!(p.profile.actions.len(), 1);
+fn gyro_can_be_disabled_without_losing_standalone_aim_or_flick() {
+    for gate in ["", "GYRO_SENS=0\n", "GYRO_SENS=2\nGYRO_ON=NONE\n"] {
+        for mode in ["AIM", "FLICK"] {
+            let p = convert(&format!("{gate}S=SPACE\nRIGHT_STICK_MODE={mode}"));
+            assert!(!p.profile.gyro.enabled);
+            assert!(p.profile.gyro.motion.flick.standalone);
+            assert_eq!(p.profile.gyro.motion.flick.enabled, mode == "FLICK");
+            assert_eq!(p.profile.gyro.motion.flick.stick_aim, mode == "AIM");
+            assert_eq!(p.profile.actions.len(), 1);
+            assert_eq!(p.skipped, 0);
+
+            let mut engine = Engine::new(p.profile).unwrap();
+            engine.process(&InputEvent::Axis {
+                time: SampleTime {
+                    host_ns: 1_000_000,
+                    sensor_ns: 0,
+                },
+                index: 2,
+                value: 32767,
+            });
+            assert!(engine.advance(0.01, 10_000_000).mouse_delta[0] > 0.);
+        }
+    }
 }
 #[test]
 fn external_commands_are_reported_and_never_followed_or_executed() {
@@ -247,22 +270,44 @@ fn no_gyro_button_and_gyro_off_choose_the_last_gate() {
 }
 #[test]
 fn bound_gyro_actions_use_existing_gates_without_running_jsm_commands() {
-    let p = convert("GYRO_SENS=2\nGYRO_ON=NONE\nL=^GYRO_ON\nR=GYRO_TRACKBALL");
-    assert!(p.profile.gyro.enabled);
-    assert_eq!(p.profile.gyro.activation, "left_shoulder");
-    assert!(matches!(
-        p.profile.gyro.activation_mode,
-        motion_core::profile::GyroActivationMode::Toggle
-    ));
-    assert_eq!(
-        p.profile.gyro.motion.trackball.horizontal_input.as_deref(),
-        Some("right_shoulder")
-    );
-    assert_eq!(
-        p.profile.gyro.motion.trackball.vertical_input.as_deref(),
-        Some("right_shoulder")
-    );
-    assert!(p.profile.actions.is_empty());
+    use motion_core::profile::GyroActivationMode::{Hold, Toggle};
+
+    for (gyro_action, activation_mode, stick_mode) in
+        [("GYRO_ON", Hold, "AIM"), ("^GYRO_ON", Toggle, "FLICK")]
+    {
+        let p = convert(&format!(
+            "GYRO_SENS=2\nGYRO_ON=NONE\nRIGHT_STICK_MODE={stick_mode}\nSTICK_SENS=480 360\nL={gyro_action}\nR=GYRO_TRACKBALL\nS=GYRO_OFF"
+        ));
+        let gyro = &p.profile.gyro;
+        assert!(gyro.enabled);
+        assert_eq!(gyro.activation, "left_shoulder");
+        assert_eq!(gyro.activation_mode, activation_mode);
+        assert_eq!(gyro.pause_input.as_deref(), Some("south"));
+        assert!(!gyro.motion.flick.standalone);
+        assert_eq!(gyro.motion.flick.enabled, stick_mode == "FLICK");
+        assert_eq!(gyro.motion.flick.stick_aim, stick_mode == "AIM");
+        if stick_mode == "AIM" {
+            assert_eq!(gyro.motion.flick.max_dps, 480.);
+            assert_eq!(gyro.motion.flick.vertical_ratio, 0.75);
+        }
+        assert_eq!(
+            gyro.motion.trackball.horizontal_input.as_deref(),
+            Some("right_shoulder")
+        );
+        assert_eq!(
+            gyro.motion.trackball.vertical_input.as_deref(),
+            Some("right_shoulder")
+        );
+        assert!(p.profile.actions.is_empty());
+        assert_eq!(p.skipped, 0);
+    }
+}
+#[test]
+fn a_gyro_off_binding_can_pause_a_configured_hold_but_cannot_replace_the_pause() {
+    let p = convert("GYRO_SENS=2\nGYRO_ON=ZL\nR=GYRO_OFF\nS=GYRO_OFF");
+    assert_eq!(p.profile.gyro.activation, "left_trigger_soft");
+    assert_eq!(p.profile.gyro.pause_input.as_deref(), Some("right_shoulder"));
+    assert_eq!(p.skipped, 1);
 }
 #[test]
 fn unsupported_gyro_output_gate_or_axes_cannot_fall_back_to_unconditional_mouse_motion() {

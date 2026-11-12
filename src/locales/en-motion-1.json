@@ -110,6 +110,7 @@
   "Flick Stick 与摇杆瞄准": "Flick Stick and stick aiming",
   "启用 Flick Stick": "Enable Flick Stick",
   "启用配套摇杆瞄准": "Enable companion stick aiming",
+  "关闭体感时也启用": "Enable even when gyro is off",
   "使用摇杆": "Stick",
   "与体感共用输出 · 鼠标": "Shared with gyro · Mouse",
   "与体感共用输出 · 虚拟右摇杆": "Shared with gyro · Virtual right stick",

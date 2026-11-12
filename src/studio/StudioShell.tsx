@@ -46,6 +46,12 @@ type Props = {
   onStartMapping: () => void;
   onStopMapping: () => void;
   calibrating: boolean;
+  stationaryCalibration: {
+    ready: boolean;
+    blocked: boolean;
+    progress?: number;
+    onStart: () => void;
+  };
   outputDisabled: boolean;
   busy: boolean;
   dirty: boolean;
@@ -136,6 +142,10 @@ export function StudioShell(props: Props) {
     : props.calibrating || props.capturing ? '输出已暂停' : '映射已停止';
   const stopAction = props.outputOn || props.waiting;
   const actionLabel = props.preparing ? '取消启动' : props.waiting ? '取消等待' : stopAction ? '停止映射' : '启动映射';
+  const calibration = props.stationaryCalibration;
+  const calibrationHint = props.calibrating ? props.status
+    : calibration.ready ? '放稳手柄，2 秒后开始采样，约 5 秒完成。'
+    : '先开始观察输入，再进行校准。';
 
   return (
     <div className={styles.shell}>
@@ -161,6 +171,12 @@ export function StudioShell(props: Props) {
               disabled={outputBlocked} onClick={props.onGamepad} title="方向移动，A 确认，B 返回；View + Menu 切回界面">
               <StudioIcon name="games" size={16}/>手柄操作中
             </button>}
+            <button type="button" className={styles.calibrationAction + ' secondary-btn'}
+              aria-label="陀螺仪静止校准" title={calibrationHint}
+              disabled={calibration.blocked} onClick={calibration.onStart}>
+              <StudioIcon name="gyro" size={16} />
+              {props.calibrating ? '正在校准…' : '静止校准'}
+            </button>
             <div className={styles.outputControls}>
               <button type="button" className={styles.mappingAction + ' ' + (stopAction ? 'danger-btn' : 'primary-btn')}
                 disabled={outputBlocked || props.outputDisabled} onClick={stopAction ? props.onStopMapping : props.onStartMapping}>
@@ -222,6 +238,8 @@ export function StudioShell(props: Props) {
             <span className={styles.outputStatus} data-running={props.outputOn}>
               <span className={styles.statusDot} aria-hidden="true" />{outputLabel}
             </span>
+            {calibration.progress !== undefined && <progress className={styles.calibrationProgress}
+              aria-label="传感器校准进度" max={1} value={calibration.progress} />}
             <span className={styles.statusMessage} title={props.status}>{props.status}</span>
             <span className={styles.connection}>{props.deviceCount ? props.deviceCount + ' 台设备' : '未连接设备'}</span>
             <span className={styles.stopHint}><kbd>F12</kbd> 停止映射</span>

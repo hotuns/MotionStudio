@@ -377,9 +377,9 @@
     {
       "path": "crates/engine/src/eval/modules/rws.rs",
       "upstreamSha256": "fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96",
-      "vendoredSha256": "c3bd9c9ce6d2471274ffc66b704746adc2183797ed462347b251f554ad0c487a",
+      "vendoredSha256": "4840dc7ec5cbaef1b80e81d865bbc9265b1aed530ffe8ff57241e5c8fa5c6879",
       "modified": true,
-      "notes": "Add optional flick_release_ease (default 0 for upstream callers, range 0–1) for the initial Flick. Strength 0.5 reproduces JSM quadratic easing. Preserve total angle and duration with two cumulative-progress state slots. Tracking, companion aim, gesture and sensor paths retain their existing algorithms."
+      "notes": "Add optional flick_release_ease (default 0 for upstream callers, range 0–1) for the initial Flick. Strength 0.5 reproduces JSM quadratic easing. Preserve total angle and duration with two cumulative-progress state slots. Optional flick_input_dt lets Studio observe FIFO gestures between output ticks; the default keeps the original single-clock behavior."
     },
     {
       "path": "crates/engine/src/eval/modules/shared.rs",

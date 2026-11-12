@@ -973,68 +973,6 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
         p.gyro.enabled = false;
         warnings.push("体感的输出、坐标、开关或校准存在无法迁移的关键项，已关闭体感；核验后可在体感调校中手动开启。".into());
     }
-    let mut sticks: Vec<_> = ["LEFT_STICK_MODE", "RIGHT_STICK_MODE"]
-        .iter()
-        .filter_map(|key| settings.get(*key))
-        .collect();
-    sticks.sort_by_key(|s| s.index);
-    let mut chosen = false;
-    for s in sticks {
-        apply(&mut p, &mut lines, s, |p| {
-            match s.value.as_str() {
-                "NO_MOUSE" => {
-                    if s.key.starts_with("LEFT") {
-                        p.input.lstick_directions = StickDirections::EightWay;
-                    } else {
-                        p.input.rstick_directions = StickDirections::EightWay;
-                    }
-                    return Ok(None);
-                }
-                "LEFT_STICK" | "RIGHT_STICK" if p.virtual_gamepad != GamepadTarget::None => {
-                    return Ok(None)
-                }
-                "AIM" | "FLICK" if !chosen => {}
-                "AIM" | "FLICK" => bail!("当前只能把一个摇杆用于瞄准／Flick，请手动选择"),
-                _ => bail!("该摇杆模式暂不能迁移"),
-            }
-            let values = settings
-                .get("STICK_SENS")
-                .map(|s| pair(&s.value))
-                .unwrap_or(Ok([360.; 2]))?;
-            let f = &mut p.gyro.motion.flick;
-            f.stick = if s.key.starts_with("LEFT") {
-                Stick::Left
-            } else {
-                Stick::Right
-            };
-            f.enabled = s.value == "FLICK";
-            if f.enabled {
-                f.release_ease = 0.5;
-            }
-            f.stick_aim = s.value == "AIM";
-            f.max_dps = values[0];
-            f.vertical_ratio = values[1] / values[0];
-            if !p.gyro.enabled {
-                bail!("当前摇杆瞄准／Flick 共用体感启用开关，关闭体感的配置不能等价迁移此模式");
-            }
-            Ok(Some(
-                "已转换为摇杆瞄准／Flick；摇杆加速度、门限和独立轴设置需核验",
-            ))
-        });
-        if lines[s.index].status != "skipped" && matches!(s.value.as_str(), "AIM" | "FLICK") {
-            chosen = true;
-        }
-    }
-    if let Some(s) = settings.get("STICK_SENS") {
-        if !chosen {
-            mark(
-                &mut lines,
-                s.index,
-                "skipped",
-                "未转换对应的 AIM／FLICK 摇杆模式，灵敏度未应用",
-            );
-        }
-    }
     // Ordinary actions only. Side effects and multi-event bindings remain in the report.
     let mut ordered: Vec<_> = bindings.values().collect();
     ordered.sort_by_key(|s| s.index);
@@ -1108,8 +1046,8 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                         };
                     }
                     "GYRO_OFF" => {
-                        if p.gyro.activation != "always" || p.gyro.pause_input.is_some() {
-                            bail!("已有体感开启／暂停规则，不能等价叠加此绑定");
+                        if p.gyro.pause_input.is_some() {
+                            bail!("已有体感暂停按键，不能叠加此绑定");
                         }
                         p.gyro.pause_input = Some(input.clone());
                     }
@@ -1212,6 +1150,75 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             },
             note,
         );
+    }
+    // A GYRO_ON binding can enable gyro with a hold or toggle gate after GYRO_ON=NONE.
+    let mut sticks: Vec<_> = ["LEFT_STICK_MODE", "RIGHT_STICK_MODE"]
+        .iter()
+        .filter_map(|key| settings.get(*key))
+        .collect();
+    sticks.sort_by_key(|s| s.index);
+    let aim_requested = sticks.iter().any(|s| s.value == "AIM");
+    let mut chosen = false;
+    for s in sticks {
+        apply(&mut p, &mut lines, s, |p| {
+            match s.value.as_str() {
+                "NO_MOUSE" => {
+                    if s.key.starts_with("LEFT") {
+                        p.input.lstick_directions = StickDirections::EightWay;
+                    } else {
+                        p.input.rstick_directions = StickDirections::EightWay;
+                    }
+                    return Ok(None);
+                }
+                "LEFT_STICK" | "RIGHT_STICK" if p.virtual_gamepad != GamepadTarget::None => {
+                    return Ok(None)
+                }
+                "AIM" | "FLICK" if !chosen => {}
+                "AIM" | "FLICK" => bail!("当前只能把一个摇杆用于瞄准／Flick，请手动选择"),
+                _ => bail!("该摇杆模式暂不能迁移"),
+            }
+            if gyro_blocked {
+                bail!("体感存在无法等价迁移的关键项，请核验摇杆瞄准／Flick 设置");
+            }
+            let f = &mut p.gyro.motion.flick;
+            f.standalone = !p.gyro.enabled;
+            f.stick = if s.key.starts_with("LEFT") {
+                Stick::Left
+            } else {
+                Stick::Right
+            };
+            f.enabled = s.value == "FLICK";
+            if f.enabled {
+                f.release_ease = 0.5;
+            }
+            f.stick_aim = s.value == "AIM";
+            if f.stick_aim {
+                let [horizontal, vertical] = settings
+                    .get("STICK_SENS")
+                    .map(|s| pair(&s.value))
+                    .unwrap_or(Ok([360.; 2]))?;
+                f.max_dps = horizontal;
+                f.vertical_ratio = vertical / horizontal;
+            }
+            Ok(Some(
+                "已转换为摇杆瞄准／Flick；摇杆加速度、门限和独立轴设置需核验",
+            ))
+        });
+        if lines[s.index].status != "skipped" && matches!(s.value.as_str(), "AIM" | "FLICK") {
+            chosen = true;
+        }
+    }
+    if let Some(s) = settings.get("STICK_SENS") {
+        if p.gyro.motion.flick.enabled && !aim_requested {
+            mark(&mut lines, s.index, "ignored", "STICK_SENS 仅影响 AIM 摇杆瞄准");
+        } else if !p.gyro.motion.flick.stick_aim {
+            mark(
+                &mut lines,
+                s.index,
+                "skipped",
+                "未转换对应的 AIM 摇杆瞄准模式，灵敏度未应用",
+            );
+        }
     }
     p.materialize_gamepad_bindings();
     p.validate().context("转换后的配置校验失败")?;

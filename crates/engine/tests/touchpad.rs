@@ -72,6 +72,7 @@ fn native_pointer_uses_contact_deltas_once_and_does_not_replay_between_events() 
     let mut e = Engine::new(profile()).unwrap();
     touch(&mut e, 10, 0, 0, true, 0.5, 0.5);
     assert_eq!(e.frame.mouse_delta, [0.; 2]);
+    e.advance_output(0.01, 25_000_000);
     touch(&mut e, 20, 0, 0, true, 0.6, 0.4);
     assert!((e.frame.mouse_delta[0] - 140.).abs() < 0.001);
     assert!((e.frame.mouse_delta[1] + 140.).abs() < 0.001);
@@ -85,7 +86,7 @@ fn native_tap_pulses_release_without_more_touch_events() {
     touch(&mut e, 50, 0, 0, false, 0., 0.);
     assert!(e.frame.held.contains("mouse:left"));
     for ms in [60, 70, 80, 90] {
-        advance(&mut e, ms);
+        e.advance_input(ms * 1_000_000);
     }
     assert!(e.frame.held.is_empty());
 }

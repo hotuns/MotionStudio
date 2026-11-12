@@ -278,6 +278,12 @@ pub struct Gyro {
     pub acceleration: GyroAcceleration,
     pub motion: crate::motion_config::MotionConfig,
 }
+impl Gyro {
+    pub(crate) fn flick_available(&self) -> bool {
+        let flick = &self.motion.flick;
+        (self.enabled || flick.standalone) && (flick.enabled || flick.stick_aim)
+    }
+}
 impl Default for Gyro {
     fn default() -> Self {
         Self {
@@ -567,7 +573,7 @@ impl Profile {
         if g.enabled && needs_pad && self.virtual_gamepad == GamepadTarget::None {
             bail!("当前体感模式或动作需要选择虚拟手柄输出");
         }
-        if g.enabled
+        if (g.enabled || g.flick_available())
             && g.output == GyroOutput::RightStick
             && self.virtual_gamepad == GamepadTarget::None
         {

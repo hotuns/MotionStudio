@@ -150,6 +150,7 @@ impl Default for Rotation {
 #[serde(default, deny_unknown_fields)]
 pub struct Flick {
     pub enabled: bool,
+    pub standalone: bool,
     pub stick: Stick,
     #[serde(rename = "output", skip_serializing)]
     _legacy_output: serde::de::IgnoredAny,
@@ -171,6 +172,7 @@ impl Default for Flick {
     fn default() -> Self {
         Self {
             enabled: false,
+            standalone: false,
             stick: Stick::Right,
             _legacy_output: serde::de::IgnoredAny,
             enable_input: None,

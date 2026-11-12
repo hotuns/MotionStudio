@@ -178,8 +178,9 @@ export function FlickStickSettings({profile, update}: Props) {
   return <Group title="Flick Stick 与摇杆瞄准">
     <Toggle label="启用 Flick Stick" value={m.flick.enabled} onChange={v=>flickChange('enabled',v)}/>
     <Toggle label="启用配套摇杆瞄准" value={m.flick.stick_aim} onChange={v=>flickChange('stick_aim',v)}/>
-    {(m.flick.enabled || m.flick.stick_aim) && !profile.gyro.enabled && <p className={styles.hint}>请在「体感」页启用体感，以使用 Flick Stick 和配套摇杆瞄准。</p>}
     {(m.flick.enabled||m.flick.stick_aim)&&<>
+      <Toggle label="关闭体感时也启用" value={m.flick.standalone ?? false} onChange={v=>flickChange('standalone',v)}/>
+      {!m.flick.standalone && !profile.gyro.enabled && <p className={styles.hint}>请在「体感」页启用体感，以使用 Flick Stick 和配套摇杆瞄准。</p>}
       <Choice label="Flick 使用的摇杆" value={m.flick.stick} options={sticks} onChange={v=>flickChange('stick',v)}/>
       <p className={styles.hint}>{profile.gyro.output === 'right_stick'
         ? '与体感共用输出 · 虚拟右摇杆'

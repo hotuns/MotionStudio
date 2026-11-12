@@ -30,6 +30,8 @@
   "JSM 配置需要 1–16 个文件": "A JSM profile requires 1–16 files",
   "JSM 文件名无效": "Invalid JSM filename",
   "JSM 文件名重复：{0}": "Duplicate JSM filename: {0}",
+  "已有体感暂停按键，不能叠加此绑定": "A gyro pause control is already configured. This binding cannot be added.",
+  "体感存在无法等价迁移的关键项，请核验摇杆瞄准／Flick 设置": "A required gyro setting could not be converted. Check the stick aiming or Flick configuration.",
   "JSM 文件合计需在 200 KiB 和 4096 行以内": "JSM files must total at most 200 KiB and 4096 lines",
   "请输入 JSM 主配置内容": "Enter the main JSM configuration",
   "JSM 配置存在无法运行的行：{0}，第 {1} 行：{2}": "JSM source cannot run at {0}, line {1}: {2}",

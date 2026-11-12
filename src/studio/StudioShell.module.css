@@ -15,6 +15,7 @@
 .outputStatus { display: inline-flex; align-items: center; gap: 6px; color: var(--text-mid); white-space: nowrap; }
 .outputStatus[data-running='true'] { color: var(--toast-success-text); }
 .mappingAction { min-height: 30px; padding-inline: 12px; white-space: nowrap; }
+.calibrationAction { flex-shrink: 0; white-space: nowrap; }
 .statusDot, .dirtyDot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 .dirtyDot { background: #b77922; }.savedIcon { display: flex; color: var(--text-muted); }
 .tools { position: relative; }
@@ -47,6 +48,7 @@
 .footerActions button { font-size: 12px; display: inline-flex; align-items: center; gap: 9px; }
 .statusBar { display: flex; align-items: center; gap: 12px; min-height: 30px; padding: 4px 12px; font-size: 11px; color: var(--text-mid); }
 .statusMessage { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.calibrationProgress { flex-shrink: 0; width: 64px; height: 6px; }
 .connection, .stopHint { flex-shrink: 0; white-space: nowrap; }
 .stopHint { padding-left: 12px; border-left: 1px solid var(--border-1); }
 .shell :global(input[type='range']) { accent-color: var(--accent); }

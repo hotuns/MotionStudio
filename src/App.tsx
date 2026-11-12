@@ -153,6 +153,8 @@ export default function App() {
   const canRecordGyro = !!snapshot?.engine_ready && !!device?.gamepad && device.origin !== 'virtual' && !device.open_error && !waiting;
   const canCalibrate = !!status?.device?.gyro && status.device.path===devicePath &&
     ['running','observing'].includes(status.state) && !captureActive && !status.motion?.measuring;
+  const calibrationBlocked = !native || busy || calibrating || captureActive ||
+    !!status?.motion?.measuring || !!batch || !!bindingWindowId;
   const appliedId = active ? status?.profile_id : workspace?.settings.selected_profile;
   const pending = dirty || !!(draft && (draft.id !== appliedId || (active && draft.id === failedApplyId)));
   const needsBindings = !!draft && hasUnboundActions(draft.profile);
@@ -663,12 +665,16 @@ export default function App() {
   }
 
   function calibrate() {
+    if (calibrationBlocked) return;
     if (!canCalibrate) {
       navigate('controllerStatus');
       notify('请先在「设备与输入」开始观察体感，再静止校准。');
       return;
     }
-    void run(() => invoke('engine_action', { action: 'calibrate' }));
+    void run(async () => {
+      await invoke('engine_action', { action: 'calibrate' });
+      await syncEngineSnapshot();
+    });
   }
 
   function motionAction(action: string, axis?: number, positive?: boolean) {
@@ -723,7 +729,8 @@ export default function App() {
     : captureActive || calibrating || status?.motion?.measuring || batch || bindingWindowId ? '请先结束录入或校准，再安装更新。'
     : busy || status?.state === 'preparing_output' ? '请等待当前操作完成。' : null;
   const dialogError = notice?.error ? notice.text : undefined;
-  const shellStatus = needsBindings ? '请先给待绑定的动作设置手柄输入。' :
+  const shellStatus = calibrating ? status.message :
+    needsBindings ? '请先给待绑定的动作设置手柄输入。' :
     dirty ? '保存到文件，或应用为当前配置。' :
     pending ? '点击应用修改可切换当前配置。' : status?.message || '连接设备后可开始测试。';
 
@@ -742,6 +749,12 @@ export default function App() {
       outputDisabled={!snapshot?.engine_ready || (!draft && !status?.emitting && !waiting)}
       onStartMapping={() => void run(() => startMapping(true))} onStopMapping={stop}
       calibrating={calibrating} busy={busy} dirty={dirty} pending={pending}
+      stationaryCalibration={{
+        ready: canCalibrate,
+        blocked: calibrationBlocked,
+        progress: calibrating ? status.calibration_progress : undefined,
+        onStart: calibrate,
+      }}
       canSave={canSave} canApply={canApply} deviceCount={deviceCount} status={shellStatus} capturing={captureActive}
       language={workspace?.settings.language??getLanguage()} languageDisabled={busy||!workspace||!!capture}
       updateVersion={studioUpdate.release?.version}
@@ -789,7 +802,7 @@ export default function App() {
         busy={busy} canObserve={canObserve} onSelect={selectDevice} onObserve={() => void run(() => startMapping(false))}
         calibration={device?.gyro && workspace && <DeviceCalibration key={device.path} device={device} status={status}
           sensor={workspace.settings.motion_calibrations[devicePath]} canCalibrate={canCalibrate}
-          calibrating={calibrating&&status?.device?.path===devicePath} blocked={locked||captureActive||!!status?.motion?.measuring}
+          calibrating={calibrating&&status?.device?.path===devicePath} blocked={calibrationBlocked}
           onCalibrate={calibrate} onMotionAction={motionAction}
           onSaveSensor={calibration=>void run(async()=>{await invoke('save_sensor_calibration',{devicePath,calibration});await refresh();},'设备校准已保存')}/>}
         onStop={stop} onScan={() => void run(() => invoke('engine_action', { action: 'scan' }))} onSettings={() => navigate('settings')} />
