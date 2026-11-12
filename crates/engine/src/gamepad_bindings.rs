@@ -25,6 +25,8 @@ pub struct GamepadBinding {
     pub turbo_ms: Option<u32>,
     #[serde(default)]
     pub allow_simultaneous: bool,
+    #[serde(default = "crate::profile::default_chord_wait_ms")]
+    pub chord_wait_ms: u32,
 }
 
 impl GamepadBinding {
@@ -49,6 +51,7 @@ impl GamepadBinding {
             sustain: self.sustain,
             turbo_ms: self.turbo_ms,
             allow_simultaneous: self.allow_simultaneous,
+            chord_wait_ms: self.chord_wait_ms,
         }
     }
 }
@@ -87,6 +90,7 @@ pub(crate) fn standard_bindings(target: GamepadTarget) -> Vec<GamepadBinding> {
             sustain: true,
             turbo_ms: None,
             allow_simultaneous: false,
+            chord_wait_ms: crate::profile::default_chord_wait_ms(),
         })
         .collect()
 }
@@ -128,6 +132,7 @@ pub(crate) fn validate(bindings: &[GamepadBinding]) -> Result<()> {
     );
     let mut analog_outputs = HashSet::new();
     for binding in bindings {
+        crate::profile::validate_chord_wait(binding.chord_wait_ms)?;
         crate::profile::validate_activation(
             binding.threshold,
             binding.trigger_ms,

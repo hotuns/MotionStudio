@@ -23,7 +23,7 @@ import {ActionEditor} from './studio/ActionEditor';
 import {modifierOutputs} from './keyboard';
 import {listenForBindingInput} from './output-capture';
 import {ImportJsm} from './studio/ImportJsm';
-import {ImportFiles} from './studio/ImportFiles';
+import { pickImportFile } from './import-file';
 import {GamepadNavigation} from './studio/GamepadNavigation';
 import {LayerToolbar} from './studio/LayerToolbar';
 import {editingProfile,updateLayer} from './layers';
@@ -107,7 +107,7 @@ export default function App() {
   const [confirmDiscard, setConfirmDiscard] = useState<Entry | null>(null);
   const [help, setHelp] = useState(false);
   const [failedApplyId, setFailedApplyId] = useState<string | null>(null);
-  const [importingJsm,setImportingJsm]=useState(false),[importingToml,setImportingToml]=useState(false);
+  const [importingJsm,setImportingJsm]=useState(false);
   const [libraryView, setLibraryView] = useState<'local' | 'community'>('local');
   const [sharedImport, setSharedImport] = useState<{community?: CommunityProfile} | null>(null);
   const [gamepadPreference,setGamepadPreference]=useState(()=>localStorage.getItem('motion-studio-gamepad-ui')!=='off');
@@ -720,6 +720,19 @@ export default function App() {
     const path = await save({ title: t('导出配置'), defaultPath, filters: [{ name: t('Motion Studio 配置'), extensions: ['toml'] }] });
     if (path) await invoke('export_profile', { id: entry.id, path });
   }
+  function importTomlProfile() {
+    if (dirty) {
+      notify('请先保存或撤销当前配置的修改。', true);
+      return;
+    }
+    void run(async () => {
+      const file = await pickImportFile('toml');
+      if (!file) return;
+      const entry = await invoke<Entry>('import_profile', { content: file.text });
+      await refresh(entry.id);
+      notify('已导入为一份新配置');
+    });
+  }
   async function importSharedProfile(source: SharedSource) {
     const entry = await invoke<Entry>('import_shared_profile', {source});
     setWorkspace(current => current && {...current, profiles: [...current.profiles, entry]});
@@ -845,10 +858,8 @@ export default function App() {
           await invoke('copy_profile_code', {profile: entry.profile});
         }, '配置码已复制')}
         onSelect={selectProfile} onRename={name => update(profile => { profile.name = name; })}
-        onCreate={() => openCreate()} onImport={() => {
-          if (dirty) notify('请先保存或撤销当前配置的修改。', true);
-          else setImportingToml(true);
-        }} onImportJsm={openJsmImport} onExport={entry => void run(() => exportProfile(entry))} onDelete={entry => { setNotice(null); setDeleting(entry); }}
+        onCreate={() => openCreate()} onImport={importTomlProfile}
+        onImportJsm={openJsmImport} onExport={entry => void run(() => exportProfile(entry))} onDelete={entry => { setNotice(null); setDeleting(entry); }}
         onRestore={entry => void run(async () => { await invoke('restore_backup', { id: entry.id }); await refresh(entry.id); }, '已恢复上一份有效配置')}
         onSwitching={() => navigate('switching')} onFolder={() => openLocation('profiles')} />}
       {page === 'switching' && workspace && <SwitchSettings entries={entries} settings={workspace.settings} busy={busy}
@@ -892,7 +903,6 @@ export default function App() {
       navigate('games');
       notify('已导入为新的游戏配置，请核验转换结果后启用输出');
     }}/>}
-    {importingToml&&<ImportFiles kind="toml" onClose={()=>setImportingToml(false)} onSelect={content=>{setImportingToml(false);void run(async()=>{const entry=await invoke<Entry>('import_profile',{content});await refresh(entry.id);},'已导入为一份新配置');}}/>}
     {sharedImport && <ProfileShareDialog community={sharedImport.community} onClose={() => setSharedImport(null)}
       onImport={importSharedProfile}/>}
     {creating && <Dialog title="新建配置" description="选择一个起点，为游戏建立独立配置。" onClose={() => setCreating(false)} error={dialogError}

@@ -64,7 +64,8 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
     if (!controlFilter || !list || !scrollArea) return;
     const start = list.getBoundingClientRect().top;
     const {top,bottom} = scrollArea.getBoundingClientRect();
-    if (start < top || start > bottom - 170) {
+    const headerOffset = parseFloat(getComputedStyle(list).scrollMarginBlockStart) || 0;
+    if (start < top + headerOffset || start > bottom - 170) {
       clearFilter.current?.focus({preventScroll:true});
       list.scrollIntoView({block:'start', inline:'nearest'});
     }

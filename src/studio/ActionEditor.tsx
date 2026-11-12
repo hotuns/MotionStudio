@@ -36,7 +36,7 @@ export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubm
   const hasWheel=output.some(value=>wheelOutputs.includes(value));
   const analog=input.some(value=>/^(left|right)_trigger$|_stick_(up|down|left|right)$/.test(value));
   const validMs=(value:number|undefined|null,min:number,max:number)=>value==null||Number.isInteger(value)&&value>=min&&value<=max;
-  const ready=!!action.name.trim()&&input.length>0&&input.length<=4&&output.length>0&&output.length<=4&&Number.isFinite(action.threshold)&&action.threshold>=0&&action.threshold<1&&validMs(action.trigger_ms,10,5000)&&validMs(action.turbo_ms,20,2000)&&validMs(action.repeat_ms,20,2000);
+  const ready=!!action.name.trim()&&input.length>0&&input.length<=4&&output.length>0&&output.length<=4&&Number.isFinite(action.threshold)&&action.threshold>=0&&action.threshold<1&&validMs(action.trigger_ms,10,5000)&&validMs(action.turbo_ms,20,2000)&&validMs(action.repeat_ms,20,2000)&&validMs(action.chord_wait_ms,0,500);
   const nextOutput=(value:string)=>{
     if(modifiers.includes(value))return output.includes(value)?output.filter(part=>part!==value):[...output,value];
     if(!outputCombo)return [...output.filter(part=>modifiers.includes(part)),value];

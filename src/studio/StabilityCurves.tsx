@@ -94,6 +94,38 @@ export function FlickReleaseCurve({strength}: {strength: number}) {
   </>;
 }
 
+export function AccelerationCurve({acceleration}: {acceleration: Gyro['acceleration']}) {
+  const request = JSON.stringify({acceleration: {...acceleration, points: undefined}});
+  const [points, setPoints] = useState<Point[]>();
+  const [failedRequest, setFailedRequest] = useState<string>();
+
+  useEffect(() => {
+    let current = true;
+    const timer = window.setTimeout(async () => {
+      try {
+        const result = await invoke<Point[]>('preview_gyro_acceleration', JSON.parse(request));
+        if (current) {
+          setPoints(result);
+          setFailedRequest(undefined);
+        }
+      } catch {
+        if (current) setFailedRequest(request);
+      }
+    }, 45);
+    return () => {
+      current = false;
+      window.clearTimeout(timer);
+    };
+  }, [request]);
+
+  const failed = failedRequest === request;
+  return <>
+    <div className={styles.curveLegend}><span>参考线</span><span>当前设置</span></div>
+    <ResponseCurve title="加速倍率预览" points={failed ? undefined : points} xLabel="输入转速（°/s）" yLabel="倍率"/>
+    {failed && <p role="status" className="studio-muted">曲线暂未更新，请检查当前参数。</p>}
+  </>;
+}
+
 export const ResponseCurve = memo(function ResponseCurve({ title, points, xLabel, yLabel }: {
   title: string;
   points?: Point[];

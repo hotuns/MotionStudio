@@ -357,6 +357,29 @@ impl Default for GyroAcceleration {
     }
 }
 
+impl GyroAcceleration {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if !(1.0..=4.0).contains(&self.fast_multiplier)
+            || !(0.0..=1000.0).contains(&self.start_dps)
+            || !(1.0..=2000.0).contains(&self.full_dps)
+            || self.full_dps <= self.start_dps
+        {
+            bail!("快速转动倍率需为 1–4，达到最高倍率的角速度需高于加速起点");
+        }
+        for (name, value, min, max) in [
+            ("自然曲线半速", self.natural_half, 0.01, 4000.),
+            ("幂曲线参考速度", self.power_reference, 0.01, 4000.),
+            ("幂指数", self.power_exponent, 0.01, 10.),
+            ("S 曲线中点", self.sigmoid_mid, 0., 4000.),
+            ("S 曲线宽度", self.sigmoid_width, 0.01, 2000.),
+            ("跳变宽度", self.jump_width, 0., 2000.),
+        ] {
+            crate::motion_config::range(name, value, min, max)?;
+        }
+        crate::motion_config::points("体感加速曲线", &self.points, 4000., 10.)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StickMouse {
@@ -406,6 +429,17 @@ pub struct Action {
     pub turbo_ms: Option<u32>,
     #[serde(default)]
     pub allow_simultaneous: bool,
+    #[serde(default = "default_chord_wait_ms")]
+    pub chord_wait_ms: u32,
+}
+pub(crate) fn default_chord_wait_ms() -> u32 {
+    80
+}
+pub(crate) fn validate_chord_wait(ms: u32) -> Result<()> {
+    if ms > 500 {
+        bail!("组合等待时间需为 0–500 ms");
+    }
+    Ok(())
 }
 pub(crate) fn default_trigger_ms() -> u32 {
     250
@@ -516,6 +550,7 @@ impl Profile {
             bail!("摇杆外圈阈值或回差无效");
         }
         for action in &self.actions {
+            validate_chord_wait(action.chord_wait_ms)?;
             validate_activation(action.threshold, action.trigger_ms, action.turbo_ms)?;
             if action.name.trim().is_empty()
                 || crate::bindings::input_chord(&action.input).is_none()
@@ -545,22 +580,7 @@ impl Profile {
             bail!("姿态控制和体感旋转模式需要选择虚拟右摇杆输出");
         }
         g.motion.validate()?;
-        for (n, v, lo, hi) in [
-            ("自然曲线半速", g.acceleration.natural_half, 0.01, 4000.),
-            (
-                "幂曲线参考速度",
-                g.acceleration.power_reference,
-                0.01,
-                4000.,
-            ),
-            ("幂指数", g.acceleration.power_exponent, 0.01, 10.),
-            ("S 曲线中点", g.acceleration.sigmoid_mid, 0., 4000.),
-            ("S 曲线宽度", g.acceleration.sigmoid_width, 0.01, 2000.),
-            ("跳变宽度", g.acceleration.jump_width, 0., 2000.),
-        ] {
-            crate::motion_config::range(n, v, lo, hi)?;
-        }
-        crate::motion_config::points("体感加速曲线", &g.acceleration.points, 4000., 10.)?;
+        g.acceleration.validate()?;
         let needs_pad = g.motion.mode != crate::motion_config::MotionMode::Pointer
             || g.motion
                 .turns
@@ -581,14 +601,6 @@ impl Profile {
         }
         if !(30.0..=1440.0).contains(&g.stick_full_scale_dps) {
             bail!("满杆角速度需为 30–1440 °/s");
-        }
-        let a = &g.acceleration;
-        if !(1.0..=4.0).contains(&a.fast_multiplier)
-            || !(0.0..=1000.0).contains(&a.start_dps)
-            || !(1.0..=2000.0).contains(&a.full_dps)
-            || a.full_dps <= a.start_dps
-        {
-            bail!("快速转动倍率需为 1–4，达到最高倍率的角速度需高于加速起点");
         }
         if !g.smoothing_ms.is_finite()
             || !(0.0..=50.0).contains(&g.smoothing_ms)

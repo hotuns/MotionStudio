@@ -628,7 +628,7 @@
   "跳变过渡宽度": "Jump transition width",
   "转速 °/s": "Speed °/s",
   "倍率": "Multiplier",
-  "曲线从基础倍率过渡到「快速转动倍率」。自然、幂函数和 S 曲线主要使用各自的形状参数。": "The curve transitions from base sensitivity to the fast-turn multiplier. Natural, power and sigmoid curves use their own shape parameters.",
+  "加速倍率预览": "Acceleration multiplier preview",
   "自适应平滑": "Adaptive smoothing",
   "平滑方式": "Smoothing method",
   "EMA 时间平滑": "Time-based EMA",
@@ -2105,5 +2105,9 @@
   "使用摇杆 Flick 前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。校准后保持游戏灵敏度不变。": "For stick Flick, set a linear in-game stick curve and disable edge and other turn acceleration. Keep in-game sensitivity unchanged after calibration.",
   "连续瞄准基础转速": "Continuous aim base turn rate",
   "这三个参数只影响配套摇杆的连续瞄准，不改变快推 Flick 的目标转角。水平目标转速由基础转速、瞄准倍率和推杆进度共同决定，纵向再乘纵向比例。": "These three settings affect companion stick aiming only, not the target angle of a quick Flick. Horizontal target speed depends on the base rate, aim multiplier and stick progress; vertical speed also uses the vertical ratio.",
-  "「满杆角速度」是游戏实际满杆转速的校准值，用于把目标转速换算成虚拟摇杆幅度。提高连续瞄准基础转速不会提高游戏本身的满杆转速。": "Full-stick angular speed calibrates the game's actual maximum turn rate and converts target speed to virtual stick deflection. Increasing the continuous aim base rate cannot increase the game's maximum turn rate."
+  "「满杆角速度」是游戏实际满杆转速的校准值，用于把目标转速换算成虚拟摇杆幅度。提高连续瞄准基础转速不会提高游戏本身的满杆转速。": "Full-stick angular speed calibrates the game's actual maximum turn rate and converts target speed to virtual stick deflection. Increasing the continuous aim base rate cannot increase the game's maximum turn rate.",
+  "组合等待时间": "Chord waiting time",
+  "默认 80 ms。参与组合的单键暂缓输出；组合成立后取消单键，直到全部松开。设为 0 时不等待。": "Defaults to 80 ms. Individual mappings wait for the chord; completing it cancels them until every input is released. Set to 0 to disable waiting.",
+  "超过等待时间后按单键处理，本次按压不再触发组合。模拟扳机从开始扣动时计时。": "After the window expires, individual mappings take over and this press cannot trigger the chord. Analog triggers start the timer when travel begins.",
+  "组合等待时间需为 0–500 ms": "Chord waiting time must be between 0 and 500 ms"
 }

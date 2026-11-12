@@ -2344,6 +2344,7 @@ mod tests {
             sustain: true,
             turbo_ms: None,
             allow_simultaneous: false,
+            chord_wait_ms: 80,
         }];
         let sensitivity = base.gyro.sensitivity;
         base.layers.push(motion_core::layers::Layer {

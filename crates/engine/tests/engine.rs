@@ -172,6 +172,7 @@ fn binding(input: &str, output: &str) -> Action {
         sustain: true,
         turbo_ms: None,
         allow_simultaneous: false,
+        chord_wait_ms: 80,
     }
 }
 

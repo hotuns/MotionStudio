@@ -1,6 +1,13 @@
 //! Stage responses to synthetic input. These never touch the live device or profile.
-use super::{cc, cc_settings, cutoff_recovery, suppress_idle, AimSmoothing, MotionRuntime};
-use crate::{profile::Gyro, timing::SampleTime};
+use super::{
+    acceleration_gain, acceleration_settings, cc, cc_settings, cutoff_recovery, suppress_idle,
+    AimSmoothing, MotionRuntime,
+};
+use crate::{
+    motion_config::Curve,
+    profile::{Gyro, GyroAcceleration},
+    timing::SampleTime,
+};
 use anyhow::{ensure, Result};
 use flexinput_core::imu::{BUS_ACCEL_G, BUS_GYRO_DPS};
 use glam::{Vec2, Vec3};
@@ -9,6 +16,46 @@ use std::sync::OnceLock;
 
 /// Horizontal coordinate, reference value, processed value.
 type Point = [f32; 3];
+
+pub fn acceleration(a: &GyroAcceleration) -> Result<Vec<Point>> {
+    a.validate()?;
+    let settings = acceleration_settings(a);
+    let start = a.start_dps;
+    let mut speeds = vec![0., start];
+    // Sample each transition separately so narrow changes stay visible.
+    match a.curve {
+        Curve::Linear | Curve::Quadratic => speeds.push(a.full_dps),
+        Curve::Natural => speeds.push(start + 4. * a.natural_half),
+        Curve::Power => speeds.extend([start + a.power_reference, start + 4. * a.power_reference]),
+        Curve::Sigmoid => speeds.extend([
+            start + (a.sigmoid_mid - 4. * a.sigmoid_width).max(0.),
+            start + a.sigmoid_mid,
+            start + a.sigmoid_mid + 4. * a.sigmoid_width,
+        ]),
+        Curve::Jump => {
+            let before = if a.jump_width == 0. {
+                a.full_dps.next_down()
+            } else {
+                a.full_dps - 4. * a.jump_width
+            };
+            speeds.extend([before.max(start), a.full_dps]);
+        }
+        Curve::Custom => speeds.extend(a.points.iter().map(|point| point[0])),
+    }
+    speeds.sort_by(f32::total_cmp);
+    speeds.dedup();
+    let last = *speeds.last().unwrap();
+    let end = (last * 1.2).max(last + 1.);
+    speeds.push(end);
+    let sample = |speed| [speed, 1., acceleration_gain(a, &settings, speed)];
+    let mut points = Vec::new();
+    for segment in speeds.windows(2) {
+        let [from, to] = [segment[0], segment[1]];
+        points.extend((0..40).map(|i| sample(from + (to - from) * (i as f32 / 40.))));
+    }
+    points.push(sample(end));
+    Ok(points)
+}
 
 pub fn flick_release(strength: f32) -> Result<Vec<Point>> {
     crate::motion_config::range(

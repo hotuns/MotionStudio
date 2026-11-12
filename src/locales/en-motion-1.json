@@ -56,7 +56,7 @@
   "跳变过渡宽度": "Jump transition width",
   "转速 °/s": "Speed °/s",
   "倍率": "Multiplier",
-  "曲线从基础倍率过渡到「快速转动倍率」。自然、幂函数和 S 曲线主要使用各自的形状参数。": "The curve transitions from base sensitivity to the fast-turn multiplier. Natural, power and sigmoid curves use their own shape parameters.",
+  "加速倍率预览": "Acceleration multiplier preview",
   "自适应平滑": "Adaptive smoothing",
   "平滑方式": "Smoothing method",
   "EMA 时间平滑": "Time-based EMA",

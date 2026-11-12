@@ -19,6 +19,7 @@ fn action(input: &str, output: &str) -> Action {
         sustain: true,
         turbo_ms: None,
         allow_simultaneous: false,
+        chord_wait_ms: 80,
     }
 }
 fn profile(actions: Vec<Action>) -> Profile {
@@ -50,15 +51,13 @@ fn chords_require_all_inputs_and_more_specific_actions_override_their_subsets() 
     .unwrap();
     assert!(press(&mut e, "left_shoulder", true).held.is_empty());
     let f = press(&mut e, "south", true);
-    assert!(!f.held.contains("key:SPACE"));
-    assert_eq!(f.held.len(), 3);
-    assert!(f.held.contains("key:SHIFT"));
+    assert!(f.held.is_empty());
     let f = press(&mut e, "east", true);
     assert_eq!(f.held, ["mouse:x2".into()].into());
     let f = press(&mut e, "east", false);
-    assert_eq!(f.held.len(), 3);
+    assert!(f.held.is_empty());
     let f = press(&mut e, "left_shoulder", false);
-    assert_eq!(f.held, ["key:SPACE".into()].into());
+    assert!(f.held.is_empty());
     assert!(press(&mut e, "south", false).held.is_empty());
 }
 
@@ -111,7 +110,9 @@ fn releasing_a_chord_modifier_does_not_scroll_the_still_held_single_binding() {
     assert_eq!(press(&mut e, "south", true).scroll, [0; 2]);
     assert_eq!(press(&mut e, "left_shoulder", false).scroll, [0; 2]);
     press(&mut e, "south", false);
-    assert_eq!(press(&mut e, "south", true).scroll, [0, -1]);
+    assert_eq!(press(&mut e, "south", true).scroll, [0; 2]);
+    e.advance_input(81_000_000);
+    assert_eq!(e.frame.scroll, [0, -1]);
 }
 
 #[test]

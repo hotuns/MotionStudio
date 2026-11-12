@@ -593,6 +593,15 @@ async fn preview_motion_stability(
     .await
 }
 #[tauri::command]
+async fn preview_gyro_acceleration(
+    acceleration: motion_core::profile::GyroAcceleration,
+) -> Result<Vec<[f32; 3]>, String> {
+    background(move || {
+        motion_core::motion::stability_preview::acceleration(&acceleration).map_err(text)
+    })
+    .await
+}
+#[tauri::command]
 async fn preview_flick_release(strength: f32) -> Result<Vec<[f32; 3]>, String> {
     background(move || {
         motion_core::motion::stability_preview::flick_release(strength).map_err(text)
@@ -820,7 +829,6 @@ fn main() {
             preview_jsm,
             import_jsm,
             set_ui_navigation,
-            import_files::browse_import_files,
             import_files::read_import_file,
             export_profile,
             delete_profile,
@@ -832,6 +840,7 @@ fn main() {
             motion_action,
             preview_motion_filter,
             preview_motion_stability,
+            preview_gyro_acceleration,
             preview_flick_release,
             save_sensor_calibration,
             restore_backup,

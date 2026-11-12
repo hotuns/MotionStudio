@@ -151,10 +151,10 @@
     {
       "path": "crates/engine/src/eval/activation.rs",
       "upstreamSha256": "df3820738330d9e85339b0e5e4a032dd9b296fa5b73102dd6263df0e4118aa85",
-      "vendoredSha256": "fe6f79436d608bbb8fe2a456d16b63d2dc20ad94abd240133b10c330cb6cec0c",
+      "vendoredSha256": "cf633b8f45aee9ad9796103a316cea133abb84967f66334ea94ecc188f03705b",
       "modified": true,
       "upstreamGitBlob": "01478509933679693a2fac094d479bd3babe10d3",
-      "patch": "Expose timestamped PressGate sampling over native double recognition, long output, pulse and turbo logic. Coordinate same-condition short, long and double recognition before ordinary outputs, with exact deadlines and release catch-up. Retain the double-press state 3 fix so a recognized second press stays held."
+      "patch": "Expose timestamped PressGate sampling over native double recognition, long output, pulse and turbo logic. Coordinate same-condition short, long and double recognition before ordinary outputs, with exact deadlines and release catch-up. Retain the double-press state 3 fix so a recognized second press stays held. Add OutputHoldBack, a timestamped single-output adapter calling the unchanged native remapper_hold_back::hold_back_tick for deferred output and replay; Studio supplies unordered chord deadlines and full-release claims."
     },
     {
       "path": "crates/engine/src/eval/combiner_motion.rs",

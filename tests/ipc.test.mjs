@@ -65,7 +65,7 @@ test('worker handles discovery, pinned reconnect, valid/invalid reload, switch a
   const write=(name,target)=>writeFileSync(file,'schema_version = 1\nname = "'+name+'"\nvirtual_gamepad = '+target+'\n');
   write('Initial','true');
   const app=host();t.after(async()=>{await app.close();rmSync(directory,{recursive:true,force:true})});
-  assert.equal((await app.wait(e=>e.type==='hello')).protocol,13);
+  assert.equal((await app.wait(e=>e.type==='hello')).protocol,14);
   assert.deepEqual((await app.wait(e=>e.type==='devices')).devices,[]);
   const config={profile_id:'integration',profile:{...profile('Initial'),virtual_gamepad:true},profile_file:file,device_path:'test://absent/physical/MI_02',emit:false};
   assert.equal((await app.request('start',{config})).ok,true);

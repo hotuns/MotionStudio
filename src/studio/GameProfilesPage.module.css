@@ -1,8 +1,21 @@
 .page, .wizard { display: grid; gap: var(--section-gap); color: var(--text-strong); font-size: 13px; }
-.profileHeader, .tabPanel { display: grid; gap: var(--section-gap); min-width: 0; }
-.profileHeader { container-type: inline-size; padding: var(--panel-padding); border: 1px solid var(--panel-border); border-radius: var(--panel-radius); background: var(--bg-2); box-shadow: var(--panel-shadow); }
-.profileHeader:has(.profileTools[open]) { position: relative; z-index: 3; }
-.profileTools { position: relative; justify-self: end; }
+.page { --profile-navigation-offset: calc(var(--profile-navigation-height, 0px) + var(--section-gap)); }
+.tabPanel { display: grid; gap: var(--section-gap); min-width: 0; }
+.tabPanel :where(button, input, select, textarea, summary, a[href], [tabindex]):not(dialog *) {
+  scroll-margin-block-start: var(--profile-navigation-offset);
+}
+.profileNavigation {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  background: var(--bg-0);
+}
+.profileHeader { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; min-width: 0; padding: 10px var(--panel-padding); border: 1px solid var(--panel-border); border-radius: var(--panel-radius); background: var(--bg-2); box-shadow: var(--panel-shadow); }
+.profileHeader:has(.profileTools[open]) { position: relative; z-index: 1; }
+.profileTools { position: relative; flex-shrink: 0; }
 .profileTools summary { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 5px 9px; border: 1px solid var(--border-1); border-radius: var(--control-radius); background: var(--bg-btn); color: var(--text-mid); cursor: pointer; list-style: none; white-space: nowrap; font-size: 12px; }
 .profileTools summary::-webkit-details-marker { display: none; }
 .profileTools summary:hover, .profileTools[open] summary { background: var(--bg-btn-hover); }
@@ -11,13 +24,8 @@
 .toolsMenu button { display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--text-strong); text-align: left; cursor: pointer; white-space: nowrap; }
 .toolsMenu button:hover:not(:disabled) { background: var(--bg-btn-hover); }
 .toolsMenu button:disabled { opacity: .45; cursor: default; }
-.profileContext { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; min-width: 0; }
-.profileContext p { margin: 0; color: var(--text-muted); font-size: 12px; }
-.layerTools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; margin-left: auto; }
+.profileContext { margin: 0; color: var(--text-muted); font-size: 12px; }
 .configTabs {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   display: flex;
   gap: 4px;
   flex-wrap: wrap;
@@ -50,20 +58,19 @@
 .panel, .tableCard, .preview, .empty { background: var(--bg-2); border: 1px solid var(--panel-border); border-radius: var(--panel-radius); padding: var(--panel-padding); box-shadow: var(--panel-shadow); }
 .panel { line-height: 1.7; }
 .panel h2, .wizard h2 { font-size: 15px; font-weight: 600; margin: 0 0 8px; }
-.hint, .panel p, .gameHeader p { color: var(--text-muted); font-size: 12px; line-height: 1.7; }
+.hint, .panel p { color: var(--text-muted); font-size: 12px; line-height: 1.7; }
 .notice, .warning { padding: 10px 12px; margin: 0; border: 1px solid var(--panel-border); border-left: 3px solid var(--accent); border-radius: var(--section-radius); background: var(--bg-1); line-height: 1.6; }
 .warning { border-left-color: #c68a32; }
-.gameHeader { display: grid; grid-template-columns: minmax(185px, 1fr) auto auto; gap: 8px 14px; align-items: center; }
-.gameInfo { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--text-muted); font-size: 12px; }
+.gameCommands { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; min-width: 0; margin-inline-start: auto; }
+.gameInfo { display: flex; flex: 1 1 185px; align-items: center; gap: 8px; min-width: 0; color: var(--text-muted); font-size: 12px; }
 .gameInfo > span { flex-shrink: 0; }
 .gameInfo .gameName { display: block; width: 100%; min-height: 32px; margin: 0; padding: 5px 8px; border: 1px solid var(--border-1); border-radius: var(--control-radius); background: var(--bg-input); font-size: 13px; font-weight: 550; }
 .gameOutput { display: flex; align-items: center; gap: 6px 8px; min-width: 0; color: var(--text-muted); font-size: 12px; white-space: nowrap; }
 .gameOutput .outputSelect { width: 184px; max-width: 100%; min-height: 32px; padding: 6px 9px; border-radius: var(--control-radius); }
-.gameHeader p { margin: 0; }
 .progress { margin-left: auto; display: grid; gap: 5px; text-align: right; } .progress strong { font-size: 24px; } .progress small, .progress span { color: var(--text-muted); font-size: 12px; font-weight: 400; }
 .empty { padding: 22px; max-width: 780px; } .empty h2 { margin-top: 10px; } .empty p { max-width: 620px; line-height: 1.6; }
 .actionLayout { display: grid; grid-template-areas: "actions overview"; grid-template-columns: minmax(0, 1fr) clamp(250px, 26vw, 340px); gap: var(--section-gap); align-items: start; }
-.tableCard { grid-area: actions; min-width: 0; padding: 0; overflow: hidden; scroll-margin-block-start: 64px; } .tableScroll { overflow-x: auto; }
+.tableCard { grid-area: actions; min-width: 0; padding: 0; overflow: hidden; scroll-margin-block-start: var(--profile-navigation-offset); } .tableScroll { overflow-x: auto; }
 .filters { padding: 12px 14px; border-bottom: 1px solid var(--panel-border); } .filters input { min-width: 120px; flex: 1; }
 .page input, .page select, .wizard input, .wizard select, .dialog input, .dialog select { border: 1px solid var(--border-1); border-radius: var(--control-radius); background: var(--bg-input); color: var(--text-strong); padding: 6px 8px; font: inherit; min-width: 0; }
 .page input:focus-visible, .page select:focus-visible, .wizard input:focus-visible, .wizard select:focus-visible, .dialog input:focus-visible, .dialog select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -87,7 +94,7 @@
 .page td kbd, .wizard td kbd { font-size: 11px; opacity: 1; color: var(--text-mid); }
 .verified, .unverified { font-size: 10px; white-space: nowrap; padding: 4px 7px; border-radius: 5px; background: var(--bg-1-5); color: var(--text-muted); }
 .verified { color: var(--accent); } .unverified { color: #a7752f; }
-.preview { grid-area: overview; position: sticky; top: 60px; min-width: 0; padding: 16px; }
+.preview { grid-area: overview; position: sticky; top: var(--profile-navigation-offset); min-width: 0; padding: 16px; }
 .preview h3 { margin: 0; font-size: 15px; font-weight: 600; }
 .overviewHint { margin: 6px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 .overviewBody { display: grid; gap: 4px 16px; align-items: center; min-width: 0; }
@@ -125,14 +132,6 @@
   .steps li { flex-direction: column; padding: 10px; gap: 5px; }
   .panel { padding: 16px; }
 }
-@container (max-width: 650px) {
-  .gameHeader { grid-template-columns: minmax(0, 1fr) auto; }
-  .gameInfo { grid-column: 1 / -1; }
-  .gameOutput { flex-wrap: wrap; }
-  .profileContext { align-items: flex-start; }
-  .layerTools { margin-left: 0; }
-}
-
 .quickCapture { padding: 14px 16px; display: flex; align-items: center; gap: 14px; justify-content: space-between; background: var(--bg-1-5); border-bottom: 1px solid var(--accent); line-height: 1.7; font-size: 12px; }
 .quickCapture p { color: #c55252; margin-bottom: 0; }
 .bindingFields { display: grid; gap: 10px; margin: 14px 0; }

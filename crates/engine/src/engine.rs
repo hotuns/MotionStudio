@@ -228,7 +228,15 @@ impl GraphRunner {
             Stick::Right => ("right_stick", &DIRECTIONS[4..]),
         };
         let [x, y] = pad_binding::stick_pins(stick);
-        let pins = [vector, x, y, directions[0], directions[1], directions[2], directions[3]];
+        let pins = [
+            vector,
+            x,
+            y,
+            directions[0],
+            directions[1],
+            directions[2],
+            directions[3],
+        ];
         // Block the same pins as RWS, only for the mapping graph being evaluated.
         let original = pins.map(|pin| {
             signals.get_pin_mut(SOURCE, pin).map(|signal| {
@@ -309,6 +317,27 @@ fn analog_condition(chord: &[&str]) -> bool {
 }
 
 fn same_competitors(action: &Action, old: &[Action], new: &[Action]) -> bool {
+    let input = action_condition(action);
+    let chord_peers = |actions: &[Action]| {
+        let mut peers: Vec<_> = actions
+            .iter()
+            .filter_map(|other| {
+                let chord = action_condition(other);
+                (chord.len() > input.len() && input.iter().all(|p| chord.contains(p))).then(|| {
+                    (
+                        chord.join("+"),
+                        other.threshold.to_bits(),
+                        other.chord_wait_ms,
+                    )
+                })
+            })
+            .collect();
+        peers.sort();
+        peers
+    };
+    if chord_peers(old) != chord_peers(new) {
+        return false;
+    }
     if action.allow_simultaneous {
         return true;
     }
@@ -389,36 +418,9 @@ fn controls(profile: &Profile, actions: &[Action]) -> (GraphRunner, Vec<PressCom
         .collect();
     let mut action_pins = vec![];
     let mut action_sources = vec![];
-    for (i, _action) in actions.iter().enumerate() {
-        let mut supersets = None;
-        for (other, c) in chords.iter().enumerate() {
-            if c.len() > chords[i].len() && chords[i].iter().all(|v| c.contains(v)) {
-                supersets = Some(if let Some(previous) = supersets {
-                    let or = nodes.len();
-                    let mut n = node(or, "logic.or", 1);
-                    n.input_sources = vec![Some((previous, 0)), Some((conditions[other], 0))];
-                    nodes.push(n);
-                    or
-                } else {
-                    conditions[other]
-                });
-            }
-        }
-        let active = if let Some(superset) = supersets {
-            let not = nodes.len();
-            let mut n = node(not, "logic.not", 1);
-            n.input_sources = vec![Some((superset, 0))];
-            nodes.push(n);
-            let and = nodes.len();
-            let mut n = node(and, "logic.and", 1);
-            n.input_sources = vec![Some((conditions[i], 0)), Some((not, 0))];
-            nodes.push(n);
-            and
-        } else {
-            conditions[i]
-        };
+    for (i, condition) in conditions.iter().enumerate() {
         action_pins.extend([format!("{i}"), format!("raw:{i}")]);
-        action_sources.extend([vec![(active, 0)], vec![(conditions[i], 0)]]);
+        action_sources.extend([vec![(*condition, 0)], vec![(*condition, 0)]]);
     }
     if !action_pins.is_empty() {
         let mut n = node(nodes.len(), "device.sink", 0);
@@ -558,6 +560,8 @@ pub struct Engine {
     controls_held: BTreeSet<String>,
     mapped_actions: Vec<Action>,
     action_states: Vec<ActionState>,
+    chord_wait: crate::chord_wait::ChordWait,
+    analog_hold_back: Vec<crate::chord_wait::AnalogHoldBack>,
     action_time_ns: u64,
     rotated_stick: Option<(Stick, Vec2)>,
     flick: GraphRunner,
@@ -591,6 +595,7 @@ struct ActionState {
     repeat_armed: bool,
     elapsed: f32,
     gate: flexinput_engine::eval::PressGate,
+    hold_back: flexinput_engine::eval::OutputHoldBack,
     competition: PressCompetition,
     blocked: bool,
     pending_scroll: [i32; 2],
@@ -712,6 +717,10 @@ impl Engine {
             touchpad: crate::touchpad::NativeTouchpad::new(profile.touchpad.clone()),
             raw_signals,
             controls,
+            chord_wait: crate::chord_wait::ChordWait::new(&mapped_actions),
+            analog_hold_back: (0..profile.gamepad_bindings.as_ref().map_or(0, Vec::len))
+                .map(|_| Default::default())
+                .collect(),
             mapped_actions,
             action_states: competitions
                 .into_iter()
@@ -870,6 +879,10 @@ impl Engine {
                     }
                 })
                 .collect();
+            self.chord_wait.reconfigure(&actions);
+            self.analog_hold_back = (0..profile.gamepad_bindings.as_ref().map_or(0, Vec::len))
+                .map(|_| Default::default())
+                .collect();
             self.controls = controls;
             self.mapped_actions = actions;
         }
@@ -883,8 +896,10 @@ impl Engine {
         let gyro_enabled_changed = profile.gyro.enabled != self.profile.gyro.enabled;
         let gyro_disabled = gyro_enabled_changed && !profile.gyro.enabled;
         let builtin_changed = motion.as_object().unwrap().iter().any(|(key, value)| {
-            !matches!(key.as_str(), "flick" | "bindings" | "turns" | "custom_filters")
-                && previous_motion.get(key.as_str()) != Some(value)
+            !matches!(
+                key.as_str(),
+                "flick" | "bindings" | "turns" | "custom_filters"
+            ) && previous_motion.get(key.as_str()) != Some(value)
         });
         if builtin_changed {
             self.motion.rebuild_builtin(&profile.gyro);
@@ -1093,6 +1108,10 @@ impl Engine {
         }
         self.clock.reset();
         self.controls.state.clear();
+        self.chord_wait.reset();
+        for state in &mut self.analog_hold_back {
+            *state = Default::default();
+        }
         for state in &mut self.action_states {
             *state = ActionState {
                 competition: state.competition,
@@ -1317,13 +1336,12 @@ impl Engine {
     fn gyro_activation_pressed(&self) -> bool {
         let gyro = &self.profile.gyro;
         // Hysteresis prevents an analog input from repeatedly toggling.
-        let release_band = if gyro.activation_mode == GyroActivationMode::Toggle
-            && self.activation_pressed
-        {
-            0.1
-        } else {
-            0.
-        };
+        let release_band =
+            if gyro.activation_mode == GyroActivationMode::Toggle && self.activation_pressed {
+                0.1
+            } else {
+                0.
+            };
         self.input_value(&gyro.activation) > (gyro.activation_threshold - release_band).max(0.)
     }
     fn eval_controls(&mut self, allow_toggle: bool, now_ns: u64) {
@@ -1335,11 +1353,65 @@ impl Engine {
         let blocked = self.flick_source_block();
         self.controls
             .eval_with_stick_block(&mut self.signals, blocked, 0.0);
+        let signals = &self.signals;
+        self.chord_wait
+            .sample(self.action_time_ns, allow_toggle, |input| {
+                let pin = input_pin(input).unwrap();
+                let stick_blocked = blocked.is_some_and(|stick| {
+                    let prefix = if stick == Stick::Left {
+                        "left_stick"
+                    } else {
+                        "right_stick"
+                    };
+                    pin == prefix
+                        || pin.strip_prefix(prefix).is_some_and(|suffix| {
+                            matches!(suffix, "_x" | "_y" | "_up" | "_down" | "_left" | "_right")
+                        })
+                });
+                if stick_blocked {
+                    0.0
+                } else {
+                    signals.get_pin(SOURCE, pin).map_or(0.0, |v| v.as_float())
+                }
+            });
         self.controls_held.clear();
         if let Some(pad) = &mut self.physical_pad {
             *pad = PadState::default();
             for (pin, &value) in self.controls.result.sink_outputs.pins_of(PAD) {
                 pad.set(pin, value);
+            }
+        }
+        // Analog travel and DS4's digital trigger bit share chord hold-back.
+        // Digital mappings are composed afterwards.
+        if let Some(pad) = &mut self.physical_pad {
+            for (binding, state) in self
+                .profile
+                .gamepad_bindings
+                .iter()
+                .flatten()
+                .zip(&mut self.analog_hold_back)
+            {
+                if !binding.is_analog() || pad_binding::stick(&binding.output).is_some() {
+                    continue;
+                }
+                let pin = input_pin(binding.input.trim()).unwrap();
+                let value = self
+                    .signals
+                    .get_pin(SOURCE, pin)
+                    .map_or(0.0, |v| v.as_float());
+                let value = state.sample(
+                    value,
+                    self.chord_wait.analog(binding.input.trim()),
+                    self.action_time_ns,
+                );
+                pad.set(
+                    pad_binding::output_pin(&binding.output).unwrap(),
+                    Signal::Float(value),
+                );
+                pad.set(
+                    pad_binding::trigger_button(&binding.output).unwrap(),
+                    Signal::Float(value),
+                );
             }
         }
         for (i, (action, state)) in self
@@ -1355,8 +1427,19 @@ impl Engine {
                     .get_pin(ACTIONS, pin)
                     .is_some_and(|v| v.as_bool())
             };
-            let condition = get(&i.to_string());
+            let disposition = self.chord_wait.action(i);
+            let condition = get(&i.to_string()) && !disposition.rejected;
             let raw = get(&format!("raw:{i}"));
+            if disposition.consumed {
+                state.gate = Default::default();
+                state.hold_back = Default::default();
+                state.blocked = true;
+                state.active = false;
+                state.repeat_armed = false;
+                state.pending_scroll = [0; 2];
+                state.raw = raw;
+                continue;
+            }
             let immediate = action.trigger == Trigger::Down && state.competition.is_empty();
             if !immediate && raw && (!allow_toggle || !condition) {
                 state.blocked = true;
@@ -1378,6 +1461,10 @@ impl Engine {
                     self.action_time_ns,
                 )
             };
+            let active =
+                state
+                    .hold_back
+                    .sample_at(active, disposition.waiting, self.action_time_ns);
             if active {
                 if let Some(pin) = action.output.strip_prefix("pad:") {
                     if let Some(pad) = &mut self.physical_pad {
@@ -1396,11 +1483,7 @@ impl Engine {
                     }
                 }
             }
-            let rising = if immediate && action.turbo_ms.is_none() {
-                raw && !state.raw
-            } else {
-                !state.active
-            };
+            let rising = !state.active;
             if active && rising && allow_toggle {
                 for output in crate::bindings::output_chord(&action.output)
                     .into_iter()

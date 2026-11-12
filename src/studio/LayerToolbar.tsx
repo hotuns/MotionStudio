@@ -10,6 +10,7 @@ export function LayerToolbar({profile,profileId,selected,onSelect,onUpdate,block
   const active=status?.profile_id===profileId&&status.emitting;
   const hasLayers=!!profile.layers?.length;
   return <div className={styles.tools}>
+    {active&&hasLayers&&<span className={styles.active} role="status">运行：{status.active_layers?.length?<span translate="no">{status.active_layers.join(' + ')}</span>:'基础层'}</span>}
     {hasLayers&&<label className={styles.selector} title="选择要编辑的层；按住启用输入时才会在游戏中生效。">
       <span>编辑层</span>
       <select aria-label="正在编辑的配置层" data-layer-selector value={selected} disabled={blocked} onChange={event=>onSelect(event.target.value)}>
@@ -20,7 +21,6 @@ export function LayerToolbar({profile,profileId,selected,onSelect,onUpdate,block
     <button className={styles.manage} type="button" aria-label="管理配置层" title="管理配置层" disabled={blocked} onClick={()=>setManaging(true)}>
       <StudioIcon name="settings" size={16}/>{!hasLayers&&<span>配置层</span>}
     </button>
-    {active&&hasLayers&&<span className={styles.active} role="status">运行：{status.active_layers?.length?<span translate="no">{status.active_layers.join(' + ')}</span>:'基础层'}</span>}
     {managing&&<Dialog title="管理配置层" className={styles.dialog} onClose={()=>setManaging(false)}
       description="配置层与当前配置一起保存。选择编辑层不会立即启用它，游戏中仍由按住输入控制。"
       actions={<button type="button" className="primary-btn" disabled={(profile.layers??[]).some(layer=>!layer.name.trim())} onClick={()=>setManaging(false)}>完成</button>}>

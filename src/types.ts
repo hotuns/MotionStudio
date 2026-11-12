@@ -1,7 +1,7 @@
 import {t} from './i18n';
 import {keyboardKeys} from './keyboard';
 export {keyNames} from './keyboard';
-export type TriggerSettings = {trigger?:'down'|'short'|'long'|'double'|'on_press'|'on_release';trigger_ms?:number;sustain?:boolean;turbo_ms?:number|null;allow_simultaneous?:boolean};
+export type TriggerSettings = {trigger?:'down'|'short'|'long'|'double'|'on_press'|'on_release';trigger_ms?:number;sustain?:boolean;turbo_ms?:number|null;allow_simultaneous?:boolean;chord_wait_ms?:number};
 export type Action = TriggerSettings & {name:string;input:string;output:string;threshold:number;repeat_ms?:number|null};
 export type OutputBackend = 'hid_maestro'|'legacy';
 export type GamepadBackend = 'vigem'|'hid_maestro';

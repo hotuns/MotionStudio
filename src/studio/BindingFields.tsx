@@ -60,6 +60,11 @@ export function ActionTriggerFields({action,onChange,peers=[]}:{action:TriggerBi
  const competition=triggerCompetition(action,peers);
  const ordinary=trigger==='down'||trigger==='on_press'||trigger==='on_release';
  return <div className={styles.bindingFields}>
+   {chordParts(action.input).length>1&&<>
+     <Range label="组合等待时间" value={action.chord_wait_ms??80} min={0} max={500} step={10} unit=" ms" onChange={chord_wait_ms=>onChange({chord_wait_ms})}/>
+     <small>默认 80 ms。参与组合的单键暂缓输出；组合成立后取消单键，直到全部松开。设为 0 时不等待。</small>
+     <small>超过等待时间后按单键处理，本次按压不再触发组合。模拟扳机从开始扣动时计时。</small>
+   </>}
    <div className={styles.triggerModes} role="group" aria-label="动作触发方式">{Object.entries(triggerNames).map(([value,label])=><button type="button" key={value} aria-pressed={trigger===value} onClick={()=>choose(value as Action['trigger'])}>{label}</button>)}</div>
    {trigger!=='down'&&<Range label={trigger==='long'?'长按时间':trigger==='double'?'双击时间窗':trigger==='short'?'短按最长时间':'触发持续时间'} value={action.trigger_ms??250} min={10} max={5000} step={10} unit=" ms" onChange={trigger_ms=>onChange({trigger_ms})}/>}
    {trigger==='long'&&<Toggle label="长按触发后保持，直到松开" value={action.sustain!==false} onChange={sustain=>onChange({sustain})}/>}

@@ -1,9 +1,8 @@
 import {useState} from 'react';
-import {createPortal} from 'react-dom';
 import {invoke} from '@tauri-apps/api/core';
 import type {Entry, JsmFile, JsmReport} from '../types';
 import {Dialog} from './Controls';
-import {decodeConfig, ImportFiles} from './ImportFiles';
+import {pickImportFile} from '../import-file';
 import styles from './ImportJsm.module.css';
 
 const statusNames = {converted:'已转换', approximate:'需要核验', skipped:'未迁移', ignored:'程序设置', overridden:'已覆盖', included:'已展开'};
@@ -11,7 +10,6 @@ const statusNames = {converted:'已转换', approximate:'需要核验', skipped:
 export function ImportJsm({onClose, onImported}: {onClose: () => void; onImported: (entry: Entry) => Promise<void>}) {
   const [files, setFiles] = useState<JsmFile[]>([{name:'JSM 配置.txt', text:''}]);
   const [selected, setSelected] = useState(0);
-  const [picker, setPicker] = useState<'main' | 'related' | null>(null);
   const [name, setName] = useState('');
   const [encoding, setEncoding] = useState('');
   const [report, setReport] = useState<JsmReport | null>(null);
@@ -23,17 +21,25 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
   const file = files[selected];
   const clearReport = () => { setReport(null); setError(''); };
 
-  function choose(kind: 'main' | 'related', text: string, name: string, encoding: string) {
-    clearReport();
-    setPicker(null);
-    const next = {name, text};
-    if (kind === 'main') {
-      setFiles([next, ...(/\.toml$/i.test(name) ? [] : files.slice(1))]);
-      setSelected(0);
-      setEncoding(encoding);
-    } else {
-      setFiles([...files, next]);
-      setSelected(files.length);
+  async function choose(kind: 'main' | 'related') {
+    setBusy(true);
+    try {
+      const picked = await pickImportFile(kind === 'main' ? 'jsm' : 'jsm-related');
+      if (!picked) return;
+      clearReport();
+      const next = {name: picked.name, text: picked.text};
+      if (kind === 'main') {
+        setFiles([next, ...(/\.toml$/i.test(picked.name) ? [] : files.slice(1))]);
+        setSelected(0);
+        setEncoding(picked.encoding);
+      } else {
+        setFiles([...files, next]);
+        setSelected(files.length);
+      }
+    } catch (error) {
+      setError(String(error));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -69,7 +75,7 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
   const lines = report?.lines.filter(line => filter === 'all'
     || (filter === 'review' && ['approximate', 'skipped'].includes(line.status)) || filter === line.status) ?? [];
   return <Dialog title="导入 JSM 配置" onClose={onClose} error={error}
-    onSubmit={() => { if (!busy && !picker) void (report ? create() : preview()); }}
+    onSubmit={() => { if (!busy) void (report ? create() : preview()); }}
     description="将支持的设置转换成可在 Studio 动作列表里编辑的配置。"
     actions={<>
       <button type="button" className="secondary-btn" onClick={onClose}>取消导入</button>
@@ -79,19 +85,9 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
     </>}>
     {!report ? <>
       <div className={styles.tools}>
-        <button type="button" className="secondary-btn" disabled={busy} onClick={() => setPicker('main')}>选择 JSM 文件</button>
-        <label className="secondary-btn">从系统选择<input type="file" hidden disabled={busy} accept=".txt,.jsm,.cfg,.conf,.toml"
-          onChange={event => {
-            const file = event.target.files?.[0];
-            event.target.value = '';
-            if (!file) return;
-            void file.arrayBuffer().then(buffer => {
-              const value = decodeConfig(new Uint8Array(buffer));
-              choose('main', value.text, file.name, value.encoding);
-            }).catch(error => setError(String(error)));
-          }}/></label>
+        <button type="button" className="secondary-btn" disabled={busy} onClick={() => void choose('main')}>选择 JSM 文件</button>
         {!legacy && <button type="button" className="secondary-btn" disabled={busy || files.length >= 16}
-          onClick={() => setPicker('related')}>添加关联 JSM 文件</button>}
+          onClick={() => void choose('related')}>添加关联 JSM 文件</button>}
       </div>
       {legacy ? <p><strong translate="no">{files[0].name}</strong><br/>旧版配置及内含的关联文件会一起转换。</p> : <>
         {files.length > 1 && <div className={styles.tabs} role="group" aria-label="JSM 文件">
@@ -111,8 +107,6 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
         </label>
         <p>可以粘贴配置，或选择文件。主文件引用的配置可作为关联文件添加。</p>
       </>}
-      {picker && createPortal(<ImportFiles kind="jsm" allowLegacy={picker === 'main'} onClose={() => setPicker(null)}
-        onSelect={(text, name, encoding) => choose(picker, text, name, encoding)}/>, document.body)}
     </> : <>
       <div className={styles.source}><strong translate="no">{files[0].name}</strong><span>{encoding}</span>
         <button type="button" className="ghost-btn" disabled={busy} onClick={clearReport}>修改原文</button></div>

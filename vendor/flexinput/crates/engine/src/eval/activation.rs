@@ -8,6 +8,43 @@
 
 use super::*;
 
+/// Headless single-output adapter to the native Remapper hold-back/replay.
+/// Studio supplies chord arbitration; recognition and replay stay native.
+#[derive(Default)]
+pub struct OutputHoldBack {
+    states: HashMap<String, crate::state::HoldBackPin>,
+    last_ns: Option<u64>,
+    previous: bool,
+    waiting: bool,
+}
+
+impl OutputHoldBack {
+    pub fn sample_at(&mut self, value: bool, waiting: bool, now_ns: u64) -> bool {
+        let dt = self.last_ns.replace(now_ns).map_or(0.0, |last| {
+            (now_ns.saturating_sub(last) as f64 / 1e9) as f32
+        });
+        // Account for the elapsed interval using its previous state, then
+        // apply the FIFO edge with zero dt. This preserves short tap lengths.
+        if dt > 0.0 && (!self.states.is_empty() || self.waiting) {
+            self.sample(self.previous, self.waiting, dt);
+        }
+        self.previous = value;
+        self.waiting = waiting;
+        self.sample(value, waiting, 0.0)
+    }
+
+    fn sample(&mut self, value: bool, waiting: bool, dt: f32) -> bool {
+        if self.states.is_empty() && !waiting { return value; }
+        let mut upstream = PinSigs::default();
+        upstream.insert("output", Signal::Bool(value));
+        let pending = if waiting { HashMap::from([("output", true)]) } else { HashMap::new() };
+        let empty = HashSet::new();
+        let view = hold_back_tick(&mut self.states, &pending, &empty, &empty, &empty,
+            &empty, &upstream, dt);
+        !view.hidden.contains_key("output") && (value || view.replayed.contains("output"))
+    }
+}
+
 /// Recognition windows shared by bindings with the same input condition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PressCompetition {

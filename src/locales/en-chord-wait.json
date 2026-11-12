@@ -1,0 +1,6 @@
+{
+  "组合等待时间": "Chord waiting time",
+  "默认 80 ms。参与组合的单键暂缓输出；组合成立后取消单键，直到全部松开。设为 0 时不等待。": "Defaults to 80 ms. Individual mappings wait for the chord; completing it cancels them until every input is released. Set to 0 to disable waiting.",
+  "超过等待时间后按单键处理，本次按压不再触发组合。模拟扳机从开始扣动时计时。": "After the window expires, individual mappings take over and this press cannot trigger the chord. Analog triggers start the timer when travel begins.",
+  "组合等待时间需为 0–500 ms": "Chord waiting time must be between 0 and 500 ms"
+}

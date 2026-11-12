@@ -3,7 +3,7 @@ import { Range, SettingsGroup as Group, Toggle } from './Controls';
 import {OptionPicker} from './OptionPicker';
 import {padChoices} from './binding-choices';
 import { CurveEditor } from './CurveEditor';
-import { FlickReleaseCurve, ResponseCurve, useStabilityPreview } from './StabilityCurves';
+import { AccelerationCurve, FlickReleaseCurve, ResponseCurve, useStabilityPreview } from './StabilityCurves';
 import styles from './MotionControls.module.css';
 
 export type MotionUpdate=(change:(profile:Profile)=>void)=>void;
@@ -60,7 +60,9 @@ export function AccelerationSettings({profile,update}:Props) {
     {a.curve==='power'&&<Numbers object={a} specs={[["power_reference","参考转速",0.01,4000,1," °/s"],["power_exponent","幂指数",0.01,10,0.1]]} onChange={set}/>}
     {a.curve==='sigmoid'&&<Numbers object={a} specs={[["sigmoid_mid","过渡中点",0,4000,1," °/s"],["sigmoid_width","过渡宽度",0.01,2000,1," °/s"]]} onChange={set}/>}
     {a.curve==='jump'&&<Numbers object={a} specs={[["jump_width","跳变过渡宽度",0,2000,1," °/s"]]} onChange={set}/>}
-    {a.curve==='custom'?<CurveEditor points={a.points} onChange={v=>set('points',v)} maxX={4000} maxY={10} xLabel="转速 °/s" yLabel="倍率"/>:<p className={styles.hint}>曲线从基础倍率过渡到「快速转动倍率」。自然、幂函数和 S 曲线主要使用各自的形状参数。</p>}
+    {a.curve==='custom'
+      ? <CurveEditor points={a.points} onChange={v=>set('points',v)} maxX={4000} maxY={10} xLabel="转速 °/s" yLabel="倍率"/>
+      : <AccelerationCurve acceleration={a}/>}
   </Group>;
 }
 export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Props & {onOpenDevice:()=>void;deviceNoise?:number}) {

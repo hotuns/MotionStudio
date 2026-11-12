@@ -5,7 +5,7 @@ use crate::{
     engine::{node, GraphRunner},
     motion_config::*,
     motion_curves as cc,
-    profile::Gyro,
+    profile::{Gyro, GyroAcceleration},
 };
 use flexinput_core::{
     imu::{ImuEstimator, ImuReading, BUS_ACCEL_G, BUS_GYRO_DPS},
@@ -418,20 +418,7 @@ impl MotionRuntime {
         }
         self.was_tracking = tracking;
         let speed_after = rate.length();
-        let a = &g.acceleration;
-        let gain = if a.curve == Curve::Custom {
-            sample_curve(&a.points, speed_after, &[])
-        } else {
-            let omega = (speed_after - a.start_dps).max(0.);
-            cc::sensitivity(
-                &settings,
-                omega,
-                (omega / (a.full_dps - a.start_dps)).clamp(0., 1.),
-                a.full_dps - a.start_dps,
-                1.,
-                a.fast_multiplier,
-            )
-        };
+        let gain = acceleration_gain(&g.acceleration, &settings, speed_after);
         rate *= gain * self.brake.tick(&settings, dt, speed, speed_after);
         let (x, y) = cc::angle_snap(&settings, rate.x, rate.y);
         rate = Vec2::new(x, y);
@@ -478,9 +465,34 @@ impl MotionRuntime {
         out.out
     }
 }
+fn acceleration_gain(a: &GyroAcceleration, settings: &cc::Settings, speed: f32) -> f32 {
+    if a.curve == Curve::Custom {
+        return sample_curve(&a.points, speed, &[]);
+    }
+    let omega = (speed - a.start_dps).max(0.);
+    let cap = a.full_dps - a.start_dps;
+    cc::sensitivity(
+        settings,
+        omega,
+        (omega / cap).clamp(0., 1.),
+        cap,
+        1.,
+        a.fast_multiplier,
+    )
+}
+
 fn cc_settings(g: &Gyro) -> cc::Settings {
-    let a = &g.acceleration;
     let m = &g.motion;
+    cc::Settings {
+        angle_snap: m.angle_snap,
+        angle_snap_ease: m.angle_snap_ease,
+        brake_strength: m.brake_strength,
+        brake_threshold: m.brake_threshold,
+        ..acceleration_settings(&g.acceleration)
+    }
+}
+
+fn acceleration_settings(a: &GyroAcceleration) -> cc::Settings {
     cc::Settings {
         curve: match a.curve {
             Curve::Natural => cc::Curve::Natural,
@@ -496,10 +508,6 @@ fn cc_settings(g: &Gyro) -> cc::Settings {
         sigmoid_mid: a.sigmoid_mid,
         sigmoid_width: a.sigmoid_width,
         jump_tau: a.jump_width,
-        angle_snap: m.angle_snap,
-        angle_snap_ease: m.angle_snap_ease,
-        brake_strength: m.brake_strength,
-        brake_threshold: m.brake_threshold,
         ..Default::default()
     }
 }

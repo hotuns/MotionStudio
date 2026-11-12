@@ -96,3 +96,12 @@ Use the **Interface language** selector in the lower-left sidebar, beside the th
 In English, use **Edit layer** beside the current profile in the top bar. Its settings button opens **Manage action layers**. Add a hold layer, set its activation input, then edit gyro or stick settings while that layer is selected. Unchanged fields inherit the base profile. Selecting an editing layer does not activate it in the running mapping. Use **Activation type** in action settings for hold, short press, long press, double press, press-edge and release-edge actions. The editor also offers direct controller buttons, keyboard keys, mouse and scroll categories, removable chord members and full settings.
 
 Application messages are translated. Operating-system errors, third-party diagnostics and text written by users may retain their original language.
+
+
+## 组合等待时间
+
+键鼠动作和虚拟手柄数字映射在选择两个以上输入后，显示「组合等待时间」。默认 **80 ms**，范围 **0–500 ms**；已有配置未写入 `chord_wait_ms` 时同样使用 80 ms。单键映射本身不增加固定延迟，只有被组合包含的映射才等待。多条相同输入、相同阈值的组合共用最长等待时间。
+
+例如 LT → 技能 1、RT → 技能 2、LT + RT → 大招：在窗口内完成组合只输出大招，取消两个单键的待输出动作，直到全部成员松开。超过窗口则按单键输出，本次按压不能再转成组合；全部松开后重新判断。单独快速点按不会因短于窗口而被吞掉，沿用 FlexInput 的补发处理。模拟扳机从开始扣动时计时，组合成立仍要求全部输入达到该组合的触发阈值；扳机行程直通输出与 DS4 数字扳机位一起暂缓，快速单扣补发使用暂缓期间保留的行程。
+
+设为 **0 ms** 时不等待，组合成立前已经发出的单键无法撤回。组合成立后的单键屏蔽仍保持到所有成员松开。「允许同时触发」只控制同一输入的短按、长按、双击竞争，不绕过组合占用。短按、长按、双击仍按原始输入时间判断，组合等待仅暂缓或取消其输出。

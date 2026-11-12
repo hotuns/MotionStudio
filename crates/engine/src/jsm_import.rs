@@ -1126,6 +1126,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             sustain: true,
             turbo_ms: None,
             allow_simultaneous: false,
+            chord_wait_ms: crate::profile::default_chord_wait_ms(),
         });
         let note = if full_disabled {
             full_note

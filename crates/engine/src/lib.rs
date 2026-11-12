@@ -1,4 +1,5 @@
 pub mod bindings;
+mod chord_wait;
 pub mod controller_input;
 pub use motion_filters as custom_filters;
 pub mod device_selection;
