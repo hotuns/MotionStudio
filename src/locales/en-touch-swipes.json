@@ -1,0 +1,9 @@
+{
+  "触摸板上滑": "Touchpad swipe up",
+  "触摸板下滑": "Touchpad swipe down",
+  "触摸板左滑": "Touchpad swipe left",
+  "触摸板右滑": "Touchpad swipe right",
+  "触摸板方向手势": "Directional touchpad gestures",
+  "在动作映射中添加动作，输入选择「触摸板上滑／下滑／左滑／右滑」，即可分别绑定按键。无需开启触摸板鼠标。": "Add an action and choose Touchpad swipe up, down, left or right as its input to assign a key. Touchpad mouse does not need to be enabled.",
+  "沿主要方向滑动超过触摸板约 18% 的距离触发一次，输出约 120 ms；抬手后可以再次滑动。双指或双触摸板的同方向手势会合并。建议使用默认的按住触发方式。": "Moving more than approximately 18% of the pad along the dominant axis produces one pulse of about 120 ms. Lift the finger before swiping again. Matching directions from two fingers or pads are combined. Use the default Hold activation."
+}

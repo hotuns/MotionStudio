@@ -1,14 +1,17 @@
 import {useEffect,useRef,useState} from 'react';
-import {chordParts,inputLabel,outputLabel,mouseOutputs,wheelOutputs,type Action,type Profile} from '../types';
+import {chordParts,outputLabel,mouseOutputs,wheelOutputs,type Action,type Profile} from '../types';
 import {triggerPeers} from '../mapping-triggers';
 import type {Capture,CaptureKind} from './ActionMappings';
-import {ActionTriggerFields,InputCaptureButton,InputChordFields,InputQuickKeys,OutputChordFields,quickInputKeys} from './BindingFields';
+import {ActionTriggerFields,InputCaptureButton,ControllerInputChoices} from './BindingFields';
+import {OptionPicker} from './OptionPicker';
+import {t} from '../i18n';
+import {outputChoices,padInputLabel} from './binding-choices';
 import {Dialog,Range,Toggle} from './Controls';
 import styles from './ActionEditor.module.css';
 import {keyboardKeys,modifierOutputs as modifiers} from '../keyboard';
 
 const primaryModifiers=['key:CTRL','key:ALT','key:SHIFT'];
-const keyboardRows=[['ESC',...Array.from({length:11},(_,i)=>'F'+(i+1))],['GRAVE',...'1234567890','MINUS','EQUALS','BACKSPACE'],['TAB',...'QWERTYUIOP','LEFTBRACKET','RIGHTBRACKET','BACKSLASH'],['CAPSLOCK',...'ASDFGHJKL','SEMICOLON','APOSTROPHE','ENTER'],[...'ZXCVBNM','COMMA','PERIOD','SLASH'],['SPACE','LEFT','UP','DOWN','RIGHT','DELETE']];
+const keyboardRows=[['ESC',...keyboardKeys.filter(key=>key.group==='function'&&Number(key.name.slice(1))<=12).map(key=>key.name)],['GRAVE',...'1234567890','MINUS','EQUALS','BACKSPACE'],['TAB',...'QWERTYUIOP','LEFTBRACKET','RIGHTBRACKET','BACKSLASH'],['CAPSLOCK',...'ASDFGHJKL','SEMICOLON','APOSTROPHE','ENTER'],[...'ZXCVBNM','COMMA','PERIOD','SLASH'],['SPACE','LEFT','UP','DOWN','RIGHT','DELETE']];
 const keyText=(key:string)=>({UP:'↑',DOWN:'↓',LEFT:'←',RIGHT:'→',BACKSPACE:'⌫',ENTER:'↵',DELETE:'Del',CAPSLOCK:'Caps'}[key]??outputLabel('key:'+key));
 type KeyboardSection='main'|'extended'|'numpad';
 const sectionForOutput=(value:string):KeyboardSection=>{
@@ -16,7 +19,7 @@ const sectionForOutput=(value:string):KeyboardSection=>{
   return key?.group==='numpad'?'numpad':key?.group==='navigation'||key?.group==='modifier'&&!primaryModifiers.includes('key:'+key.name)||key?.group==='function'&&Number(key.name.slice(1))>12?'extended':'main';
 };
 
-export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubmit,capture,onCapture,onCancelCapture,onAssignEscape,busy,error,layerName,navigation=false}:{action:Action;isNew:boolean;profile?:Profile;index:number|null;onChange:(patch:Partial<Action>)=>void;onClose:()=>void;onSubmit:()=>void;capture:Capture|null;onCapture:(kind:CaptureKind)=>void;onCancelCapture:()=>void;onAssignEscape:()=>void;busy:boolean;error?:string;layerName?:string;navigation?:boolean}) {
+export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubmit,capture,onCapture,onCancelCapture,onAssignEscape,busy,error,layerName,navigation=false,split=false}:{action:Action;isNew:boolean;profile?:Profile;index:number|null;onChange:(patch:Partial<Action>)=>void;onClose:()=>void;onSubmit:()=>void;capture:Capture|null;onCapture:(kind:CaptureKind)=>void;onCancelCapture:()=>void;onAssignEscape:()=>void;busy:boolean;error?:string;layerName?:string;navigation?:boolean;split?:boolean}) {
   const [inputCombo,setInputCombo]=useState(chordParts(action.input).length>1);
   const [outputCombo,setOutputCombo]=useState(chordParts(action.output).filter(value=>!modifiers.includes(value)).length>1);
   useEffect(()=>{if(chordParts(action.input).length>1)setInputCombo(true);},[action.input]);
@@ -44,6 +47,7 @@ export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubm
     return [...output.filter(part=>!wheelOutputs.includes(value)||!wheelOutputs.includes(part)),value];
   };
   const chooseOutput=(value:string)=>{const values=nextOutput(value);if(values.length>4)return;onChange({output:values.join('+'),repeat_ms:values.some(value=>wheelOutputs.includes(value))?action.repeat_ms??null:null});};
+  const inputName=(value:string)=>chordParts(value).map(part=>t(padInputLabel(part,split))).join(' + ');
   const inputPreview=capture?.kind==='pad'&&capture.preview?.length?capture.preview.join('+'):action.input;
   const outputPreview=capture?.kind==='key'&&capture.preview?.length?capture.preview.join('+'):action.output;
   const record=(kind:CaptureKind)=>capture?.kind===kind?onCancelCapture():onCapture(kind);
@@ -54,16 +58,13 @@ export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubm
     <div className={styles.columns}>
       <section className={styles.panel} aria-label="手柄输入设置" data-pad-zone="binding-input">
         <div className={styles.heading}><h3>手柄输入</h3><span>1</span></div>
-        <InputCaptureButton value={inputLabel(inputPreview)} recording={capture?.kind==='pad'}
+        <InputCaptureButton value={inputName(inputPreview)} recording={capture?.kind==='pad'}
           disabled={busy||!!capture&&capture.kind!=='pad'} onClick={()=>record('pad')}/>
         <fieldset className={styles.manual} disabled={locked}>
-          <div className={styles.parts} aria-label="已选手柄输入">{input.map(value=><button type="button" key={value} aria-label={'移除输入 '+inputLabel(value)} onClick={()=>onChange({input:input.filter(part=>part!==value).join('+')})}>{inputLabel(value)} <span aria-hidden="true">×</span></button>)}</div>
+          <div className={styles.parts} aria-label="已选手柄输入">{input.map(value=><button type="button" key={value} aria-label={'移除输入 '+inputName(value)} onClick={()=>onChange({input:input.filter(part=>part!==value).join('+')})}>{inputName(value)} <span aria-hidden="true">×</span></button>)}</div>
           <div className={styles.sectionHeading}>触发方式</div><ActionTriggerFields action={action} onChange={onChange} peers={triggerPeers(profile,'action',index)}/>
           <Toggle label="组合输入" value={inputCombo} onChange={setInputCombo}/>
-          <InputQuickKeys value={action.input} combo={inputCombo} onChange={input=>onChange({input})}/>
-          <details className={styles.advanced} open={input.some(value=>!quickInputKeys.some(([key])=>key===value))||input.length===0}>
-            <summary>完整输入与组合设置</summary><InputChordFields value={action.input} onChange={value=>onChange({input:value})}/>
-          </details>
+          <ControllerInputChoices split={split} value={action.input} combo={inputCombo} onChange={input=>onChange({input})}/>
           {analog&&<Range label="触发阈值" value={action.threshold} min={0} max={0.95} step={0.05} onChange={threshold=>onChange({threshold})} help="扳机或摇杆方向超过该比例时，触发对应键鼠操作。"/>}
         </fieldset>
       </section>
@@ -78,6 +79,9 @@ export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubm
         <fieldset className={styles.manual} disabled={locked}>
           <div className={styles.parts} aria-label="已选键鼠输出">{output.map(value=><button type="button" key={value} aria-label={'移除输出 '+outputLabel(value)} onClick={()=>{const values=output.filter(part=>part!==value);onChange({output:values.join('+'),repeat_ms:values.some(value=>wheelOutputs.includes(value))?action.repeat_ms??null:null});}}>{outputLabel(value)} <span aria-hidden="true">×</span></button>)}</div>
           <div className={styles.outputTools}><div className={styles.tabs} role="tablist" aria-label="输出类型">{([['keyboard','键盘'],['mouse','鼠标'],['wheel','滚轮']] as const).map(([value,label])=><button type="button" role="tab" key={value} aria-selected={tab===value} onClick={()=>setTab(value)}>{label}</button>)}</div><Toggle label="组合输出" value={outputCombo} onChange={setOutputCombo}/></div>
+          <OptionPicker label="搜索全部键鼠键位" placeholder="搜索全部键鼠键位" value={null}
+            groups={outputChoices().map(group=>({...group,options:group.options.map(option=>({...option,disabled:nextOutput(option.value).length>4}))}))}
+            onChange={value=>{chooseOutput(value);setTab(wheelOutputs.includes(value)?'wheel':mouseOutputs.includes(value)?'mouse':'keyboard');setKeyboardSection(sectionForOutput(value));}}/>
           <div className={styles.keyboardTools}><div className={styles.modifiers}>{primaryModifiers.map(value=><button type="button" key={value} aria-label={'输出 '+outputLabel(value)} aria-pressed={output.includes(value)} disabled={nextOutput(value).length>4} onClick={()=>chooseOutput(value)}>{outputLabel(value)}</button>)}</div>
             {tab==='keyboard'&&<div className={styles.keyboardSections} role="group" aria-label="键盘区域">
               {([['main','主键区'],['extended','导航与扩展键'],['numpad','数字小键盘']] as const).map(([value,label])=><button
@@ -87,11 +91,10 @@ export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubm
           {tab==='keyboard'?keyboardSection==='main'?<div className={styles.keyboard} aria-label="键盘选键">{keyboardRows.map((row,index)=><div className={styles.keyRow} key={index}>{row.map(key=><button type="button" key={key} aria-label={'输出 '+outputLabel('key:'+key)} title={outputLabel('key:'+key)} aria-pressed={output.includes('key:'+key)} disabled={nextOutput('key:'+key).length>4} onClick={()=>chooseOutput('key:'+key)}>{keyText(key)}</button>)}</div>)}</div>:<div className={styles.extraKeys} aria-label="扩展键盘选键">{keyboardKeys.filter(key=>keyboardSection==='numpad'?key.group==='numpad':key.group==='navigation'||key.group==='modifier'&&!primaryModifiers.includes('key:'+key.name)||key.group==='function'&&Number(key.name.slice(1))>12).map(key=><button type="button" key={key.name} aria-label={'输出 '+outputLabel('key:'+key.name)} aria-pressed={output.includes('key:'+key.name)} disabled={nextOutput('key:'+key.name).length>4} onClick={()=>chooseOutput('key:'+key.name)}>{outputLabel('key:'+key.name)}</button>)}</div>:<div className={styles.mouseKeys} aria-label={tab==='mouse'?'鼠标按钮选键':'鼠标滚轮选键'}>{(tab==='mouse'?mouseOutputs:wheelOutputs).map(value=><button type="button" key={value} aria-label={'输出 '+outputLabel(value)} aria-pressed={output.includes(value)} disabled={nextOutput(value).length>4} onClick={()=>chooseOutput(value)}>{outputLabel(value)}</button>)}</div>}
           <p className={styles.hint}>{outputCombo?'可组合最多 4 项。再次选择可移除，滚轮最多一个方向。':'选择一个普通输出，Ctrl／Alt／Shift 可独立叠加。'}</p>
           {hasWheel&&<><Toggle label="按住连续滚动" value={action.repeat_ms!=null} onChange={enabled=>onChange({repeat_ms:enabled?100:null})}/>{action.repeat_ms!=null&&<Range label="滚动间隔" value={action.repeat_ms} min={20} max={2000} step={10} unit=" ms" onChange={repeat_ms=>onChange({repeat_ms})}/>}</>}
-          <details className={styles.advanced}><summary>完整输出与组合设置</summary><OutputChordFields action={action} onChange={onChange} showRepeat={false}/></details>
         </fieldset>
       </section>
     </div>
     {capture&&<p className={styles.recording} role="status">{capture.kind==='key'?'按下组合键或鼠标按钮，全部松开后完成；也可滚动滚轮。':'同时按住手柄按键或摇杆方向，全部松开后完成。'} Esc 取消录入。{navigation&&' View + Menu 取消录入。'}
-      {!!capture.preview?.length&&<strong> {capture.kind==='key'?outputLabel(capture.preview.join('+')):inputLabel(capture.preview.join('+'))}</strong>}</p>}
+      {!!capture.preview?.length&&<strong> {capture.kind==='key'?outputLabel(capture.preview.join('+')):inputName(capture.preview.join('+'))}</strong>}</p>}
   </Dialog>;
 }

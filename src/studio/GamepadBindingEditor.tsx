@@ -4,8 +4,8 @@ import {chordParts, inputs, type GamepadBinding, type GamepadTarget, type Profil
 import {hasAnalogCondition,isAnalogGamepadBinding,triggerPeers} from '../mapping-triggers';
 import type {GamepadBindingRecording} from '../pad-capture';
 import layout from '../virtual-gamepad-layout.json';
-import {ActionTriggerFields,InputCaptureButton,InputChordFields,InputQuickKeys,quickInputKeys} from './BindingFields';
-import {padInputLabel} from './binding-choices';
+import {ActionTriggerFields,InputCaptureButton,ControllerInputChoices} from './BindingFields';
+import {padInputLabel,controllerGroups} from './controller-catalog';
 import {Dialog,Range,Toggle} from './Controls';
 import styles from './ActionEditor.module.css';
 
@@ -101,11 +101,7 @@ export function GamepadBindingEditor({value, index, bindings, profile, target, s
   });
   const inputName = (input: string) => layout.sticks.includes(input) ? gamepadControlLabel(input) : t(padInputLabel(input, split));
   const preview = recording?.preview?.length ? recording.preview : parts;
-  const outputGroups = [
-    {label: '手柄按键', controls: [...layout.buttons, ...layout.dualshock_4].filter(control => available.includes(control))},
-    {label: '摇杆', controls: layout.sticks},
-    {label: '扳机', controls: layout.triggers},
-  ];
+  const outputGroups = controllerGroups(available).map(({label,values}) => ({label,controls:values}));
   return <Dialog
     title={index === null ? '添加手柄映射' : '编辑手柄映射'}
     className={styles.editorDialog}
@@ -135,21 +131,10 @@ export function GamepadBindingEditor({value, index, bindings, profile, target, s
             })}
           </div>}
           <Toggle label="组合输入" value={inputCombo} onChange={setInputCombo}/>
-          <InputQuickKeys value={stickInput ? '' : draft.input} combo={inputCombo} split={split} onChange={chooseInput}/>
-          <div className={styles.sectionHeading}>实体摇杆</div>
-          <div className={styles.inputKeys + ' ' + styles.pairedKeys} role="group" aria-label="实体摇杆">
-            {layout.sticks.map(input => <button type="button" key={input} aria-pressed={draft.input === input}
-              onClick={() => chooseInput(input)}>{gamepadControlLabel(input)}</button>)}
-          </div>
+          <ControllerInputChoices value={draft.input} combo={inputCombo} split={split}
+            allowed={[...inputs,...layout.sticks]} exclusive={layout.sticks} onChange={chooseInput}/>
           {!wholeStick && <button type="button" className="secondary-btn" disabled={!canRecord}
             onClick={() => record(true)}>监听摇杆</button>}
-          <details className={styles.advanced} open={!stickInput && parts.some(part => !quickInputKeys.some(([key]) => key === part))}>
-            <summary>完整输入与组合设置</summary>
-            <InputChordFields value={stickInput ? '' : draft.input} split={split} showHint={false} onChange={input => {
-              if (chordParts(input).length > 1) setInputCombo(true);
-              chooseInput(input);
-            }}/>
-          </details>
           {selected && !analog && <details className={styles.advanced}>
             <summary>触发方式</summary>
             {hasAnalogCondition(draft.input) && <Range label="输入触发阈值" value={threshold} min={0} max={0.99} step={0.01}

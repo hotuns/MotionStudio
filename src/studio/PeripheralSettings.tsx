@@ -24,6 +24,9 @@ export function TouchpadSettings({profile,device,status,update}:Props){
  const set=<K extends keyof TouchpadConfig>(key:K,value:TouchpadConfig[K])=>update(p=>{p.touchpad={...touchpadConfig(p),[key]:value};});
  const count=Math.min(2,Math.max(1,device?.touchpads??0));
  return <section className={styles.group} data-setting-section="touch-general">
+  <div className={styles.groupHeading}><h3>触摸板方向手势</h3></div>
+  <p className={styles.hint}>在动作映射中添加动作，输入选择「触摸板上滑／下滑／左滑／右滑」，即可分别绑定按键。无需开启触摸板鼠标。</p>
+  <p className={styles.hint}>沿主要方向滑动超过触摸板约 18% 的距离触发一次，输出约 120 ms；抬手后可以再次滑动。双指或双触摸板的同方向手势会合并。建议使用默认的按住触发方式。</p>
   <div className={styles.groupHeading}><h3>原生触摸板鼠标</h3></div>
   <Toggle label="启用触摸板鼠标" value={config.enabled} onChange={v=>set('enabled',v)}/>
   <p className={styles.hint}>单指移动光标，双指滚动。单指轻点为左键，双指轻点为右键，按住触摸板可拖动。双触摸板使用左板滚动、右板移动，双板同时按下为中键。</p>

@@ -40,3 +40,7 @@ dialog.editorDialog { width: min(1080px,calc(100vw - 40px)); }
 .recording { padding: 10px 12px; border: 1px solid var(--accent); border-radius: var(--section-radius); background: color-mix(in srgb,var(--accent) 6%,var(--bg-input)); }
 .manual button:disabled { opacity: .4; cursor: not-allowed; }
 @media(max-width:850px) { .columns { grid-template-columns: minmax(0,1fr); } .identity { align-items: start; flex-direction: column; gap: 8px; }.identity label { width: 100%; }.context { text-align: left; } }
+
+.inputCategories { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 12px; }
+.inputCategories button { flex: 1 0 auto; padding: 7px 10px; font-size: 12px; }
+.inputCategories button[aria-pressed='true'] { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb,var(--accent) 11%,var(--bg-input)); }

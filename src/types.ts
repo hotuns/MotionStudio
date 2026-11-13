@@ -85,7 +85,9 @@ Object.assign(labels,{
   right_trigger_soft:'RT 轻拉', right_trigger_full:'RT 全拉',
 });
 export const triggerStageInputs = ['left_trigger_soft','left_trigger_full','right_trigger_soft','right_trigger_full'];
-export const inputs = ['touch1','touch2','left_stick_outer','left_stick_inner','right_stick_outer','right_stick_inner',...buttonNames,'left_trigger','right_trigger',...triggerStageInputs,'left_stick_up','left_stick_down','left_stick_left','left_stick_right','right_stick_up','right_stick_down','right_stick_left','right_stick_right'];
+export const swipeInputs = ['touch_swipe_up','touch_swipe_down','touch_swipe_left','touch_swipe_right'];
+Object.assign(labels,{touch_swipe_up:'触摸板上滑',touch_swipe_down:'触摸板下滑',touch_swipe_left:'触摸板左滑',touch_swipe_right:'触摸板右滑'});
+export const inputs = [...swipeInputs,'touch1','touch2','left_stick_outer','left_stick_inner','right_stick_outer','right_stick_inner',...buttonNames,'left_trigger','right_trigger',...triggerStageInputs,'left_stick_up','left_stick_down','left_stick_left','left_stick_right','right_stick_up','right_stick_down','right_stick_left','right_stick_right'];
 export const chordParts=(value:string)=>value.split('+').map(v=>v.trim()).filter(Boolean);
 export const inputLabel=(value:string)=>chordParts(value).map(v=>t(labels[v]??v)).join(' + ');
 export const mouseOutputs=['mouse:left','mouse:right','mouse:middle','mouse:x1','mouse:x2'];

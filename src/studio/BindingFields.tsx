@@ -1,22 +1,15 @@
+import {useEffect,useState} from 'react';
 import {chordParts,inputs,outputLabel,wheelOutputs,type Action,type TriggerSettings} from '../types';
 import {triggerCompetition,type TriggerBinding} from '../mapping-triggers';
 import {t} from '../i18n';
 import {Range,Toggle} from './Controls';
 import {OptionPicker} from './OptionPicker';
 import {padChoices, outputChoices, padInputLabel} from './binding-choices';
+import {controllerCategory,controllerGroups} from './controller-catalog';
 import editorStyles from './ActionEditor.module.css';
 import styles from './GameProfilesPage.module.css';
 import {modifierOutputs as modifiers} from '../keyboard';
 export const inputOpposites:Record<string,string>={left_stick_up:'left_stick_down',left_stick_down:'left_stick_up',left_stick_left:'left_stick_right',left_stick_right:'left_stick_left',right_stick_up:'right_stick_down',right_stick_down:'right_stick_up',right_stick_left:'right_stick_right',right_stick_right:'right_stick_left',dpad_up:'dpad_down',dpad_down:'dpad_up',dpad_left:'dpad_right',dpad_right:'dpad_left',left_stick_inner:'left_stick_outer',left_stick_outer:'left_stick_inner',right_stick_inner:'right_stick_outer',right_stick_outer:'right_stick_inner'};
-export const quickInputKeys = [
-  ['south','A'], ['east','B'], ['west','X'], ['north','Y'],
-  ['left_shoulder','LB'], ['right_shoulder','RB'], ['left_trigger','LT'], ['right_trigger','RT'],
-  ['left_trigger_soft','LT 轻拉'], ['left_trigger_full','LT 全拉'], ['right_trigger_soft','RT 轻拉'], ['right_trigger_full','RT 全拉'],
-  ['dpad_up','↑'], ['dpad_down','↓'], ['dpad_left','←'], ['dpad_right','→'],
-  ['left_stick_click','LS'], ['right_stick_click','RS'], ['back','View'], ['start','Menu'],
-  ['guide','Home'], ['touchpad','触摸板'], ['left_stick_outer','左外圈'], ['right_stick_outer','右外圈'],
-];
-
 export function InputCaptureButton({value, recording, disabled, hint, onClick}: {
   value: string;
   recording: boolean;
@@ -33,23 +26,43 @@ export function InputCaptureButton({value, recording, disabled, hint, onClick}: 
   </button>;
 }
 
-export function InputQuickKeys({value, combo, split = false, onChange}: {
+export function ControllerInputChoices({value, combo, split = false, allowed = inputs, exclusive = [], onChange}: {
   value: string;
   combo: boolean;
   split?: boolean;
+  allowed?: string[];
+  exclusive?: string[];
   onChange: (value: string) => void;
 }) {
   const parts = chordParts(value);
-  return <div className={editorStyles.inputKeys} role="group" aria-label="手柄按键">
-    {quickInputKeys.map(([key, label]) => {
-      const selected = parts.includes(key);
-      const disabled = combo && !selected && (parts.length >= 4 || parts.some(part => inputOpposites[part] === key));
-      const next = !combo ? key : (selected ? parts.filter(part => part !== key) : [...parts, key]).join('+');
-      const name = t(padInputLabel(key, split));
-      return <button type="button" key={key} aria-label={'选择输入 '+name} title={name}
-        aria-pressed={selected} disabled={disabled} onClick={() => onChange(next)}>{label}</button>;
-    })}
-  </div>;
+  const groups = controllerGroups(allowed, split);
+  const [category, setCategory] = useState(() => controllerCategory(parts[parts.length - 1] ?? '', split));
+  // Follow captured input as well as manual selection, without resetting a browsed category.
+  useEffect(() => {
+    const selected = chordParts(value);
+    if (selected.length) setCategory(controllerCategory(selected[selected.length - 1], split));
+  }, [value, split]);
+  const active = groups.find(group => group.id === category) ?? groups[0];
+  return <>
+    <div className={editorStyles.inputCategories} role="group" aria-label="手柄输入分类">
+      {groups.map(group => <button type="button" className="secondary-btn" key={group.id}
+        aria-pressed={active?.id === group.id} onClick={() => setCategory(group.id)}>
+        {t(group.label)}{parts.some(part => group.values.includes(part)) && <span aria-hidden="true"> ·</span>}
+      </button>)}
+    </div>
+    {active && <div className={editorStyles.inputKeys} role="group" aria-label={t(active.label)}>
+      {active.values.map(key => {
+        const selected = parts.includes(key);
+        const combine = combo && !exclusive.includes(key) && !parts.some(part => exclusive.includes(part));
+        const disabled = combine && !selected && (parts.length >= 4 || parts.some(part => inputOpposites[part] === key));
+        const next = !combine ? key : (selected ? parts.filter(part => part !== key) : [...parts, key]).join('+');
+        const name = t(padInputLabel(key, split));
+        return <button type="button" key={key} aria-label={'选择输入 '+name} title={name}
+          aria-pressed={selected} disabled={disabled} onClick={() => onChange(next)}>{name}</button>;
+      })}
+    </div>}
+    {active?.id === 'touchpad' && <p className={editorStyles.hint}>滑动方向请在此选择；手柄录入暂不识别滑动手势。</p>}
+  </>;
 }
 
 export const triggerNames={down:'按住',short:'短按',long:'长按',double:'双击',on_press:'按下时触发',on_release:'松开时触发'};

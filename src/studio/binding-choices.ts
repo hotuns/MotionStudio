@@ -1,30 +1,25 @@
 import {keyboardKeys} from '../keyboard';
-import {inputs, labels, mouseOutputs, outputLabel, triggerStageInputs, wheelOutputs} from '../types';
+import {inputs, mouseOutputs, outputLabel, wheelOutputs} from '../types';
 import type {PickerGroup} from './OptionPicker';
 
-const rings = ['left_stick_inner', 'left_stick_outer', 'right_stick_inner', 'right_stick_outer'];
-const directions = [
-  'left_stick_up', 'left_stick_down', 'left_stick_left', 'left_stick_right',
-  'right_stick_up', 'right_stick_down', 'right_stick_left', 'right_stick_right',
-];
-const triggers = ['left_trigger', 'right_trigger', ...triggerStageInputs];
-
-export const padInputLabel = (input: string, split = false) =>
-  split && input === 'touchpad' ? '触摸板 1 按下' :
-  split && input === 'misc2' ? '触摸板 2 按下' : labels[input] ?? input;
+import {controllerGroups, padInputLabel, motionPadOutputs} from './controller-catalog';
+export {padInputLabel} from './controller-catalog';
 
 export function padChoices(allowed = inputs, blocked: string[] = [], split = false): PickerGroup[] {
-  const touchpad = split ? ['touchpad', 'misc2', 'touch1', 'touch2'] : ['touchpad', 'touch1', 'touch2'];
-  const grouped = new Set([...rings, ...directions, ...triggers, ...touchpad]);
   const aliases: Record<string, string> = {left_stick_outer:'左外圈 LS outer ring', right_stick_outer:'右外圈 RS outer ring'};
-  const make = (label: string, values: string[]) => ({label, options:values.filter(input => allowed.includes(input)).map(value => ({
-    value, label:padInputLabel(value, split), search:aliases[value], disabled:blocked.includes(value),
-  }))});
-  return [
-    make('手柄按键', allowed.filter(input => !grouped.has(input))),
-    make('触摸板', touchpad), make('摇杆内外圈', rings),
-    make('扳机', triggers), make('摇杆方向', directions),
-  ];
+  return controllerGroups(allowed, split).map(({label, values}) => ({label,
+    options:values.map(value => ({value, label:padInputLabel(value, split),
+      search:aliases[value], disabled:blocked.includes(value)})),
+  }));
+}
+
+export function motionPadChoices(): PickerGroup[] {
+  return padChoices(Object.values(motionPadOutputs)).map(group => ({
+    label:'虚拟手柄 · '+group.label,
+    options:group.options.map(option => ({...option,
+      value:'pad:'+Object.keys(motionPadOutputs).find(pin => motionPadOutputs[pin] === option.value),
+    })),
+  }));
 }
 
 export function keyboardChoices(allowed: string[], prefix = '', blocked: string[] = []): PickerGroup[] {

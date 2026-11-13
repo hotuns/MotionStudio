@@ -42,7 +42,7 @@ type InputGroup = {input: string; rows: MappingRow[]};
 
 const groupedControls = ['left_stick', 'right_stick', 'left_trigger', 'right_trigger'];
 function physicalControl(input: string): string {
-  if (input === 'touch1' || input === 'touch2') return 'touchpad';
+  if (input === 'touch1' || input === 'touch2' || input.startsWith('touch_swipe_')) return 'touchpad';
   return groupedControls.find(control => input.startsWith(control + '_')) ?? input;
 }
 const actionCountLabel = (count: number) => count === 1

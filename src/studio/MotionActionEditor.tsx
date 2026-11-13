@@ -3,21 +3,11 @@ import {t} from '../i18n';
 import {inputLabel, outputLabel, type MotionBinding, type TurnBinding} from '../types';
 import {Dialog, Range} from './Controls';
 import {OptionPicker} from './OptionPicker';
-import {outputChoices, padChoices} from './binding-choices';
+import {outputChoices, padChoices, motionPadChoices} from './binding-choices';
+import {imuOptions, motionPadOutputs, padInputLabel} from './controller-catalog';
 import {CurveEditor} from './CurveEditor';
 import styles from './MotionControls.module.css';
 
-const imuOptions:[string,string,number][]=[
-  ['imu_tilt_left','向左倾斜',45],['imu_tilt_right','向右倾斜',45],['imu_tilt_up','抬高手柄前端',45],['imu_tilt_down','压低手柄前端',45],
-  ['imu_tilt_pitch','俯仰角（双向）',45],['imu_tilt_roll','横滚角（双向）',45],
-  ['imu_gyro_pitch','俯仰转速（双向）',360],['imu_gyro_pitch_up','向上转动',360],['imu_gyro_pitch_down','向下转动',360],
-  ['imu_gyro_yaw','水平转速（双向）',360],['imu_gyro_yaw_left','向左转动',360],['imu_gyro_yaw_right','向右转动',360],
-  ['imu_gyro_roll','横滚转速（双向）',360],['imu_gyro_roll_left','向左横滚',360],['imu_gyro_roll_right','向右横滚',360],
-  ['imu_accel_ud','上下加速度（双向）',1],['imu_accel_up','向上加速',1],['imu_accel_down','向下加速',1],
-  ['imu_accel_lr','左右加速度（双向）',1],['imu_accel_left','向左加速',1],['imu_accel_right','向右加速',1],
-  ['imu_accel_fb','前后加速度（双向）',1],['imu_accel_forward','向前加速',1],['imu_accel_backward','向后加速',1],
-];
-const padOutputs=[['left_stick_x','左摇杆水平'],['left_stick_y','左摇杆垂直'],['right_stick_x','右摇杆水平'],['right_stick_y','右摇杆垂直'],['left_trigger','左扳机'],['right_trigger','右扳机'],['btn_south','A / 南键'],['btn_east','B / 东键'],['btn_west','X / 西键'],['btn_north','Y / 北键'],['btn_start','Menu'],['btn_back','View'],['btn_ls','左摇杆按下'],['btn_rs','右摇杆按下'],['btn_lb','左肩键'],['btn_rb','右肩键'],['btn_guide','主菜单'],['dpad_up','方向键上'],['dpad_down','方向键下'],['dpad_left','方向键左'],['dpad_right','方向键右']];
 
 const turnOutputs = [
   {value:'mouse',label:'鼠标'},
@@ -34,9 +24,9 @@ export function motionActionLabels(action: MotionAction) {
       tag:t('定角转身')};
   }
   const {input, output} = action.value;
-  const pin = output.startsWith('pad:') && padOutputs.find(([id])=>id===output.slice(4));
+  const pin = output.startsWith('pad:') && motionPadOutputs[output.slice(4)];
   return {input:t(imuOptions.find(([id])=>id===input)?.[1] ?? input),
-    output:pin ? t(pin[1]) : outputLabel(output), tag:t('体感动作')};
+    output:pin ? t(padInputLabel(pin)) : outputLabel(output), tag:t('体感动作')};
 }
 
 export function newMotionAction(kind: MotionAction['kind']): MotionAction {
@@ -49,12 +39,12 @@ function MotionFields({action, onChange}: {action: MotionBinding; onChange: (pat
   return <>
     <div className="studio-field">体感输入
       <OptionPicker label="体感输入" value={action.input}
-        groups={[{options:imuOptions.map(([value,label])=>({value,label}))}]}
+        groups={padChoices(imuOptions.map(([value])=>value))}
         onChange={input=>onChange({input,range:imuOptions.find(([id])=>id===input)![2]})}/>
     </div>
     <div className="studio-field">映射输出
       <OptionPicker label="映射输出" value={action.output}
-        groups={[...outputChoices(),{label:'虚拟手柄',options:padOutputs.map(([id,label])=>({value:'pad:'+id,label}))}]}
+        groups={[...outputChoices(),...motionPadChoices()]}
         onChange={output=>onChange({output})}/>
     </div>
     <div className="studio-field">触发方式

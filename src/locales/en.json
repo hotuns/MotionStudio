@@ -2177,5 +2177,20 @@
   "搜索参数、页面或操作…": "Search settings, pages or actions…",
   "搜索参数后直接定位，自动展开所在分组。": "Search for a setting to jump to it and expand its group.",
   "基础层共用": "Shared from base",
-  "轻拉与全拉": "Soft & full pull"
+  "轻拉与全拉": "Soft & full pull",
+  "触摸板上滑": "Touchpad swipe up",
+  "触摸板下滑": "Touchpad swipe down",
+  "触摸板左滑": "Touchpad swipe left",
+  "触摸板右滑": "Touchpad swipe right",
+  "触摸板方向手势": "Directional touchpad gestures",
+  "在动作映射中添加动作，输入选择「触摸板上滑／下滑／左滑／右滑」，即可分别绑定按键。无需开启触摸板鼠标。": "Add an action and choose Touchpad swipe up, down, left or right as its input to assign a key. Touchpad mouse does not need to be enabled.",
+  "沿主要方向滑动超过触摸板约 18% 的距离触发一次，输出约 120 ms；抬手后可以再次滑动。双指或双触摸板的同方向手势会合并。建议使用默认的按住触发方式。": "Moving more than approximately 18% of the pad along the dominant axis produces one pulse of about 120 ms. Lift the finger before swiping again. Matching directions from two fingers or pads are combined. Use the default Hold activation.",
+  "搜索全部键鼠键位": "Search all keyboard and mouse inputs",
+  "虚拟手柄 · {0}": "Virtual controller · {0}",
+  "虚拟手柄 ·": "Virtual controller ·",
+  "手柄输入分类": "Controller input categories",
+  "滑动方向请在此选择；手柄录入暂不识别滑动手势。": "Select a swipe direction here; controller recording does not yet detect swipe gestures.",
+  "按键": "Buttons",
+  "十字键": "D-pad",
+  "扳机键": "Triggers"
 }

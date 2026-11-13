@@ -120,6 +120,7 @@ pub fn input_pin(input: &str) -> Option<&str> {
         })
         .or_else(|| DIRECTIONS.contains(&input).then_some(input))
         .or_else(|| ZONES.contains(&input).then_some(input))
+        .or_else(|| crate::touchpad::SWIPE_PINS.contains(&input).then_some(input))
         .or(match input {
             "touch1" => Some("touch1_active"),
             "touch2" => Some("touch2_active"),

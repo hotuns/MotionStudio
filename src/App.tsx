@@ -964,7 +964,7 @@ export default function App() {
           captureLease={!!status?.binding_capture} split={(device?.touchpads ?? 0)>=2}
           error={dialogError} onOpenWindow={progress=>openBatchWindow(batch,progress)}
           onClose={closeBatch} onKeep={keepBatch}/>)}
-    {editor && <ActionEditor key={editingLayer+':'+String(editor.index)} action={editor.action} isNew={editor.index===null} profile={profile} index={editor.index}
+    {editor && <ActionEditor key={editingLayer+':'+String(editor.index)} action={editor.action} isNew={editor.index===null} profile={profile} index={editor.index} split={(device?.touchpads ?? 0)>=2}
       onChange={updateEditor} onClose={closeEditor} onSubmit={finishEditing} error={dialogError} busy={busy}
       capture={actionRecording} onCapture={kind=>startCapture(kind,null)} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
       layerName={draft?.profile.layers?.find(layer=>layer.id===editingLayer)?.name} navigation={!!status?.ui_navigation}/>}

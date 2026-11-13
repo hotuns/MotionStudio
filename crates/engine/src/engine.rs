@@ -374,6 +374,7 @@ fn controls(profile: &Profile, actions: &[Action]) -> (GraphRunner, Vec<PressCom
         .chain(DIRECTIONS)
         .chain(ZONES)
         .chain(crate::profile::TOUCH_PINS)
+        .chain(&crate::touchpad::SWIPE_PINS)
         .chain(&TRIGGER_STAGE_PINS)
         .map(|p| p.to_string())
         .collect();
@@ -1000,6 +1001,13 @@ impl Engine {
         self.input.tick(&self.raw_signals, dt, !filter);
         self.base_input.tick(&self.raw_signals, dt, !filter);
         self.signals.clone_from(&self.input.signals);
+        // Evaluate native swipe gestures before actions/layers on every FIFO
+        // control edge and drained input tick, independently of mouse routing.
+        let swipes = self.touchpad.swipe_signals((time * 1e9) as u64, !filter);
+        for (pin, down) in crate::touchpad::SWIPE_PINS.into_iter().zip(swipes) {
+            self.signals.set_pin(SOURCE, pin, Signal::Bool(down));
+            self.base_input.signals.set_pin(SOURCE, pin, Signal::Bool(down));
+        }
         for (i, (prefix, stick, limit)) in [
             ("left", Stick::Left, self.profile.stick_zones.left_outer),
             ("right", Stick::Right, self.profile.stick_zones.right_outer),
