@@ -6,6 +6,7 @@ use crate::{
     timing::{next_output_deadline, CONTINUOUS_OUTPUT_INTERVAL},
 };
 use anyhow::{bail, Context, Result};
+use flexinput_hidmaestro::profile::presets::KEYBOARD_REPORT_SIZE;
 use std::{
     collections::VecDeque,
     sync::{Arc, Condvar, Mutex, MutexGuard},
@@ -33,7 +34,7 @@ pub(super) trait ReportWriter: Send + 'static {
 
 #[derive(Clone, Debug)]
 pub(super) enum Report {
-    Keyboard([u8; 8]),
+    Keyboard([u8; KEYBOARD_REPORT_SIZE]),
     Buttons(u8),
     Motion {
         buttons: u8,
@@ -347,7 +348,7 @@ impl<K: ReportWriter> Devices<'_, K> {
         );
         result
     }
-    fn keyboard(&mut self, report: [u8; 8], delivery: Delivery) -> Result<()> {
+    fn keyboard(&mut self, report: [u8; KEYBOARD_REPORT_SIZE], delivery: Delivery) -> Result<()> {
         let start = Instant::now();
         let result = self.keyboard.write(&report, delivery);
         let completed = Instant::now();
@@ -362,7 +363,7 @@ impl<K: ReportWriter> Devices<'_, K> {
         result
     }
     fn neutral(&mut self) -> Result<()> {
-        let keys = self.keyboard([0; 8], Delivery::Release);
+        let keys = self.keyboard([0; KEYBOARD_REPORT_SIZE], Delivery::Release);
         let mouse = self.mouse([0; 7], Delivery::Release);
         self.next_scroll = Instant::now();
         keys.and(mouse)
@@ -668,8 +669,10 @@ mod tests {
         let (io, log, entered, release) = fixture(false);
         move_by(&io, 1, 0, 0);
         entered.recv_timeout(Duration::from_secs(2)).unwrap();
-        io.submit(Report::Keyboard([1, 0, 0, 0, 0, 0, 0, 0]))
-            .unwrap();
+        io.submit(Report::Keyboard([
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]))
+        .unwrap();
         io.motion(0, 2, 0).unwrap();
         io.motion(0, 3, 0).unwrap();
         io.submit(Report::Scroll {
@@ -682,24 +685,34 @@ mod tests {
         io.motion(8, 4, 0).unwrap();
         assert_eq!(io.stats().direct_motion_reports, 0);
         io.submit(Report::Buttons(0)).unwrap();
-        io.submit(Report::Keyboard([0; 8])).unwrap();
-        io.submit(Report::Keyboard([0, 0, 4, 0, 0, 0, 0, 0]))
+        io.submit(Report::Keyboard([0; KEYBOARD_REPORT_SIZE]))
             .unwrap();
-        io.submit(Report::Keyboard([0; 8])).unwrap();
+        io.submit(Report::Keyboard([
+            0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]))
+        .unwrap();
+        io.submit(Report::Keyboard([0; KEYBOARD_REPORT_SIZE]))
+            .unwrap();
         unblock(&io, release);
         io.drain().unwrap();
         let frames = log.lock().unwrap();
         assert_eq!(frames.len(), 10);
-        assert_eq!(frames[1], (false, vec![1, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(
+            frames[1],
+            (
+                false,
+                vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            )
+        );
         assert_eq!(xy(&frames[2].1), (5, 0));
         assert_eq!(&frames[3].1[5..], &[255, 1]);
         assert_eq!(frames[4].1[0], 8);
         assert_eq!(frames[5].1[0], 8);
         assert_eq!(xy(&frames[5].1), (4, 0));
         assert_eq!(frames[6].1[0], 0);
-        assert_eq!(frames[7], (false, vec![0; 8]));
+        assert_eq!(frames[7], (false, vec![0; KEYBOARD_REPORT_SIZE]));
         assert_eq!(frames[8].1[2], 4);
-        assert_eq!(frames[9], (false, vec![0; 8]));
+        assert_eq!(frames[9], (false, vec![0; KEYBOARD_REPORT_SIZE]));
     }
     #[test]
     fn reset_cancels_queued_motion_and_presses_before_allowing_new_input() {
@@ -708,8 +721,10 @@ mod tests {
         move_by(&io, 1, 0, 0);
         entered.recv_timeout(Duration::from_secs(2)).unwrap();
         move_by(&io, 2000, 0, 0);
-        io.submit(Report::Keyboard([0, 0, 4, 0, 0, 0, 0, 0]))
-            .unwrap();
+        io.submit(Report::Keyboard([
+            0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]))
+        .unwrap();
         let reset_io = io.clone();
         let reset = thread::spawn(move || reset_io.reset());
         wait_reset(&io.shared);
@@ -720,7 +735,7 @@ mod tests {
         {
             let frames = log.lock().unwrap();
             assert_eq!(frames.len(), 3);
-            assert_eq!(frames[1], (false, vec![0; 8]));
+            assert_eq!(frames[1], (false, vec![0; KEYBOARD_REPORT_SIZE]));
             assert_eq!(frames[2], (true, vec![0; 7]));
         }
         move_by(&io, 7, 0, 0);
@@ -742,7 +757,7 @@ mod tests {
         stop.join().unwrap().unwrap();
         let frames = log.lock().unwrap();
         assert_eq!(frames.len(), 3);
-        assert_eq!(frames[1], (false, vec![0; 8]));
+        assert_eq!(frames[1], (false, vec![0; KEYBOARD_REPORT_SIZE]));
         assert_eq!(frames[2], (true, vec![0; 7]));
     }
     #[test]
@@ -782,8 +797,10 @@ mod tests {
         let (mut io, log, entered, release) = fixture(true);
         move_by(&io, 1, 0, 0);
         entered.recv_timeout(Duration::from_secs(2)).unwrap();
-        io.submit(Report::Keyboard([1, 0, 0, 0, 0, 0, 0, 0]))
-            .unwrap();
+        io.submit(Report::Keyboard([
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]))
+        .unwrap();
         move_by(&io, 500, 0, 31);
         unblock(&io, release);
         assert!(io
@@ -795,8 +812,16 @@ mod tests {
         assert!(io.reset().is_err());
         assert!(io.stop().is_err());
         let frames = log.lock().unwrap();
-        assert_eq!(frames[1], (false, vec![1, 0, 0, 0, 0, 0, 0, 0]));
-        assert!(frames[2..].iter().any(|f| *f == (false, vec![0; 8])));
+        assert_eq!(
+            frames[1],
+            (
+                false,
+                vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            )
+        );
+        assert!(frames[2..]
+            .iter()
+            .any(|f| *f == (false, vec![0; KEYBOARD_REPORT_SIZE])));
         assert!(frames[2..].iter().any(|f| *f == (true, vec![0; 7])));
         assert!(frames[2..].iter().all(|(_, b)| b.iter().all(|v| *v == 0)));
     }
@@ -824,7 +849,7 @@ mod tests {
             *log.lock().unwrap(),
             [
                 (true, mouse_report(0, 20, -10, 0, 0).to_vec()),
-                (false, vec![0; 8]),
+                (false, vec![0; KEYBOARD_REPORT_SIZE]),
                 (true, vec![0; 7]),
             ]
         );
@@ -913,8 +938,10 @@ mod tests {
         io.idle_motion(0).unwrap();
         io.idle_motion(0).unwrap();
         assert_eq!(io.stats().mouse_reports, 2);
-        io.submit(Report::Keyboard([1, 0, 0, 0, 0, 0, 0, 0]))
-            .unwrap();
+        io.submit(Report::Keyboard([
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ]))
+        .unwrap();
         io.submit(Report::Scroll {
             buttons: 0,
             horizontal: 1,
@@ -922,7 +949,8 @@ mod tests {
         })
         .unwrap();
         io.submit(Report::Buttons(8)).unwrap();
-        io.submit(Report::Keyboard([0; 8])).unwrap();
+        io.submit(Report::Keyboard([0; KEYBOARD_REPORT_SIZE]))
+            .unwrap();
         io.drain().unwrap();
         let records = log.lock().unwrap();
         assert!(records

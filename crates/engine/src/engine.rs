@@ -1,3 +1,6 @@
+mod handoff;
+pub use handoff::PressHandoff;
+
 use crate::profile::{
     input_pin, Action, GamepadTarget, GyroActivationMode, GyroOutput, Profile, StickRegion,
     StickZones, Trigger, AXES, BUTTON_PINS, DIRECTIONS, PAD_PINS, ZONES,
@@ -581,6 +584,7 @@ pub struct Engine {
     raw_sticks: [Vec2; 2],
     zone_layouts: [flexinput_core::area::AreaLayout; 2],
     stick_time: f64,
+    handoff_blocked: BTreeSet<String>,
 }
 #[derive(Default)]
 struct BindingState {
@@ -775,6 +779,7 @@ impl Engine {
             measurement_scale: None,
             raw_sticks: [Vec2::ZERO; 2],
             stick_time: 0.,
+            handoff_blocked: BTreeSet::new(),
             zone_layouts: [0, 1].map(|_| {
                 let mut geometry = flexinput_core::area::AreaLayout::default_for(
                     flexinput_core::area::Shape::Circle,
@@ -974,7 +979,7 @@ impl Engine {
             self.clear_flick_output();
             let flick = &self.profile.gyro.motion.flick;
             self.flick_snapshot_blocked =
-                flick.enabled && self.stick_value(flick.stick).length() >= flick.deadzone;
+                flick.enabled && self.stick_value_radial(flick.stick).length() >= flick.deadzone;
         }
         self.eval_controls(true, self.action_time_ns);
         if touch_changed {
@@ -1006,7 +1011,9 @@ impl Engine {
         let swipes = self.touchpad.swipe_signals((time * 1e9) as u64, !filter);
         for (pin, down) in crate::touchpad::SWIPE_PINS.into_iter().zip(swipes) {
             self.signals.set_pin(SOURCE, pin, Signal::Bool(down));
-            self.base_input.signals.set_pin(SOURCE, pin, Signal::Bool(down));
+            self.base_input
+                .signals
+                .set_pin(SOURCE, pin, Signal::Bool(down));
         }
         for (i, (prefix, stick, limit)) in [
             ("left", Stick::Left, self.profile.stick_zones.left_outer),
@@ -1061,6 +1068,7 @@ impl Engine {
                 Signal::Bool(region == StickRegion::Inner),
             );
         }
+        self.mask_handoff_inputs();
     }
     pub fn processed_axes(&self) -> [f32; 6] {
         let mut axes: [f32; 6] = std::array::from_fn(|i| {
@@ -1262,7 +1270,9 @@ impl Engine {
         (self.flick_active()
             && match f.suppress {
                 Suppress::Full => true,
-                Suppress::Deadzone => f.enabled && self.stick_value(f.stick).length() >= f.deadzone,
+                Suppress::Deadzone => {
+                    f.enabled && self.stick_value_radial(f.stick).length() >= f.deadzone
+                }
                 Suppress::Off => false,
             })
         .then_some(f.stick)
@@ -1285,6 +1295,20 @@ impl Engine {
         };
         Vec2::new(self.input_value(x), self.input_value(y))
     }
+    /// Flick reads the calibrated physical Vec2 directly, before control masking.
+    /// NativeInput also derives scalar axes from this radial result, but Flick's
+    /// trigger, snapshot guards and suppression must share this explicit source.
+    fn stick_value_radial(&self, stick: Stick) -> Vec2 {
+        let pin = match stick {
+            Stick::Left => "left_stick",
+            Stick::Right => "right_stick",
+        };
+        if self.handoff_blocked.contains(pin) {
+            Vec2::ZERO
+        } else {
+            self.input.stick(pin)
+        }
+    }
     pub fn input_value(&self, input: &str) -> f32 {
         input_pin(input)
             .and_then(|pin| self.signals.get_pin(SOURCE, pin))
@@ -1293,6 +1317,9 @@ impl Engine {
     /// Hold modifiers use physical values and base ring geometry. A layer may
     /// change filtering, deadzones or rings without changing its own trigger.
     pub fn layer_input_value(&self, input: &str, base: &Profile, active: bool) -> f32 {
+        if self.handoff_blocked.contains(input) {
+            return 0.;
+        }
         let base_value = || {
             input_pin(input)
                 .and_then(|pin| self.base_input.signals.get_pin(SOURCE, pin))
@@ -1355,6 +1382,7 @@ impl Engine {
         self.input_value(&gyro.activation) > (gyro.activation_threshold - release_band).max(0.)
     }
     fn eval_controls(&mut self, allow_toggle: bool, now_ns: u64) {
+        self.mask_handoff_inputs();
         self.action_time_ns = self.action_time_ns.max(now_ns);
         if self.trial_scale.is_some() {
             self.update_pad();
@@ -1622,7 +1650,7 @@ impl Engine {
                     }
                     self.refresh_sticks(now_ns as f64 / 1e9, allow_toggle);
                     let f = &self.profile.gyro.motion.flick;
-                    let length = self.stick_value(f.stick).length();
+                    let length = self.stick_value_radial(f.stick).length();
                     if !allow_toggle && f.enabled && length >= f.deadzone {
                         self.flick_snapshot_blocked = true;
                     }
@@ -2100,7 +2128,7 @@ impl Engine {
         self.refresh_sticks(self.stick_time, true);
         let flick = &self.profile.gyro.motion.flick;
         self.flick_snapshot_blocked =
-            flick.enabled && self.stick_value(flick.stick).length() >= flick.deadzone;
+            flick.enabled && self.stick_value_radial(flick.stick).length() >= flick.deadzone;
         self.eval_controls(false, self.action_time_ns);
         Some(result)
     }
@@ -2114,7 +2142,7 @@ impl Engine {
         let value = if self.flick_snapshot_blocked {
             Vec2::ZERO
         } else {
-            self.stick_value(f.stick)
+            self.stick_value_radial(f.stick)
         };
         self.gyro_signals.set_pin(
             SOURCE,

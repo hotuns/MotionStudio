@@ -232,6 +232,11 @@ impl NativeTouchpad {
         self.split = count >= 2;
         self.baseline();
     }
+    pub(crate) fn inherit_contacts(&mut self, previous: &Self) {
+        self.contacts = previous.contacts;
+        self.split = previous.split;
+        self.baseline();
+    }
     pub fn fields(&self) -> [TouchContact; 2] {
         fields(&self.contacts, self.split)
     }

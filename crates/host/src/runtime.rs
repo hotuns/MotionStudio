@@ -9,7 +9,9 @@ use motion_core::{
     profile::{pressed_inputs, GamepadTarget, Profile},
     protocol::{Command, Event, PadShortcutEvent, Request, RunConfig, Status, PROTOCOL_VERSION},
     sdl::{Device, InputOrigin, Sdl},
-    shortcut::{validate_shortcut_rules, PadShortcut, PadShortcutEdges, ShortcutRule, ShortcutTrigger},
+    shortcut::{
+        validate_shortcut_rules, PadShortcut, PadShortcutEdges, ShortcutRule, ShortcutTrigger,
+    },
     storage::{parse_profile, read_small},
     timing::{
         io_schedule::{self, IoPass},
@@ -145,6 +147,7 @@ pub struct Runtime {
     next_discovery: Instant,
     last_status: Instant,
     last_advance: Instant,
+    press_handoffs: Vec<motion_core::engine::PressHandoff>,
     io_clock: IoClock,
     last_stats: Instant,
     last_samples: u64,
@@ -211,6 +214,7 @@ impl Runtime {
             next_discovery: Instant::now(),
             last_status: Instant::now(),
             last_advance: now,
+            press_handoffs: vec![],
             io_clock: IoClock::new(now),
             last_stats: Instant::now(),
             last_samples: 0,
@@ -230,6 +234,10 @@ impl Runtime {
         }
     }
     fn clear_outputs(&mut self) -> Result<()> {
+        self.press_handoffs.clear();
+        if let Some(engine) = &mut self.engine {
+            engine.set_handoff_blocked(BTreeSet::new());
+        }
         self.reset_feedback();
         if let Some(output) = &mut self.output {
             output.reset()?;
@@ -390,7 +398,10 @@ impl Runtime {
         self.status.state = "faulted".into();
         self.publish_status();
     }
-    fn dispatch(&mut self, frame: Frame) -> Result<()> {
+    fn dispatch(&mut self, mut frame: Frame) -> Result<()> {
+        for handoff in &self.press_handoffs {
+            handoff.merge(&mut frame);
+        }
         if let Some(guard) = &mut self.guard {
             guard.before(&frame.held)?;
         }
@@ -703,6 +714,15 @@ impl Runtime {
         Ok(())
     }
     fn apply(&mut self, id: String, profile: Profile, path: PathBuf) -> Result<()> {
+        self.apply_profile(id, profile, path, false)
+    }
+    fn apply_profile(
+        &mut self,
+        id: String,
+        profile: Profile,
+        path: PathBuf,
+        preserve_press: bool,
+    ) -> Result<()> {
         if self.status.binding_capture {
             bail!("请先结束映射录入并松开手柄，再应用配置");
         }
@@ -757,6 +777,19 @@ impl Runtime {
                 profile.virtual_gamepad,
             )?;
         }
+        if preserve_press
+            && !recreate
+            && self.engine.is_some()
+            && self.output.is_some()
+            && !self.output_paused()
+            && !self.status.ui_navigation
+        {
+            if let Err(error) = self.apply_with_press_handoff(id, profile, path) {
+                self.fault(format!("配置交接失败，已暂停：{error:#}"));
+                return Err(error);
+            }
+            return Ok(());
+        }
         if let Err(error) = self.clear_outputs() {
             let message = format!("切换时无法释放旧输出，已暂停：{error:#}");
             self.fault(message.clone());
@@ -785,6 +818,53 @@ impl Runtime {
                 self.fault(message.clone());
                 bail!(message);
             }
+        }
+        Ok(())
+    }
+    fn apply_with_press_handoff(
+        &mut self,
+        id: String,
+        profile: Profile,
+        path: PathBuf,
+    ) -> Result<()> {
+        let mut next = Engine::new(motion_core::layers::resolve(&profile, &[])?)?;
+        // Reuse the connected SDL session and its FIFO. Do not drain or reseed
+        // from a newer snapshot: a queued release belongs to the old press.
+        if let Some(sdl) = &mut self.sdl {
+            sdl.set_sensors(true, profile.gyro.enabled)?;
+        }
+        let previous =
+            motion_core::engine::PressHandoff::new(self.engine.take().context("Missing engine")?);
+        let mut blocked = previous.blocked_inputs();
+        for handoff in &self.press_handoffs {
+            blocked.extend(handoff.blocked_inputs());
+        }
+        next.inherit_profile_input(previous.previous(), blocked);
+        if !previous.is_empty() {
+            self.press_handoffs.push(previous);
+        }
+        self.engine = Some(next);
+        let config = self.config.as_mut().context("Missing configuration")?;
+        config.profile_id = id.clone();
+        config.profile = profile;
+        config.profile_file = path.clone();
+        *self
+            .watch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Profile watcher unavailable"))? = Some(path);
+        self.status.profile_id = Some(id);
+        self.status.profile_name = Some(config.profile.name.clone());
+        self.status.reload_error = None;
+        self.status.revision += 1;
+        self.active_layers.clear();
+        self.status.active_layers.clear();
+        self.reset_feedback();
+        if let Some(output) = &mut self.output {
+            output.discard_pending_motion();
+        }
+        self.sync_layers()?;
+        if let Some(engine) = &self.engine {
+            self.dispatch(engine.frame.clone())?;
         }
         Ok(())
     }
@@ -868,6 +948,11 @@ impl Runtime {
                             profile,
                             profile_file,
                         } => self.apply(profile_id, *profile, profile_file),
+                        Command::ApplyCursor {
+                            profile_id,
+                            profile,
+                            profile_file,
+                        } => self.apply_profile(profile_id, *profile, profile_file, true),
                         Command::Stop => self.stop_mapping("映射已停止，输出已释放"),
                         Command::Shutdown => self.stop("映射已停止，输出已释放"),
                         Command::RecoverVisibility => {
@@ -1132,6 +1217,26 @@ impl Runtime {
         Ok(())
     }
     fn input(&mut self, event: InputEvent, from_snapshot: bool) -> Result<()> {
+        if !self.press_handoffs.is_empty()
+            && matches!(
+                event,
+                InputEvent::Button { .. } | InputEvent::Axis { .. } | InputEvent::Touch { .. }
+            )
+        {
+            for handoff in &mut self.press_handoffs {
+                handoff.process(&event);
+            }
+            self.press_handoffs.retain(|handoff| !handoff.is_empty());
+            if let Some(engine) = &mut self.engine {
+                let blocked = self
+                    .press_handoffs
+                    .iter()
+                    .flat_map(|handoff| handoff.blocked_inputs())
+                    .collect();
+                engine.set_handoff_blocked(blocked);
+            }
+        }
+
         if matches!(event, InputEvent::Disconnected { .. }) {
             return self.lost_device();
         }
@@ -1391,7 +1496,14 @@ impl Runtime {
             .zip(&self.status.pad_shortcuts)
             .enumerate()
         {
-            if edge.update_with_held(Some(binding), &pressed, &retained, &extra, enabled, baseline) {
+            if edge.update_with_held(
+                Some(binding),
+                &pressed,
+                &retained,
+                &extra,
+                enabled,
+                baseline,
+            ) {
                 let specificity = binding.input.split('+').count();
                 // Prefer the longer chord when one control completes multiple
                 // bindings, and prefer the first saved rule on a tie.

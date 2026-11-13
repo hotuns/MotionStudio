@@ -1,4 +1,4 @@
-use crate::{apply_profile, AppState};
+use crate::{apply_cursor_profile, apply_profile, AppState};
 use motion_core::protocol::{Command, Status};
 use motion_core::shortcut::{Modifiers, PadShortcut, ShortcutEdges, ShortcutTrigger};
 use motion_core::storage::SwitchTarget;
@@ -230,7 +230,12 @@ pub fn start(state: AppState) {
                     *state.history.lock().unwrap() = history;
                     continue;
                 }
-                match apply_profile(&state, &target) {
+                let result = if shortcut {
+                    apply_profile(&state, &target)
+                } else {
+                    apply_cursor_profile(&state, &target)
+                };
+                match result {
                     Ok(()) => {
                         *state.history.lock().unwrap() = history;
                         state.client.snapshot.lock().unwrap().policy_error = None;

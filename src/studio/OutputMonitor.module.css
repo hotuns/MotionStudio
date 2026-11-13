@@ -25,3 +25,24 @@
 .stick strong, .stick span { display: block; font-size: 12px; }
 .stick strong { font-weight: 550; }
 .stick span { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+.waveform { display: grid; gap: 9px; min-width: 0; }
+.tools { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.tools button { font-size: 11px; padding: 5px 8px; min-height: 28px; }
+.tools button[aria-pressed='true'] { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb,var(--accent) 9%,var(--bg-1)); }
+.waveOptions { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: var(--text-muted); }
+.horizontal { color: var(--accent); }
+.vertical { color: var(--text-strong); }
+.horizontal::before,.vertical::before { content: ''; display: inline-block; width: 13px; border-top: 2px solid currentColor; margin-right: 5px; vertical-align: middle; }
+.vertical::before { border-top-style: dashed; }
+.traceY { fill: none; stroke: var(--text-strong); stroke-width: 1.6; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.axisLabel { fill: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.zeroLine { fill: none; stroke: var(--text-muted); stroke-opacity: .5; vector-effect: non-scaling-stroke; }
+.cursor { fill: none; stroke: var(--text-muted); stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+.dotY { fill: var(--text-strong); }
+.explanation { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.65; }
+.pathDetails { border-top: 1px solid var(--panel-border); padding-top: 10px; }
+.pathDetails summary { cursor: pointer; color: var(--text-muted); font-size: 12px; margin-bottom: 10px; }
+
+.waveform .plot svg { max-height: none; }

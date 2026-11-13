@@ -209,7 +209,7 @@ impl Client {
     ) -> Result<Option<GameAngleMeasurement>, String> {
         let timeout = if matches!(
             &command,
-            EngineCommand::Start { .. } | EngineCommand::Apply { .. }
+            EngineCommand::Start { .. } | EngineCommand::Apply { .. } | EngineCommand::ApplyCursor { .. }
         ) {
             120
         } else {

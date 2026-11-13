@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use flexinput_core::Signal;
+use flexinput_hidmaestro::profile::presets::KEYBOARD_REPORT_SIZE;
 
 // The three nodes: HIDMaestro on Windows, UHID on Linux, with the same
 // profiles and reports.
@@ -300,7 +301,7 @@ pub struct VirtualKeyMouseHm {
     mouse_report_dirty: bool,
 
     // Keyboard emission state.
-    last_kbd_report: [u8; 8],
+    last_kbd_report: [u8; KEYBOARD_REPORT_SIZE],
 }
 
 impl VirtualKeyMouseHm {
@@ -373,25 +374,25 @@ impl VirtualKeyMouseHm {
             // isn't necessarily neutral) without arming a repeat — see
             // `reset_outputs`, which deliberately does NOT re-arm it.
             mouse_report_dirty: true,
-            last_kbd_report: [0; 8],
+            last_kbd_report: [0; KEYBOARD_REPORT_SIZE],
         })
     }
 
-    /// Build the 8-byte keyboard report from held modifiers + learned keys.
-    fn build_kbd_report(&self) -> [u8; 8] {
-        let mut rep = [0u8; 8];
+    /// Build the 18-byte keyboard report from held modifiers + learned keys.
+    fn build_kbd_report(&self) -> [u8; KEYBOARD_REPORT_SIZE] {
+        let mut rep = [0u8; KEYBOARD_REPORT_SIZE];
         if !self.muted {
             rep[0] = mods_byte(&self.keys);
             let mut slot = 2;
-            if self.keys.escape && slot < 8 {
+            if self.keys.escape && slot < rep.len() {
                 rep[slot] = 0x29;
                 slot += 1;
             }
-            // 6KRO: keys beyond the 6 slots are dropped (a real keyboard would
+            // 16KRO (Studio extension): keys beyond the 16 slots are dropped (a boot keyboard would
             // report ErrorRollOver; for graph-driven input, dropping the
             // overflow is friendlier than blanking everything).
             for (name, held) in &self.learned_keys {
-                if slot >= 8 { break; }
+                if slot >= rep.len() { break; }
                 if !held { continue; }
                 if let Some(u) = key_name_to_hid_usage(name) {
                     // The fixed escape pin and a learned "Escape" can coexist.

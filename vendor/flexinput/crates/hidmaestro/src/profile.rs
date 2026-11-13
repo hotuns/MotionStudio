@@ -402,12 +402,16 @@ pub mod presets {
     /// HID descriptor. This is the capability that lets FlexInput drop ViGEm.
     pub const XBOX360_JSON: &str = include_str!("../profiles/xbox360.json");
 
-    /// Virtual keyboard — plain-HID 8-byte boot-style report (modifiers +
-    /// 6KRO array). Driven with raw reports by `flexinput-virtual`'s
+    /// Virtual keyboard — plain-HID 18-byte report (modifiers + reserved +
+    /// 16KRO array; Studio extension, not the boot protocol). Driven with raw reports by `flexinput-virtual`'s
     /// keymouse_hm, NOT the gamepad encode path. Exists because SendInput-based
     /// synthetic input is silently eaten on some systems (ASUS hook stack /
     /// hardened Win11) — a kernel-level HID device is immune.
     pub const KEYBOARD_JSON: &str = include_str!("../profiles/keyboard.json");
+    /// Non-modifier slots in the bundled keyboard descriptor (Studio extension).
+    pub const KEYBOARD_KEY_COUNT: usize = 16;
+    /// Modifier byte, reserved byte, then the ordinary key array.
+    pub const KEYBOARD_REPORT_SIZE: usize = 2 + KEYBOARD_KEY_COUNT;
 
     /// Virtual relative mouse — plain-HID 7-byte report (5 buttons, int16 X/Y
     /// mickeys, int8 wheel + AC Pan in whole notches). Same
@@ -508,10 +512,10 @@ mod tests {
         // In the PC's own container Windows takes it for the built-in keyboard,
         // which arms touchpad typing protection (left clicks dropped while typing).
         assert!(p.own_container);
-        // Standard boot-style keyboard report: 8 bytes, no Report ID, keyboard
-        // usage page fields only (modifiers bitfield + 6KRO array).
-        assert_eq!(p.input_report_size, 8);
-        assert_eq!(p.report.byte_size(), 8);
+        // Extended keyboard report: 18 bytes, no Report ID, keyboard
+        // usage page fields only (modifiers bitfield + 16KRO array).
+        assert_eq!(p.input_report_size, presets::KEYBOARD_REPORT_SIZE);
+        assert_eq!(p.report.byte_size(), presets::KEYBOARD_REPORT_SIZE);
         assert_eq!(p.report.report_id, 0);
         assert!(p.report.fields.iter().all(|f| f.usage_page == 0x07));
     }

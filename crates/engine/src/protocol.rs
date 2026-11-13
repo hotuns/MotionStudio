@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -52,6 +52,11 @@ pub enum Command {
         device_path: String,
     },
     Apply {
+        profile_id: String,
+        profile: Box<Profile>,
+        profile_file: PathBuf,
+    },
+    ApplyCursor {
         profile_id: String,
         profile: Box<Profile>,
         profile_file: PathBuf,

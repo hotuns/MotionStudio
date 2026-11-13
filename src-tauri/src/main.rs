@@ -74,6 +74,14 @@ pub fn apply_profile(state: &AppState, id: &str) -> Result<(), String> {
         profile_file: state.store.profile_path(id).map_err(text)?,
     })
 }
+pub fn apply_cursor_profile(state: &AppState, id: &str) -> Result<(), String> {
+    let entry = state.store.load(id).map_err(text)?;
+    state.client.request(Command::ApplyCursor {
+        profile_id: id.into(),
+        profile: Box::new(entry.profile),
+        profile_file: state.store.profile_path(id).map_err(text)?,
+    })
+}
 pub fn notify_profile(state: &AppState, id: &str) {
     if let Ok(entry) = state.store.load(id) {
         let settings = state.settings.lock().unwrap().clone();

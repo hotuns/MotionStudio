@@ -61,6 +61,7 @@
   "当前接口没有体感，请停止并选择支持体感的接口": "This interface has no gyro. Stop and select a gyro-capable interface.",
   "当前接口没有加速度计，不能应用玩家／世界坐标或倾斜动作": "This interface has no accelerometer. Player/world space and tilt actions are unavailable.",
   "切换时无法释放旧输出，已暂停：{0}": "Could not release the previous output while switching; paused: {0}",
+  "配置交接失败，已暂停：{0}": "Could not hand off the profile; paused: {0}",
   "新配置输出初始化失败，已暂停：{0}": "Could not initialize the new profile's output; paused: {0}",
   "界面已退出": "The interface has exited",
   "热更新后输出已暂停：{0}": "Output paused after hot reload: {0}",

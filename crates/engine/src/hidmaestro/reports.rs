@@ -1,17 +1,18 @@
 //! Motion Studio's bindings -> FlexInput HIDMaestro report contract.
-//! Keyboard/mouse layouts follow FlexInput keymouse_hm.rs at c69f53ad.
+//! Layouts follow FlexInput c69f53ad with the documented 16KRO extension.
 use crate::{engine::PadState, profile::GamepadTarget};
-use anyhow::{bail, Result};
+use anyhow::Result;
 #[cfg(test)]
 use flexinput_hidmaestro::encode::{button, Hat};
+use flexinput_hidmaestro::profile::presets::{KEYBOARD_KEY_COUNT, KEYBOARD_REPORT_SIZE};
 use flexinput_hidmaestro::{
     encode::{GamepadState, PinState},
     Profile,
 };
 use std::collections::BTreeSet;
 
-pub fn keyboard(held: &BTreeSet<String>) -> Result<[u8; 8]> {
-    let mut report = [0; 8];
+pub fn keyboard(held: &BTreeSet<String>) -> Result<[u8; KEYBOARD_REPORT_SIZE]> {
+    let mut report = [0; KEYBOARD_REPORT_SIZE];
     let mut keys = Vec::new();
     for key in held.iter().filter_map(|s| s.strip_prefix("key:")) {
         let info = crate::keyboard::key(key)
@@ -25,11 +26,9 @@ pub fn keyboard(held: &BTreeSet<String>) -> Result<[u8; 8]> {
             );
         }
     }
-    // The fixed upstream boot-keyboard descriptor has six non-modifier slots.
-    // Reject overflow instead of dropping held keys or emitting ErrorRollOver.
-    if keys.len() > 6 {
-        bail!("HIDMaestro 键盘最多同时按下 6 个普通键；请减少同时触发的映射");
-    }
+    // Match the extended upstream array report. Capacity overflow alone must
+    // not fault the mapping session; modifiers retain their separate bitfield.
+    keys.truncate(KEYBOARD_KEY_COUNT);
     report[2..2 + keys.len()].copy_from_slice(&keys);
     Ok(report)
 }
@@ -108,8 +107,11 @@ mod tests {
         assert_eq!(r[0], 2, "Caps Lock is a normal key, not a modifier");
         assert_eq!(r[1], 0);
         assert_eq!(&r[2..4], &[4, 0x39]);
-        assert_eq!(&r[4..], &[0; 4]);
-        assert_eq!(keyboard(&BTreeSet::new()).unwrap(), [0; 8]);
+        assert_eq!(&r[4..], &[0; KEYBOARD_REPORT_SIZE - 4]);
+        assert_eq!(
+            keyboard(&BTreeSet::new()).unwrap(),
+            [0; KEYBOARD_REPORT_SIZE]
+        );
     }
     #[test]
     fn extended_keyboard_reports_distinguish_locations_and_right_modifiers() {
@@ -130,7 +132,7 @@ mod tests {
             let held = [format!("key:{name}")].into_iter().collect();
             assert_eq!(
                 keyboard(&held).unwrap(),
-                [0, 0, usage, 0, 0, 0, 0, 0],
+                [0, 0, usage, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 "{name}"
             );
         }
@@ -138,7 +140,10 @@ mod tests {
             .map(String::from)
             .into_iter()
             .collect();
-        assert_eq!(keyboard(&held).unwrap(), [0xf0, 0, 0x29, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            keyboard(&held).unwrap(),
+            [0xf0, 0, 0x29, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
         for key in crate::keyboard::keys() {
             assert!(
                 keyboard(&[format!("key:{}", key.name)].into_iter().collect()).is_ok(),
@@ -170,8 +175,11 @@ mod tests {
             .map(|c| format!("key:{c}"))
             .into_iter()
             .collect();
-        assert!(keyboard(&seven).is_err());
-        assert_eq!(keyboard(&BTreeSet::new()).unwrap(), [0; 8]);
+        assert!(keyboard(&seven).is_ok());
+        assert_eq!(
+            keyboard(&BTreeSet::new()).unwrap(),
+            [0; KEYBOARD_REPORT_SIZE]
+        );
         for name in [
             "SPACE",
             "ENTER",
@@ -216,7 +224,7 @@ mod tests {
                 .unwrap()
                 .report
                 .byte_size(),
-            8
+            KEYBOARD_REPORT_SIZE
         );
     }
     #[test]

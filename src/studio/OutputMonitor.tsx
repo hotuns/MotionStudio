@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import type { MouseTracePoint, Status, VirtualPadPreview } from '../types';
+import type { MouseTracePoint, PadTracePoint, Status, VirtualPadPreview } from '../types';
 import styles from './OutputMonitor.module.css';
+import {OutputWaveform} from './OutputWaveform';
 
 const TRACE_MS = 3000;
 const MAX_POINTS = 385;
@@ -8,15 +9,16 @@ const PLOT_WIDTH = 320;
 const PLOT_HEIGHT = 150;
 const PAD = 12;
 
-type Trail = { points: MouseTracePoint[]; firstSequence: number };
+type TracePoint = {sequence:number;time_ms:number};
+type Trail<T extends TracePoint> = { points: T[]; firstSequence: number };
 
-function appendTrail(trail: Trail, incoming: MouseTracePoint[]) {
+function appendTrail<T extends TracePoint>(trail: Trail<T>, incoming: T[]) {
   const next = incoming.at(-1);
   const last = trail.points.at(-1);
   if (!next || next.sequence < trail.firstSequence || (last && next.sequence < last.sequence)) return trail;
-  if (last?.sequence === next.sequence && last.position.every((value, axis) => value === next.position[axis])) return trail;
 
   const recent = incoming.filter(point => point.sequence >= trail.firstSequence);
+  if (!recent.length) return trail;
   const first = recent[0].sequence;
   const before = last && first <= last.sequence + 1 ? trail.points.filter(point => point.sequence < first) : [];
   const merged = before.concat(recent);
@@ -88,31 +90,53 @@ function VirtualOutput({ pad }: { pad: VirtualPadPreview }) {
 
 export function OutputMonitor({ status, visible }: { status?: Status; visible: boolean }) {
   const preview = status?.output_preview;
-  const mouse = preview?.mouse;
-  const [trail, setTrail] = useState<Trail>({ points: [], firstSequence: 0 });
+  const [trail, setTrail] = useState<Trail<MouseTracePoint>>({points:[],firstSequence:0});
+  const [padTrail, setPadTrail] = useState<Trail<PadTracePoint>>({points:[],firstSequence:0});
+  const [frozen, setFrozen] = useState<{
+    mouse:MouseTracePoint[];pad:PadTracePoint[];mouseTime:number;padTime:number;padState:VirtualPadPreview|null;
+  }>();
   useEffect(() => {
-    if (mouse) setTrail(current=>appendTrail(current, mouse));
-  }, [mouse]);
+    if (preview) {
+      setTrail(current=>appendTrail(current,preview.mouse));
+      setPadTrail(current=>appendTrail(current,preview.pad_trace??[]));
+    }
+  }, [preview]);
   if (!visible) return null;
 
   const mode = preview ? status?.emitting ? '实际输出' : '模拟输出' : '输出已暂停';
-  const last = mouse?.at(-1);
+  const last = preview?.mouse.at(-1);
+  const mouseTime = last ? last.time_ms+(last.age_ms??0) : 0;
+  const display = frozen ?? {mouse:trail.points,pad:padTrail.points,mouseTime,
+    padTime:preview?.pad_time_ms??0,padState:preview?.pad??null};
   const clear = () => {
-    if (last) setTrail({ points: [last], firstSequence: last.sequence + 1 });
+    setFrozen(undefined);
+    setTrail({points:last?[last]:[],firstSequence:last?last.sequence+1:0});
+    const padLast=preview?.pad_trace?.at(-1);
+    setPadTrail({points:padLast?[padLast]:[],firstSequence:padLast?padLast.sequence+1:0});
   };
 
   return <section className={styles.output}>
     <div className={styles.heading}>
-      <h3>鼠标轨迹</h3>
+      <h3>最终输出波形</h3>
       <span className={styles.badge} data-live={!!preview && !!status?.emitting} role="status">{mode}</span>
     </div>
     {preview ? <>
-      <MousePath points={trail.points} />
+      <OutputWaveform mouse={display.mouse} pad={display.pad} mouseTime={display.mouseTime}
+        padTime={display.padTime} hasPad={!!display.padState} sampleMs={preview.sample_ms||8}/>
       <div className={styles.footer}>
-        <span>近 3 秒轨迹 · 停手后保留</span>
-        <button type="button" className="ghost-btn" disabled={trail.points.length < 2} onClick={clear}>清空轨迹</button>
+        <span>{frozen?'已暂停画面，映射继续运行':'保留近 3 秒 · 可暂停查看'}</span>
+        <div className={styles.tools}>
+          <button type="button" className="ghost-btn" aria-pressed={!!frozen}
+            onClick={()=>setFrozen(frozen?undefined:display)}>{frozen?'继续查看':'暂停查看'}</button>
+          <button type="button" className="ghost-btn" onClick={clear}>清空记录</button>
+        </div>
       </div>
-      {preview.pad && <VirtualOutput pad={preview.pad} />}
+      <p className={styles.explanation}>显示处理后送出的信号，不代表游戏实际视角。观察模式只模拟输出；新参数需应用后才会影响这里。</p>
+      <details className={styles.pathDetails}>
+        <summary>鼠标轨迹</summary>
+        <MousePath points={display.mouse} />
+      </details>
+      {display.padState && <VirtualOutput pad={display.padState} />}
     </> : <p className="studio-muted">启用输出或开始观察输入后显示轨迹。</p>}
   </section>;
 }

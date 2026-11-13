@@ -2212,7 +2212,7 @@ dependencies = [
 
 [[package]]
 name = "motion-core"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "flexinput-core",
@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "motion-engine"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "motion-core",
@@ -2257,7 +2257,7 @@ dependencies = [
 
 [[package]]
 name = "motion-studio"
-version = "0.17.6"
+version = "0.17.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

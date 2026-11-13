@@ -572,9 +572,10 @@
     {
       "path": "crates/hidmaestro/src/profile.rs",
       "upstreamSha256": "d18b99a6c382b057f14fd7fbadbdacfd6283a1c0c107ea4d345f2f13a847995c",
-      "vendoredSha256": "d18b99a6c382b057f14fd7fbadbdacfd6283a1c0c107ea4d345f2f13a847995c",
-      "modified": false,
-      "upstreamGitBlob": "e20c684aaca8c5bbe9bd96225807040303f2d5be"
+      "vendoredSha256": "03684b2096a54dab12537668a89abb9099966a0994e0df33003166a7572c177a",
+      "modified": true,
+      "upstreamGitBlob": "e20c684aaca8c5bbe9bd96225807040303f2d5be",
+      "patch": "Expose shared keyboard key-count/report-size constants for the 16KRO descriptor; update keyboard preset documentation and existing layout assertions."
     },
     {
       "path": "crates/hidmaestro/src/shm.rs",
@@ -665,9 +666,10 @@
     {
       "path": "crates/hidmaestro/profiles/keyboard.json",
       "upstreamSha256": "2b50b93a5c4c727a2dade711c5264b882f588af2fe3024a9d1616deb2839be63",
-      "vendoredSha256": "2b50b93a5c4c727a2dade711c5264b882f588af2fe3024a9d1616deb2839be63",
-      "modified": false,
-      "upstreamGitBlob": "2fd3123b0a4c2d4ce840fdfba808d27bc5ef5a30"
+      "vendoredSha256": "7238ecc3501e6d4fbf280f9c31b4e60b52e7655245c4996e5f09e26b8313b1aa",
+      "modified": true,
+      "upstreamGitBlob": "2fd3123b0a4c2d4ce840fdfba808d27bc5ef5a30",
+      "patch": "Studio 16KRO extension: Report Count 16, 18-byte keyboard input, PID F1E1 for the new descriptor layout; original array encoding and other profile fields retained."
     },
     {
       "path": "crates/hidmaestro/profiles/models/sony-dualsense-edge.json",
@@ -714,10 +716,11 @@
     {
       "path": "crates/virtual/src/keymouse_hm.rs",
       "upstreamSha256": "a74fd443f8c80fb9b3e44b1e0832dc1a03f5ba167be1a85468d012ae058939b0",
-      "vendoredSha256": "a74fd443f8c80fb9b3e44b1e0832dc1a03f5ba167be1a85468d012ae058939b0",
-      "modified": false,
+      "vendoredSha256": "2233c73649638eb4c1760be5b208b3cdee1d890f7a969fb4ad2d226bdd4f3865",
+      "modified": true,
       "upstreamGitBlob": "3cfc1a4c279dc1ba82c174321f7e1bca90c0d55b",
-      "referenceOnly": true
+      "referenceOnly": true,
+      "patch": "Use the shared 18-byte keyboard report size and 16 ordinary-key slots; retain modifier encoding, report ordering, release and upstream overflow-dropping policy."
     },
     {
       "path": "crates/ui/src/app/threads.rs",

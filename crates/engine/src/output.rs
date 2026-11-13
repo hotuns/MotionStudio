@@ -6,6 +6,7 @@ pub const OUTPUT_MUTEX: &str = "Local\\MotionStudioOutput";
 mod preview;
 mod split;
 pub(crate) use preview::MouseTrace;
+use preview::PadTrace;
 pub use preview::{MouseTracePoint, OutputPreview};
 pub use split::SplitSink;
 
@@ -157,6 +158,7 @@ pub struct Dispatcher<S: Sink> {
     pad_uncertain: bool,
     mouse_trace: Option<MouseTrace>,
     preview_generation: u64,
+    pad_trace: PadTrace,
     pub mouse_counts: [i64; 2],
     pub button_edges: u64,
     pub pad_reports: u64,
@@ -183,6 +185,7 @@ impl<S: Sink> Dispatcher<S> {
             pad_uncertain: false,
             mouse_trace,
             preview_generation: 0,
+            pad_trace: PadTrace::default(),
             mouse_counts: [0; 2],
             button_edges: 0,
             pad_reports: 0,
@@ -246,6 +249,9 @@ impl<S: Sink> Dispatcher<S> {
             self.pad_uncertain = false;
             self.pad_reports += 1;
             self.pad = self.pending_pad;
+            if let Some(pad) = self.pad {
+                self.pad_trace.record(pad);
+            }
             return Ok(true);
         }
         Ok(false)
@@ -258,6 +264,9 @@ impl<S: Sink> Dispatcher<S> {
         }
         if !self.flush_pad()? {
             self.sink.idle_gamepad()?;
+            if let Some(pad) = self.pad {
+                self.pad_trace.record(pad);
+            }
         }
         Ok(())
     }
@@ -277,8 +286,13 @@ impl<S: Sink> Dispatcher<S> {
         }
         Ok(pending)
     }
+    /// A profile handoff keeps held key state but discards unsent relative motion.
+    pub fn discard_pending_motion(&mut self) {
+        self.mouse_pending = [0.0; 2];
+    }
     pub fn reset(&mut self) -> Result<()> {
         self.preview_generation = self.preview_generation.wrapping_add(1);
+        self.pad_trace.clear();
         self.pending_pad = self.pad.map(|_| PadState::default());
         if let Some(trace) = &mut self.mouse_trace {
             trace.clear();
@@ -330,6 +344,9 @@ impl<S: Sink> Dispatcher<S> {
             generation: self.preview_generation,
             mouse,
             pad: self.pad,
+            pad_trace: self.pad_trace.points(),
+            pad_time_ms: self.pad_trace.time_ms(),
+            sample_ms: preview::SAMPLE_MS,
         }
     }
 }
