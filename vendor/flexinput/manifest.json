@@ -580,7 +580,7 @@
     {
       "path": "crates/hidmaestro/src/shm.rs",
       "upstreamSha256": "aaf05818116fbb0f3c8dcf1b10775606c02f6d408dd95cb25ae19d7672e7be01",
-      "vendoredSha256": "613a9ea2fdbc29c573e2759216aab3ded70a4a67c72e72f27520ef425e735f91",
+      "vendoredSha256": "4caa9d10cda5a16b065b6361284afd8e0538967ddfc233678adaf4d05668159a",
       "modified": true,
       "upstreamGitBlob": "63430fa11dee9a93b1184d0b10903e13ba33a7c4",
       "patch": "Expose bounded delivery acknowledgement and driver release-frame registration."
@@ -992,7 +992,7 @@
       "upstreamGitBlob": "7b34287b2c480617eec78ccdfdc4350ed1027ab3",
       "modified": true,
       "patch": "Retain original input/output encoding and decoding. Add feedback-command sequence metadata including native ping and timeout; pure offline test with input/output None. Shared-section upstream tests remain explicitly opt-in.",
-      "vendoredSha256": "525c00d5fa4824aaac3f2cb3f13b3f63edae15814c02ec3395dbda7e362d4faf"
+      "vendoredSha256": "8b8deadf483c2e2ab84d46b42caf1d5707672a4d783cf78f9650b7982a5dd1b1"
     },
     {
       "path": "crates/virtual/src/sony_feedback.rs",
@@ -1034,8 +1034,8 @@
       "upstreamSha256": null,
       "modified": true,
       "derivedFrom": "crates/virtual/src/windows.rs::instance_label, XRumble, VirtualXInput through VirtualDS4 and pure axis/button helpers; headless checked flush and player-index API exposure (see docs/flexinput-reuse.md)",
-      "vendoredSha256": "f6973ea0a45a76086df3bcf7ca6a61785fdb8bfbf7c8ee464c4a23997884cd12",
-      "patch": "Preserve original reports, target and notifications. Add command sequence counters captured atomically with polled values; existing fallible flush/player-index exposure retained. Offline tests never connect a driver."
+      "vendoredSha256": "771b4871df32d7e9fa0b4653258756f614d661d3b147350dffb7d6789748d5b6",
+      "patch": "Preserve original reports, target and notifications. Add command sequence counters captured atomically with polled values; existing fallible flush/player-index exposure retained. Offline tests never connect a driver. DS4 checked submit treats only Win32 259 as transient; Studio resubmits retained DS4 state at output cadence. Preserve immediate IOCTL errors and wait only on pending operations; report encoding is unchanged."
     }
   ],
   "port": "Motion Studio headless adapter: excludes GUI and JSM evaluation; native SDL raw event seam, original physical-source processing and native gamepad devices; Studio owns configuration and bounded lifecycle"

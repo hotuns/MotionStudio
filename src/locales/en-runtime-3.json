@@ -24,6 +24,7 @@
   "实体手柄关联不明确，未自动隐藏": "Physical controller associations are unclear; no automatic hiding was applied",
   "虚拟输出设备尚未就绪，已暂停输出": "The virtual output device is not ready; output is paused",
   "未能确认虚拟手柄已枚举，已暂停输出": "Virtual controller enumeration could not be confirmed; output is paused",
+  "ViGEm 虚拟手柄已创建，但等待 HID/XInput 游戏接口枚举超时，已暂停输出": "The ViGEm virtual controller was created, but HID/XInput game interface enumeration timed out; output is paused",
   "虚拟输出手柄被现有 HidHide 规则隐藏，请在官方工具恢复该虚拟设备可见后重试": "Existing HidHide rules hide the virtual output controller. Make that virtual device visible in the official tool, then retry.",
   "自动隐藏需要 Windows 和 HidHide": "Automatic hiding requires Windows and HidHide",
   "自动隐藏需要 Windows": "Automatic hiding requires Windows",

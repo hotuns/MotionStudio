@@ -47,6 +47,40 @@ pub struct OutputStats {
     pub wait_total_us: u64,
     pub wait_max_us: u64,
     pub queue_max_us: u64,
+    /// HID-class acknowledgement observations, not game consumption timestamps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hid_gamepad: Option<HidGamepadStats>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct HidGamepadStats {
+    pub ack_available: bool,
+    pub hid_identity: Option<[u16; 2]>,
+    pub submitted_reports: u64,
+    pub ack_observations: u64,
+    pub max_submit_gap_us: u64,
+    pub max_submit_call_us: u64,
+    pub max_ack_gap_us: u64,
+    pub max_pending_reports: u32,
+    pub recent: Vec<HidGamepadSample>,
+    /// Last non-neutral DS4 samples, retained when the user returns to Studio.
+    pub last_motion: Vec<HidGamepadSample>,
+    pub stalls: Vec<HidGamepadSample>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct HidGamepadSample {
+    pub elapsed_us: u64,
+    pub submitted_seq: u32,
+    pub acknowledged_seq: Option<u32>,
+    pub pending_reports: Option<u32>,
+    pub since_ack_progress_us: Option<u64>,
+    pub ack_observation_gap_us: Option<u64>,
+    pub submit_gap_us: u64,
+    pub submit_call_us: u64,
+    /// Actual DS4 bytes after encoding (0..255), not the engine's i16 axes.
+    pub ds4_right_stick: Option<[u8; 2]>,
 }
 
 pub trait Sink {
@@ -439,10 +473,7 @@ mod windows {
                 )?),
                 VirtualTarget::DualShock4(_) => None,
             };
-            let protected_devices = crate::visibility::virtual_output_ids()
-                .into_iter()
-                .filter(|id| !baseline.iter().any(|old| old.eq_ignore_ascii_case(id)))
-                .collect();
+            let protected_devices = crate::visibility::wait_for_virtual_gamepad(&baseline)?;
             Ok(Self {
                 target: Some(device),
                 last_probe: std::time::Instant::now(),
@@ -585,6 +616,15 @@ mod windows {
             };
             crate::flex_output::write_pad(target.device(), p);
             target.flush_checked()
+        }
+        fn idle_gamepad(&mut self) -> Result<()> {
+            // DS4 may temporarily have no pending USB read (Win32 259). In that
+            // case ViGEm has not cached the report. Keep submitting the latest
+            // state at output cadence, including held axes and neutral releases.
+            if let Some(VirtualTarget::DualShock4(pad)) = &mut self.target {
+                pad.flush_checked().map_err(anyhow::Error::msg)?;
+            }
+            Ok(())
         }
         fn gamepad_status(&self) -> Option<GamepadStatus> {
             self.gamepad.clone()

@@ -69,7 +69,23 @@ pub fn profile_json(target: GamepadTarget) -> Option<&'static str> {
     Some(match target {
         GamepadTarget::None => return None,
         GamepadTarget::Xbox360 => XBOX360_JSON,
-        GamepadTarget::DualShock4 => DUALSHOCK_4_V2_JSON,
+        GamepadTarget::DualShock4 => ds4_profile_json(),
+    })
+}
+
+fn ds4_profile_json() -> &'static str {
+    use flexinput_hidmaestro::profile::presets::DUALSHOCK_4_V2_JSON;
+    // Use the same Sony product identity as ViGEm. A PID-only comparison in
+    // Delta Force eliminated slow-motion stutter at both 250 and 1000 Hz.
+    // Retain the pinned descriptor/encoder and the existing Sony feature model:
+    // this is an identity compatibility adapter, not a full DS4 v1 emulation.
+    // Both the helper and the writer obtain their profile through this entry.
+    static COMPATIBLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    COMPATIBLE.get_or_init(|| {
+        let mut profile: serde_json::Value =
+            serde_json::from_str(DUALSHOCK_4_V2_JSON).expect("vendored DS4 profile");
+        profile["pid"] = serde_json::json!("0x05C4");
+        serde_json::to_string(&profile).expect("DS4 compatibility profile serialization")
     })
 }
 pub fn profile(target: GamepadTarget) -> Option<Profile> {

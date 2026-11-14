@@ -3,6 +3,7 @@
 //! owns the driver release leases, and tears them down on worker death/stall.
 mod helper;
 mod keymouse;
+mod pad_diagnostics;
 mod reports;
 pub(crate) mod transport;
 use crate::{engine::PadState, output::Sink, profile::GamepadTarget};
@@ -293,6 +294,7 @@ pub struct HidMaestroSink {
     protected: Vec<String>,
     keymouse: keymouse::KeyMouse,
     pad: Option<HidMaestroDevice>,
+    pad_diagnostics: Option<pad_diagnostics::PadDiagnostics>,
     held: BTreeSet<String>,
     token: String,
 }
@@ -343,6 +345,15 @@ impl HidMaestroSink {
             Ok(Self {
                 target,
                 protected: devices.protected,
+                pad_diagnostics: devices
+                    .pad
+                    .filter(|_| pad.is_some())
+                    .map(|index| {
+                        pad_diagnostics::PadDiagnostics::new(
+                            index,
+                            reports::profile(target).map(|profile| [profile.vid, profile.pid]),
+                        )
+                    }),
                 keymouse: keymouse::KeyMouse::start(
                     Writer::open(devices.keyboard, &session.child)?,
                     Writer::open(devices.mouse, &session.child)?,
@@ -370,6 +381,22 @@ impl HidMaestroSink {
     fn mouse_buttons(&self) -> u8 {
         reports::mouse(&self.held, 0, 0, 0, 0)[0]
     }
+    fn flush_pad(&mut self) {
+        if let Some(device) = &mut self.pad {
+            let began = Instant::now();
+            device.flush();
+            let sent = Instant::now();
+            if let (Some(diagnostics), Some(seq)) =
+                (&mut self.pad_diagnostics, device.submitted_sequence())
+            {
+                let axes = (self.target == GamepadTarget::DualShock4)
+                    .then(|| device.last_input_report().get(3..5))
+                    .flatten()
+                    .map(|bytes| [bytes[0], bytes[1]]);
+                diagnostics.submitted(seq, axes, began, sent);
+            }
+        }
+    }
 }
 impl Sink for HidMaestroSink {
     fn feedback(&mut self) -> Option<crate::feedback::FeedbackFrame> {
@@ -394,13 +421,16 @@ impl Sink for HidMaestroSink {
         self.keymouse.poll()
     }
     fn idle_gamepad(&mut self) -> Result<()> {
-        if let Some(device) = &mut self.pad {
-            device.flush();
-        }
+        self.flush_pad();
         Ok(())
     }
     fn stats(&self) -> crate::output::OutputStats {
-        self.keymouse.stats()
+        let mut stats = self.keymouse.stats();
+        stats.hid_gamepad = self
+            .pad_diagnostics
+            .as_ref()
+            .map(pad_diagnostics::PadDiagnostics::snapshot);
+        stats
     }
     fn mouse_trace(&self) -> Option<Vec<crate::output::MouseTracePoint>> {
         Some(self.keymouse.mouse_trace())
@@ -458,7 +488,7 @@ impl Sink for HidMaestroSink {
             return Ok(());
         };
         crate::flex_output::write_pad(device, pad);
-        device.flush();
+        self.flush_pad();
         Ok(())
     }
 }

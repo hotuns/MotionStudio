@@ -431,7 +431,13 @@ mod vigem_ioctl {
             internal: 0, internal_high: 0, offset: 0, offset_high: 0, event,
         };
         let mut n = 0u32;
-        DeviceIoControl(device, code, buf, size, std::ptr::null_mut(), 0, &mut n, &mut ovl);
+        if DeviceIoControl(device, code, buf, size, std::ptr::null_mut(), 0, &mut n, &mut ovl) != 0 {
+            return true;
+        }
+        // Only pending operations own an asynchronous completion. Preserve an
+        // immediate failure's Win32 error instead of querying an unqueued IOCTL.
+        const ERROR_IO_PENDING: u32 = 997;
+        if GetLastError() != ERROR_IO_PENDING { return false; }
         GetOverlappedResult(device, &mut ovl, &mut n, 1 /* bWait=TRUE */) != 0
     }
 }
@@ -816,7 +822,18 @@ impl VirtualDS4 {
                 &sub as *const _ as _, std::mem::size_of_val(&sub) as u32,
             )
         };
-        if accepted { Ok(()) } else { Err(format!("ViGEm DS4 report: {}", std::io::Error::last_os_error())) }
+        if accepted { return Ok(()); }
+        let error = std::io::Error::last_os_error();
+        // ViGEmBus SubmitReportImpl returns STATUS_NO_MORE_ENTRIES when no
+        // USB IN request is waiting. The official client treats this as nonfatal.
+        // The report was NOT cached: the host must resubmit the retained pins on
+        // its next output tick, even if their values have not changed.
+        const ERROR_NO_MORE_ITEMS: i32 = 259;
+        if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS) {
+            Ok(())
+        } else {
+            Err(format!("ViGEm DS4 report: {error}"))
+        }
     }
 }
 

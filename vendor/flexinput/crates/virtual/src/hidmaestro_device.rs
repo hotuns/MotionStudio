@@ -115,6 +115,15 @@ pub struct HidMaestroDevice {
 }
 
 impl HidMaestroDevice {
+    /// Last encoded HID report, including its report ID; read-only diagnostics.
+    /// Xbox companion output uses GIP instead, so this is not its gamepad state.
+    pub fn last_input_report(&self) -> &[u8] { &self.report_buf }
+
+    /// Expose the original transport sequence for nonblocking host diagnostics.
+    pub fn submitted_sequence(&self) -> Option<u32> {
+        self.input.as_ref().map(InputSection::submitted_sequence)
+    }
+
     /// Open a HIDMaestro device for `controller_index` from `profile_json`. The
     /// device node + sections must already exist (created by the elevated
     /// helper); this parses the profile and opens the sections to drive them.

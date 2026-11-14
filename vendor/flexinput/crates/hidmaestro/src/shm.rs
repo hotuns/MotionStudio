@@ -631,6 +631,9 @@ impl InputSection {
         }
     }
 
+    /// Last sequence submitted by this writer; no shared-memory read or wait.
+    pub fn submitted_sequence(&self) -> u32 { self.seq_no }
+
     /// Diagnostic snapshot of the current input section: `(SeqNo, DataSize,
     /// Data[..DataSize], ExtendedReportSize)`. For probes/tests only — reads the
     /// section another writer may own. Data is capped at `DATA_CAPACITY`.
@@ -701,6 +704,11 @@ impl DeliveryAck {
             section: MappedSection::open(&format!(r"Global\HIDMaestroInputAck{index}"), INPUT_ACK_SIZE)?,
             event: EventHandle::open(&format!(r"Global\HIDMaestroInputAckEvent{index}"))?,
         })
+    }
+    /// Last HID-class delivery acknowledgement. This is not a game timestamp.
+    /// Read only: never consume the shared event or block the output thread.
+    pub fn delivered_sequence(&self) -> u32 {
+        unsafe { self.section.read_seqno_volatile(0) }
     }
     pub fn wait_for(&self, input: &InputSection, timeout: std::time::Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
