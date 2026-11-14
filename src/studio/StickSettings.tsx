@@ -4,7 +4,7 @@ import {FlickStickSettings,type MotionUpdate} from './AdvancedMotion';
 import {StickInputSettings,StickDirectionSettings,StickCalibrationSettings} from './ControllerInputSettings';
 import {freezeInputDeadzones} from '../controller-input';
 import type {Profile} from '../types';
-import {SettingField,SettingSection,settingStyles} from './SettingLayout';
+import {SettingField,SettingLabel,SettingSection,settingStyles} from './SettingLayout';
 import styles from './MotionControls.module.css';
 
 const stickChoices=[{options:[{value:'left',label:'左摇杆'},{value:'right',label:'右摇杆'}]}];
@@ -19,7 +19,7 @@ export function StickSettings({profile,update}:{profile:Profile;update:MotionUpd
       <Toggle label="启用摇杆鼠标" value={stick.enabled}
         onChange={value=>update(draft=>{freezeInputDeadzones(draft);draft.stick_mouse.enabled=value;})}/>
       {stick.enabled&&<>
-        <SettingField label="摇杆鼠标使用的摇杆"><div className="studio-field">摇杆鼠标使用的摇杆
+        <SettingField label="摇杆鼠标使用的摇杆"><div className="studio-field"><SettingLabel label="摇杆鼠标使用的摇杆"/>
           <OptionPicker label="摇杆鼠标使用的摇杆" value={stick.stick} groups={stickChoices}
             onChange={value=>update(draft=>{freezeInputDeadzones(draft);draft.stick_mouse.stick=value;})}/>
         </div></SettingField>

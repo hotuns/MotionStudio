@@ -1,15 +1,15 @@
 import { useId } from 'react';
 import styles from './MotionControls.module.css';
 
-export function CurveEditor({points,onChange,maxX,maxY,xLabel='输入',yLabel='输出'}:{points:number[][];onChange:(points:number[][])=>void;maxX:number;maxY:number;xLabel?:string;yLabel?:string}) {
+export function CurveEditor({points,onChange,maxX,maxY,xLabel='输入',yLabel='输出',showPreview=true}:{points:number[][];onChange:(points:number[][])=>void;maxX:number;maxY:number;xLabel?:string;yLabel?:string;showPreview?:boolean}) {
   const id=useId();
   const sx=Math.max(1,...points.map(p=>p[0]));const sy=Math.max(1,...points.map(p=>p[1]));
   const valid=points.every((p,i)=>p.every(Number.isFinite)&&p[0]>=0&&p[1]>=0&&(i===0||p[0]>points[i-1][0]));
   return <div className={styles.curve}>
-    <svg viewBox="0 0 320 120" role="img" aria-label={`${xLabel}与${yLabel}曲线`}>
+    {showPreview&&<svg viewBox="0 0 320 120" role="img" aria-label={`${xLabel}与${yLabel}曲线`}>
       <path d="M12 8V108H308" fill="none" stroke="var(--border-strong)" />
       {valid&&<polyline points={points.map(p=>`${12+p[0]/sx*296},${108-p[1]/sy*96}`).join(' ')} fill="none" stroke="var(--accent)" strokeWidth="2" />}
-    </svg>
+    </svg>}
     <div className={styles.curveRows}>
       <span>{xLabel}</span><span>{yLabel}</span><span />
       {points.map((point,index)=><div className={styles.curveRow} key={index}>

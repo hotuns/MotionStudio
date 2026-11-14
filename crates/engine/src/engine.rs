@@ -641,6 +641,7 @@ fn flick_graph(profile: &Profile) -> GraphRunner {
         ("flick_release_ratio".into(), json!(f.release_ratio)),
         ("flick_disengage_ms".into(), json!(f.disengage_ms)),
         ("flick_smooth_ms".into(), json!(f.smooth_ms)),
+        ("flick_time_exponent".into(), json!(f.time_exponent)),
         ("flick_release_ease".into(), json!(f.release_ease)),
         ("flick_fwd_dz_deg".into(), json!(f.forward_deadzone)),
         ("flick_stabilise_ms".into(), json!(f.stabilise_ms)),

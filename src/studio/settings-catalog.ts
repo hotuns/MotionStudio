@@ -52,7 +52,7 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('sticks','stick-input','', [['stick_rebound_ms','防回弹窗口','启用摇杆防回弹']]),
   ...group('sticks','stick-mouse','stick_mouse.',[['enabled','启用摇杆鼠标'], ['stick','摇杆鼠标使用的摇杆'], ['speed','最大移动速度'], ['exponent','摇杆鼠标响应']]),
   ...group('sticks','flick-main','gyro.motion.flick.',[
-    ['enabled','启用 Flick Stick'], ['smooth_ms','转角释放时间','转身完成时间'], ['release_ease','转角缓出强度'], ['stick','Flick 使用的摇杆'], ['deadzone','快推转身阈值'],
+    ['enabled','启用 Flick Stick'], ['smooth_ms','180° 基准释放时间','转角释放时间 转身完成时间'], ['time_exponent','按转角调整时间','Flick 时间指数 FLICK_TIME_EXPONENT'], ['release_ease','转角缓出强度'], ['stick','Flick 使用的摇杆'], ['deadzone','快推转身阈值'],
   ]),
   ...group('sticks','flick-shared','gyro.motion.flick.',[
     ['standalone','关闭体感时也启用'],

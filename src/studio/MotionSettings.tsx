@@ -5,7 +5,7 @@ import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice, t
 import {CustomFilters} from './CustomFilters';
 import type {GyroBindingField, GyroBindingRecording} from '../pad-capture';
 import {GyroBindingInput} from './GyroBindingInput';
-import {SettingField, SettingSection, settingStyles} from './SettingLayout';
+import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
 
 type Update=(update:(profile:Profile)=>void)=>void;
 const smoothingPresets=[['跟手',0],['均衡',16],['更稳',32]] as const;
@@ -36,7 +36,7 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
       <Toggle label="启用体感" value={gyro.enabled} onChange={value=>setGyro('enabled',value)}/>
       {gyro.enabled&&<>
         <SettingField label="开启和暂停" path={['gyro.activation','gyro.activation_mode','gyro.pause_input']} disabled={bindingLocked}>
-          <div className={settingStyles.row}><span>开启方式</span>
+          <div className={settingStyles.row}><SettingLabel label="开启方式"/>
             <div className={styles.activationModes} role="group" aria-label="开启方式">
               {([['always','始终开启'],['hold','按住开启'],['toggle','按一下切换开关']] as const).map(([mode,label])=>
                 <button key={mode} type="button" className="secondary-btn" aria-pressed={mode===activation} disabled={bindingLocked}
@@ -77,7 +77,7 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
       <MotionChoice label="采样时钟" value={gyro.timestamp_source}
         options={[["host","SDL 事件时间戳（推荐）"],["sensor","传感器时间戳"]]}
         onChange={value=>setGyro('timestamp_source',value as Gyro['timestamp_source'])}/>
-      <SettingField label="自定义滤波" path="gyro.motion.custom_filters">
+      <SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
         <CustomFilters key={profileId} profile={profile} update={update} embedded
           running={status?.profile_id===profileId&&['running','observing'].includes(status.state)}
           statuses={status?.profile_id===profileId?status.motion?.filters:undefined}

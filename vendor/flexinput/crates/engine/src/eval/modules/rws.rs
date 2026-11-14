@@ -349,6 +349,7 @@ pub(crate) fn compute_rws(
     let flick_release_ratio = params.get("flick_release_ratio").and_then(Value::as_f64).map(|v| v as f32);
     let flick_disengage_s = pf("flick_disengage_ms", FLK_DISENGAGE_HOLD_MS).clamp(0.0, 60.0) / 1000.0;
     let flick_smooth_ms = pf("flick_smooth_ms", 100.0);
+    let flick_time_exponent = pf("flick_time_exponent", 0.0).clamp(0.0, 2.0);
     let flick_release_ease = pf("flick_release_ease", 0.0).clamp(0.0, crate::eval::MAX_FLICK_RELEASE_EASE);
     let flick_fwd_dz = pf("flick_fwd_dz_deg", 0.0).clamp(0.0, 180.0);
     let flick_stab_s = pf("flick_stabilise_ms", 0.0).clamp(0.0, 1000.0) / 1000.0;
@@ -450,7 +451,7 @@ pub(crate) fn compute_rws(
     let allow_flick = !(gated && slow_lock && state.aux_f32[GST] == GST_STEERING);
 
     let flick_deg = if flick_on && !measuring {
-        compute_flick(inputs, state, flick_deadzone, flick_release_ratio, flick_disengage_s, flick_smooth_ms, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt, flick_input_dt, observe_only)
+        compute_flick(inputs, state, flick_deadzone, flick_release_ratio, flick_disengage_s, flick_smooth_ms, flick_time_exponent, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt, flick_input_dt, observe_only)
     } else {
         reset_flick(state);
         0.0
@@ -645,6 +646,7 @@ fn compute_flick(
     release_ratio: Option<f32>,
     disengage_s: f32,
     smooth_ms: f32,
+    time_exponent: f32,
     release_ease: f32,
     fwd_dz_deg: f32,
     stab_s: f32,
@@ -720,11 +722,18 @@ fn compute_flick(
             let flick_deg = angle.to_degrees();
             // Inside the forward deadzone: engaged and tracking, but no snap.
             let flick_deg = if flick_deg.abs() <= fwd_dz_deg { 0.0 } else { flick_deg };
-            if smooth_ms > 0.5 {
+            // Latch the JSM duration multiplier at initial engagement only.
+            // Tracking and gesture catch-up retain their own timing.
+            let duration_s = smooth_ms / 1000.0 * if flick_deg != 0.0 {
+                crate::eval::flick_time_scale(flick_deg.to_radians(), time_exponent)
+            } else { 1.0 };
+            state.aux_f32[FLK_PENDING_DEG] = 0.0;
+            state.aux_f32[FLK_PAYOUT_S] = 0.0;
+            if smooth_ms > 0.5 && duration_s > 0.0 {
                 state.aux_f32[FLK_PENDING_DEG] = flick_deg;
-                state.aux_f32[FLK_PAYOUT_S] = smooth_ms / 1000.0;
+                state.aux_f32[FLK_PAYOUT_S] = duration_s;
                 state.aux_f32[FLK_TOTAL_DEG] = flick_deg;
-                state.aux_f32[FLK_TOTAL_S] = smooth_ms / 1000.0;
+                state.aux_f32[FLK_TOTAL_S] = duration_s;
             } else {
                 out += flick_deg;
             }

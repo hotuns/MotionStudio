@@ -95,7 +95,7 @@ export function FlickReleaseCurve({strength}: {strength: number}) {
 }
 
 export function AccelerationCurve({acceleration}: {acceleration: Gyro['acceleration']}) {
-  const request = JSON.stringify({acceleration: {...acceleration, points: undefined}});
+  const request = JSON.stringify({acceleration});
   const [points, setPoints] = useState<Point[]>();
   const [failedRequest, setFailedRequest] = useState<string>();
 

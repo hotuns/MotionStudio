@@ -355,7 +355,6 @@ impl Aim {
     /// at `VIRTUAL_STICK_CALIBRATION` — slower if the binding's own time asks for
     /// that, never faster, since a stick can only be pushed so far.
     fn tick_bound_flicks(&mut self, s: &Settings, p: &pad::Settings, dt: f32) -> (f32, f32) {
-        use std::f32::consts::PI;
         let now = self.t;
         let to_stick = p.flick_dest.side().is_some();
         let cal = s.real_world_calibration / s.in_game_sens.max(1e-6);
@@ -380,7 +379,7 @@ impl Aim {
                 Some(t) => elapsed / t.max(1e-6),
                 None => {
                     elapsed / s.flick_time.max(1e-6)
-                        / (f.deg.abs().to_radians() / PI).powf(s.flick_time_exponent)
+                        / crate::eval::flick_time_scale(f.deg.to_radians(), s.flick_time_exponent)
                 }
             };
             percent = percent.min(1.0);
@@ -905,7 +904,7 @@ impl Aim {
         // The flick itself, eased over `FLICK_TIME` and paid out a tick at a time.
         let mut percent = ((self.t - f.since) as f32) / s.flick_time.max(1e-6);
         if f.delta.abs() > 0.0 {
-            percent /= (f.delta.abs() / PI).powf(s.flick_time_exponent);
+            percent /= crate::eval::flick_time_scale(f.delta, s.flick_time_exponent);
         }
         let percent = percent.min(1.0);
         if percent >= 1.0 {

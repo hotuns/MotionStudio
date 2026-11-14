@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

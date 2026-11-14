@@ -1,6 +1,6 @@
 import type { MotionConfig, Profile, Status } from '../types';
 import { Range, Toggle } from './Controls';
-import {SettingField, SettingSection, settingStyles} from './SettingLayout';
+import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
 import {OptionPicker} from './OptionPicker';
 import {padChoices} from './binding-choices';
 import { CurveEditor } from './CurveEditor';
@@ -14,11 +14,11 @@ function Numbers({object,specs,onChange}:{object:object;specs:NumberSpec[];onCha
   return <>{specs.map(([key,label,min,max,step,unit])=><Range key={key} label={label} value={Number((object as Record<string,unknown>)[key])} min={min} max={max} step={step} unit={unit} slider={!unit?.includes('ms')&&!unit?.includes('°/s')} onChange={v=>onChange(key,v)} />)}</>;
 }
 export function MotionChoice({label,value,options,onChange,disabled,settingPath}:{label:string;value:string;options:readonly (readonly [string,string])[];onChange:(v:string)=>void;disabled?:boolean;settingPath?:string|string[]}) {
-  return <SettingField label={label} path={settingPath} disabled={disabled}><label className={settingStyles.row}><span>{label}</span><select aria-label={label} value={value} disabled={disabled} onChange={e=>onChange(e.target.value)}>{options.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label></SettingField>;
+  return <SettingField label={label} path={settingPath} disabled={disabled}><div className={settingStyles.row}><SettingLabel label={label}/><select aria-label={label} value={value} disabled={disabled} onChange={e=>onChange(e.target.value)}>{options.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div></SettingField>;
 }
 const Choice=MotionChoice;
 function ControlInput({label,value,onChange}:{label:string;value:string|null;onChange:(v:string|null)=>void}) {
-  return <SettingField label={label}><div className="studio-field">{label}<OptionPicker label={label} value={value??''}
+  return <SettingField label={label}><div className="studio-field"><SettingLabel label={label}/><OptionPicker label={label} value={value??''}
     groups={[{options:[{value:'',label:'不设置'}]}, ...padChoices()]} onChange={v=>onChange(v||null)}/></div></SettingField>;
 }
 const sticks:[string,string][]=[['right','右摇杆'],['left','左摇杆']];
@@ -62,6 +62,7 @@ export function AccelerationSettings({profile,update}:Props) {
   const a=profile.gyro.acceleration;
   const set=(key:string,value:unknown)=>update(p=>{(p.gyro.acceleration as unknown as Record<string,unknown>)[key]=value;});
   return <SettingSection id="motion-acceleration" title="转动加速" summary={a.fast_multiplier>1?`${a.fast_multiplier}×`:'关闭'} lazy>
+    <div className={settingStyles.columns}><div>
     <Range label="快速转动倍率" value={a.fast_multiplier} min={1} max={4} step={0.1} unit="×" onChange={v=>set('fast_multiplier',v)}
       help="慢速微调沿用基础灵敏度。快速转动时逐步提高倍率，1× 关闭加速。"/>
     {a.fast_multiplier>1&&<>
@@ -73,9 +74,8 @@ export function AccelerationSettings({profile,update}:Props) {
     {a.curve==='power'&&<Numbers object={a} specs={[["power_reference","参考转速",0.01,4000,1," °/s"],["power_exponent","幂指数",0.01,10,0.1]]} onChange={set}/>}
     {a.curve==='sigmoid'&&<Numbers object={a} specs={[["sigmoid_mid","过渡中点",0,4000,1," °/s"],["sigmoid_width","过渡宽度",0.01,2000,1," °/s"]]} onChange={set}/>}
     {a.curve==='jump'&&<Numbers object={a} specs={[["jump_width","跳变过渡宽度",0,2000,1," °/s"]]} onChange={set}/>}
-    {a.curve==='custom'
-      ? <SettingField label="自定义控制点"><CurveEditor points={a.points} onChange={v=>set('points',v)} maxX={4000} maxY={10} xLabel="转速 °/s" yLabel="倍率"/></SettingField>
-      : <AccelerationCurve acceleration={a}/>}
+    {a.curve==='custom'&&<SettingField label="自定义控制点"><SettingLabel label="自定义控制点"/><CurveEditor points={a.points} onChange={v=>set('points',v)} maxX={4000} maxY={10} xLabel="转速 °/s" yLabel="倍率" showPreview={false}/></SettingField>}
+    </div><div><AccelerationCurve acceleration={a}/></div></div>
   </SettingSection>;
 }
 export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Props & {onOpenDevice:()=>void;deviceNoise?:number}) {
@@ -96,8 +96,7 @@ export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Prop
 
     <SettingSection id="motion-smoothing" title="防抖与平滑" defaultOpen
       summary={m.smoothing==='one_euro'?<>One Euro · {m.one_euro_cutoff} Hz</>:<>{m.smoothing==='ema'?'EMA':'Decay'} · {gyro.smoothing_ms} ms</>}>
-      <div className={styles.stabilityPair + ' ' + styles.smoothingPair}>
-        <ResponseCurve title="平滑响应曲线" points={curves?.smoothing} xLabel="时间（ms）" yLabel="角速度（°/s）"/>
+      <div className={settingStyles.columns + ' ' + styles.smoothingPair}>
         <div>
           <div className={styles.samplingFields}>
             <Choice label="平滑方式" value={m.smoothing} options={[["ema","EMA 时间平滑"],["decay","随速度衰减的平滑"],["one_euro","One Euro 自适应滤波"]]} onChange={v=>set('smoothing',v)}/>
@@ -108,12 +107,13 @@ export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Prop
           {m.smoothing==='one_euro'&&<Numbers object={m} specs={[["one_euro_cutoff","最低截止频率",0.01,100,0.1," Hz"],["one_euro_beta","速度响应系数",0,10,0.01]]} onChange={set}/>}
           <p className={styles.hint}>采样时钟用于实际设备。示例每 2 ms 取样，展示慢转和快转时的平滑效果。</p>
         </div>
+        <ResponseCurve title="平滑响应曲线" points={curves?.smoothing} xLabel="时间（ms）" yLabel="角速度（°/s）"/>
       </div>
     </SettingSection>
     <SettingSection id="motion-idle" title="静止抑制与恢复" summary={<>{gyro.noise_threshold} °/s · {m.recovery_ms} ms</>}>
-      <div className={styles.stabilityPair}>
+      <div className={styles.stabilityGrid}>
+      <div className={settingStyles.columns}>
         <div>
-          <ResponseCurve title="低速抑制曲线" points={curves?.idle} xLabel="输入转速（°/s）" yLabel="稳态输出转速（°/s）"/>
           <Range label="静止抑制" value={gyro.noise_threshold} min={0} max={5} step={0.05} unit=" °/s"
             onChange={value=>update(draft=>{draft.gyro.noise_threshold=value;})} help="减去微小的角速度，抑制手柄静止时的微动。"/>
           <Numbers object={m} specs={[["noise_gate","实测噪声抑制宽度",0,10,0.1,"×"]]} onChange={set}/>
@@ -122,27 +122,35 @@ export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Prop
             : `暂无实测噪声底，曲线使用示例值 ${curves.noise_floor} °/s。完成静止校准后使用实测值。`}</p>}
           <button type="button" className="secondary-btn" onClick={onOpenDevice}>打开设备校准</button>
         </div>
+          <ResponseCurve title="低速抑制曲线" points={curves?.idle} xLabel="输入转速（°/s）" yLabel="稳态输出转速（°/s）"/>
+      </div>
+      <div className={settingStyles.columns}>
         <div>
-          <ResponseCurve title="输出恢复曲线" points={curves?.recovery} xLabel="时间（ms）" yLabel="输出比例（%）"/>
           <Numbers object={m} specs={[["cutoff_dps","低速截止",0,100,0.1," °/s"],["recovery_ms","截止后的恢复时间",0,1000,1," ms"]]} onChange={set}/>
           <p className={styles.hint}>超过低速截止后，输出逐渐恢复到 100%。低速截止为 0 时，仅在处理状态重置后恢复。</p>
         </div>
+          <ResponseCurve title="输出恢复曲线" points={curves?.recovery} xLabel="时间（ms）" yLabel="输出比例（%）"/>
+      </div>
       </div>
     </SettingSection>
     <SettingSection id="motion-direction-stability" title="方向稳定与姿态漂移" summary={<>{m.angle_snap}°</>}>
-      <div className={styles.stabilityPair}>
+      <div className={styles.stabilityGrid}>
+      <div className={settingStyles.columns}>
         <div>
-          <ResponseCurve title="角度吸附曲线" points={curves?.snap} xLabel="输入方向角（°）" yLabel="输出方向角（°）"/>
           <Numbers object={m} specs={[["angle_snap","水平／垂直吸附角",0,45,0.5,"°"]]} onChange={set}/>
           <Toggle label="柔和进入角度吸附" value={m.angle_snap_ease} onChange={v=>set('angle_snap_ease',v)}/>
         </div>
+          <ResponseCurve title="角度吸附曲线" points={curves?.snap} xLabel="输入方向角（°）" yLabel="输出方向角（°）"/>
+      </div>
+      <div className={settingStyles.columns}>
         <div>
-          <ResponseCurve title="倾斜误差曲线" points={curves?.drift} xLabel="时间（ms）" yLabel="倾斜误差（°）"/>
           <div>
             <Toggle label="使用重力修正姿态漂移" value={m.drift_correction} onChange={v=>set('drift_correction',v)} help="可修正倾斜漂移；加速度计无法观测绕重力方向的水平漂移。"/>
             <p className={styles.hint}>示例展示手柄放稳后，约 6° 的倾斜误差如何随时间变化。</p>
           </div>
         </div>
+          <ResponseCurve title="倾斜误差曲线" points={curves?.drift} xLabel="时间（ms）" yLabel="倾斜误差（°）"/>
+      </div>
       </div>
     </SettingSection>
     <SettingSection id="motion-brake" title="减速刹车" summary={m.brake_strength>0?<>{Math.round(m.brake_strength*100)}%</>:'关闭'}>
@@ -201,14 +209,17 @@ export function FlickStickSettings({profile,update}:Props) {
         <p className={styles.hint}>快推选择朝向，沿摇杆外圈转动控制镜头。</p>
         <div className={settingStyles.columns}>
           <div>
-            <Numbers object={f} specs={[["deadzone","快推转身阈值",0.05,0.99,0.01],["smooth_ms","转角释放时间",0,2000,1," ms"]]} onChange={change}/>
+            <Numbers object={f} specs={[["deadzone","快推转身阈值",0.05,0.99,0.01],["smooth_ms","180° 基准释放时间",0,2000,1," ms"]]} onChange={change}/>
+            <Range label="按转角调整时间" value={f.time_exponent??0} min={0} max={2} step={0.05} onChange={v=>change('time_exponent',v)}
+              help="时间指数：0 为固定时间（默认），1 按转角等比例缩短，2 让小角度转身更快。上方释放时间以 180° 为基准，只影响初始转身，不影响绕圈追踪。"/>
+            <p className={styles.hint}>预计转角释放时间：45° {Number((f.smooth_ms*Math.pow(0.25,f.time_exponent??0)).toFixed(1))} ms · 90° {Number((f.smooth_ms*Math.pow(0.5,f.time_exponent??0)).toFixed(1))} ms · 180° {f.smooth_ms} ms</p>
             <Range label="转角缓出强度" value={(f.release_ease??0.5)*100} min={0} max={100} step={1} unit="%" onChange={v=>change('release_ease',v/100)}
               help="0% 匀速释放，50% 使用 JSM 缓出（默认）。高于 50% 起步更快，100% 使用三次缓出。"/>
           </div>
           <div><FlickReleaseCurve strength={f.release_ease??0.5}/></div>
         </div>
         <p className={styles.hint}>{profile.gyro.output==='right_stick'
-          ? '释放时间为 0 时立即提交全部转角；游戏完成转身仍受实际满杆速度限制。'
+          ? '预计时间表示转角释放时间；游戏完成转身仍受实际满杆速度限制。释放时间为 0 时立即提交全部转角。'
           : '释放时间为 0 时立即输出全部转角。'}</p>
       </>}
     </SettingSection>
@@ -266,10 +277,10 @@ export function MotionOutputSettings({profile,update,canMeasure,onOpenCalibratio
   const gyro=profile.gyro;
   return <SettingSection id="motion-calibration" title="输出与转角校准" summary={gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
     <SettingField label="体感与 Flick 输出" disabled={gyro.motion.mode!=='pointer'}>
-      <label className={settingStyles.row}><span>体感与 Flick 输出</span><select aria-label="体感与 Flick 输出" value={gyro.output}
+      <div className={settingStyles.row}><SettingLabel label="体感与 Flick 输出"/><select aria-label="体感与 Flick 输出" value={gyro.output}
         disabled={gyro.motion.mode!=='pointer'} onChange={event=>update(p=>{p.gyro.output=event.target.value as Profile['gyro']['output'];})}>
         <option value="mouse">鼠标</option><option value="right_stick" disabled={profile.virtual_gamepad==='none'}>虚拟手柄右摇杆</option>
-      </select></label>
+      </select></div>
     </SettingField>
     <p className={styles.hint}>体感、Flick 和配套摇杆瞄准共用这里的输出与转角换算。</p>
     {profile.virtual_gamepad==='none'&&<p className={styles.hint}>在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。</p>}

@@ -1,6 +1,6 @@
 import type {Profile, TriggerStageMode, TriggerStagesConfig} from '../types';
 import {Range, Toggle} from './Controls';
-import {SettingField,SettingSection,settingStyles} from './SettingLayout';
+import {SettingField,SettingLabel,SettingSection,settingStyles} from './SettingLayout';
 import {OptionPicker} from './OptionPicker';
 import type {MotionUpdate} from './AdvancedMotion';
 import {TriggerInputSettings} from './ControllerInputSettings';
@@ -40,9 +40,9 @@ export function TriggerSettings({profile, layerMode, update, onEditBase}: {
       </div>}
       <fieldset className="studio-content" disabled={layerMode}>
         <div className={styles.grid}>
-          <SettingField label="左扳机全拉模式"><OptionPicker label="左扳机全拉模式" value={stage.left_mode} groups={stageChoices}
+          <SettingField label="左扳机全拉模式"><SettingLabel label="左扳机全拉模式"/><OptionPicker label="左扳机全拉模式" value={stage.left_mode} groups={stageChoices}
             onChange={value => updateStages({left_mode:value as TriggerStageMode})}/></SettingField>
-          <SettingField label="右扳机全拉模式"><OptionPicker label="右扳机全拉模式" value={stage.right_mode} groups={stageChoices}
+          <SettingField label="右扳机全拉模式"><SettingLabel label="右扳机全拉模式"/><OptionPicker label="右扳机全拉模式" value={stage.right_mode} groups={stageChoices}
             onChange={value => updateStages({right_mode:value as TriggerStageMode})}/></SettingField>
           {stage.soft_threshold >= 0 && <Range label="轻拉阈值" value={stage.soft_threshold} min={0} max={0.99} step={0.01}
             onChange={soft_threshold => updateStages({soft_threshold})}/>}

@@ -920,6 +920,10 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                     g.motion.flick.smooth_ms = scalar(v)? * 1000.;
                     None
                 }
+                "FLICK_TIME_EXPONENT" => {
+                    g.motion.flick.time_exponent = scalar(v)?;
+                    None
+                }
                 "FLICK_DEADZONE_ANGLE" => {
                     g.motion.flick.forward_deadzone = scalar(v)?;
                     None

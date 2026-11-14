@@ -4,7 +4,7 @@ import {inputConfig, inputDeadzone, setInputDeadzone} from '../controller-input'
 import type {ControllerInputConfig, Profile, StickDirections} from '../types';
 import native from '../native-input-defaults.json';
 import styles from './MotionControls.module.css';
-import {SettingField,SettingSection,settingStyles} from './SettingLayout';
+import {SettingField,SettingLabel,SettingSection,settingStyles} from './SettingLayout';
 
 type Props = {profile: Profile; update: (change: (profile: Profile) => void) => void};
 
@@ -30,11 +30,11 @@ export function StickDirectionSettings({profile,update}:Props) {
   return <SettingSection id="stick-directions" title="摇杆方向映射" summary="按轴阈值或八向重叠">
     {(['lstick_directions','rstick_directions'] as const).map((key,index)=>
       <SettingField key={key} label={index===0?'左摇杆方向判定':'右摇杆方向判定'} path={'input.'+key}>
-        <label className={settingStyles.row}><span>{index===0?'左摇杆方向判定':'右摇杆方向判定'}</span>
-          <select value={c[key]??'axis_threshold'} onChange={event=>update(p=>{p.input={...inputConfig(p),[key]:event.target.value as StickDirections};})}>
+        <div className={settingStyles.row}><SettingLabel label={index===0?'左摇杆方向判定':'右摇杆方向判定'}/>
+          <select aria-label={index===0?'左摇杆方向判定':'右摇杆方向判定'} value={c[key]??'axis_threshold'} onChange={event=>update(p=>{p.input={...inputConfig(p),[key]:event.target.value as StickDirections};})}>
             <option value="eight_way">八向重叠（适合 WASD）</option><option value="axis_threshold">按轴阈值</option>
           </select>
-        </label>
+        </div>
       </SettingField>)}
     <p className={styles.hint}>八向重叠：斜推同时触发相邻两键，例如 W+D；映射阈值按摇杆整体推离中心的幅度判断。按轴阈值：水平和垂直方向分别达到阈值才触发。</p>
   </SettingSection>;
@@ -56,7 +56,7 @@ export function StickCalibrationSettings({profile,update}:Props) {
       </SettingField>)}
     {(['lstick_radial','rstick_radial'] as const).map((key,index)=><SettingField key={key}
       label={index===0?'左摇杆圆周倍率':'右摇杆圆周倍率'} path={'input.'+key}>
-      <p className={styles.hint}>{index===0?'左摇杆圆周倍率':'右摇杆圆周倍率'} · {c[key].every(v=>v===1)?'无修正':'已自定义'}</p>
+      <SettingLabel label={index===0?'左摇杆圆周倍率':'右摇杆圆周倍率'}/><p className={styles.hint}>{c[key].every(v=>v===1)?'无修正':'已自定义'}</p>
     </SettingField>)}
     <button type="button" className="secondary-btn" onClick={()=>{
       setError(null);setRadial({left:JSON.stringify(c.lstick_radial),right:JSON.stringify(c.rstick_radial)});

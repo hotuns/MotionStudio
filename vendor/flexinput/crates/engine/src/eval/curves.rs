@@ -4,6 +4,11 @@
 
 use super::*;
 
+/// JSM's angle-dependent Flick duration multiplier, relative to a half-turn.
+pub fn flick_time_scale(angle_radians: f32, exponent: f32) -> f32 {
+    (angle_radians.abs() / std::f32::consts::PI).powf(exponent)
+}
+
 /// The original JSM Flick's cumulative quadratic ease-out.
 pub fn ease_out_quad(progress: f32) -> f32 {
     1.0 - (1.0 - progress) * (1.0 - progress)

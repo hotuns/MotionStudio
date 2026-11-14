@@ -1,9 +1,10 @@
-import {useState, type ReactNode} from 'react';
+import {useId, useState, type ReactNode} from 'react';
 import type { ComponentStatus, OutputBackend, GamepadBackend, IoRates, Snapshot } from '../types';
 import {t} from '../i18n';
 import { gamepadNames } from './Controls';
 import {VirtualOutputStatus} from './VirtualOutputStatus';
 import styles from './SettingsPage.module.css';
+import {SettingField, SettingLabel} from './SettingLayout';
 
 const driverNames: Record<string, string> = {
   running: '已就绪',
@@ -51,9 +52,10 @@ function FrequencyField({label, value, disabled, onChange}: {
   onChange: (rate: number) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
-  return <label className={styles.field}>
-    <span>{label} (Hz)</span>
-    <input type="number" min={60} max={4000} step={1} value={draft ?? value} disabled={disabled}
+  const id=useId();
+  return <SettingField label={label}><div className={styles.field}>
+    <SettingLabel label={label} htmlFor={id} unit="Hz"/>
+    <input id={id} aria-label={t(label)+' (Hz)'} type="number" min={60} max={4000} step={1} value={draft ?? value} disabled={disabled}
       onChange={event => setDraft(event.currentTarget.value)}
       onBlur={event => {
         const rate = event.currentTarget.valueAsNumber;
@@ -70,7 +72,7 @@ function FrequencyField({label, value, disabled, onChange}: {
           setDraft(null);
         }
       }}/>
-  </label>;
+  </div></SettingField>;
 }
 
 export function SystemPage(props: Props) {
@@ -142,24 +144,24 @@ export function SystemPage(props: Props) {
       <summary><strong>输出后端</strong><span>键鼠与虚拟手柄 · 显示同步</span></summary>
       <div className={styles.detailsBody}>
         <p>此设置保存在本机，所有游戏配置共用。</p>
-        <label className={styles.field}>键鼠输出后端
+        <SettingField label="键鼠输出后端"><div className={styles.field}><SettingLabel label="键鼠输出后端"/>
           <select aria-label="输出后端" value={props.backend} disabled={busy || props.outputActive}
             onChange={event => props.onBackend(event.target.value as OutputBackend)}>
             <option value="hid_maestro">HIDMaestro · HID 键鼠输出</option>
             <option value="legacy">SendInput / ViGEm · 兼容模式</option>
           </select>
-        </label>
+        </div></SettingField>
         <p>组合键、滚轮、鼠标侧键和体感鼠标共用此后端。</p>
-        <label className={styles.field}>虚拟手柄后端
+        <SettingField label="虚拟手柄后端"><div className={styles.field}><SettingLabel label="虚拟手柄后端"/>
           <select aria-label="虚拟手柄后端" value={props.backend==='legacy'?'vigem':props.gamepadBackend} disabled={busy||props.outputActive||props.backend==='legacy'} onChange={event=>props.onGamepadBackend(event.target.value as GamepadBackend)}>
             <option value="vigem">ViGEm · 虚拟 Xbox／DS4（推荐）</option>
             <option value="hid_maestro">HIDMaestro · HID 虚拟手柄</option>
           </select>
-        </label>
+        </div></SettingField>
         <p>ViGEm 提供标准 Xbox／DS4 虚拟手柄，需安装 ViGEmBus。可以同时使用 HIDMaestro 键鼠输出。</p>
-        <FrequencyField label={t('输入轮询频率')} value={ioRates.polling_hz} disabled={busy}
+        <FrequencyField label="输入轮询频率" value={ioRates.polling_hz} disabled={busy}
           onChange={polling_hz => onIoRates({...ioRates, polling_hz})}/>
-        <FrequencyField label={t('固定输出频率')} value={outputFollowsPolling ? ioRates.polling_hz : ioRates.output_hz}
+        <FrequencyField label="固定输出频率" value={outputFollowsPolling ? ioRates.polling_hz : ioRates.output_hz}
           disabled={busy || props.mouseDisplaySync || outputFollowsPolling}
           onChange={output_hz => onIoRates({...ioRates, output_hz})}/>
         <label className={styles.check}>

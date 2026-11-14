@@ -1,0 +1,11 @@
+{
+  "180° 基准释放时间": "180° reference release duration",
+  "按转角调整时间": "Scale duration by turn angle",
+  "按转角调整时间滑块": "Scale duration by turn angle slider",
+  "Flick 时间指数": "Flick time exponent",
+  "时间指数：0 为固定时间（默认），1 按转角等比例缩短，2 让小角度转身更快。上方释放时间以 180° 为基准，只影响初始转身，不影响绕圈追踪。": "Time exponent: 0 keeps a fixed duration (default), 1 scales it proportionally to the angle, and 2 makes small turns faster. The reference duration is for 180°. Only the initial turn is affected, not ongoing rotation.",
+  "预计转角释放时间：45°": "Estimated turn release duration: 45°",
+  "预计时间表示转角释放时间；游戏完成转身仍受实际满杆速度限制。释放时间为 0 时立即提交全部转角。": "Estimates describe turn release; actual in-game completion remains limited by full-stick speed. A duration of 0 submits the entire angle immediately.",
+  "转角释放时间 转身完成时间": "Turn release duration completion time",
+  "Flick 时间指数 FLICK_TIME_EXPONENT": "Flick time exponent FLICK_TIME_EXPONENT"
+}

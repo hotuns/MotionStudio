@@ -3,6 +3,7 @@ import type {ProfileLayer} from '../types';
 import {layerSettingOverridden} from '../layers';
 import {settingForLabel, type SettingRequest} from './settings-catalog';
 import {t} from '../i18n';
+import {settingHelp} from './setting-help';
 import styles from './SettingLayout.module.css';
 
 export const SettingContext = createContext<{
@@ -50,6 +51,15 @@ export function SettingSection({id, title, summary, children, defaultOpen = fals
   </details>;
 }
 
+export function SettingLabel({label, htmlFor, help, unit}: {label: string; htmlFor?: string; help?: string; unit?: string}) {
+  const description = help ?? settingHelp[label];
+  const text = <>{label}{unit && <span> ({unit})</span>}</>;
+  return <div className={styles.fieldLabel}>
+    {htmlFor ? <label htmlFor={htmlFor}>{text}</label> : <span>{text}</span>}
+    {description && <SettingHelp label={label}>{description}</SettingHelp>}
+  </div>;
+}
+
 export function SettingHelp({label, children}: {label: string; children: ReactNode}) {
   const [open,setOpen]=useState(false);
   const id=useId();
@@ -58,7 +68,7 @@ export function SettingHelp({label, children}: {label: string; children: ReactNo
   }} onKeyDown={event=>{if(event.key==='Escape'&&open){event.preventDefault();event.stopPropagation();setOpen(false);}}}>
     <button type="button" className="ghost-btn" aria-expanded={open} aria-controls={id}
       aria-label={t('{0}说明').replace('{0}',t(label))} onClick={()=>setOpen(!open)}>?</button>
-    <p id={id} hidden={!open}>{children}</p>
+    <p id={id} hidden={!open}>{typeof children==='string'?t(children):children}</p>
   </div>;
 }
 

@@ -3,7 +3,7 @@ import type { GamepadTarget } from '../types';
 import { StudioIcon } from './StudioIcon';
 import dialogStyles from './CreateProfileDialog.module.css';
 import motionStyles from './MotionControls.module.css';
-import {SettingContext, SettingField, SettingHelp, settingStyles} from './SettingLayout';
+import {SettingContext, SettingField, SettingLabel, settingStyles} from './SettingLayout';
 
 export const gamepadNames: Record<GamepadTarget, string> = {
   none: '键盘与鼠标',
@@ -27,7 +27,7 @@ export function Toggle({ value, onChange, label, help, disabled, settingPath }: 
   settingPath?: string | string[];
 }) {
   return <SettingField label={label} path={settingPath} disabled={disabled}><div className="studio-toggle-row">
-    <div><span>{label}</span>{help && <p className="studio-muted">{help}</p>}</div>
+    <SettingLabel label={label} help={help}/>
     <button className="studio-toggle" type="button" role="switch" aria-checked={value} aria-label={label}
       disabled={disabled} onClick={() => onChange(!value)}>
       <span className="studio-toggle-track" aria-hidden="true" />
@@ -72,15 +72,15 @@ export function Range({ label, value, min, max, step, onChange, unit = '', help,
   const number=<NumericInput id={id} value={value} min={min} max={max} step={step} onChange={onChange}/>;
   if(compact)return <SettingField label={label} path={settingPath}>
     <div className={settingStyles.compactRange} data-slider={slider}>
-      <div className={settingStyles.fieldLabel}><label htmlFor={id}>{label}</label>{help&&<SettingHelp label={label}>{help}</SettingHelp>}</div>
+      <SettingLabel label={label} htmlFor={id} help={help}/>
       {slider&&<input aria-label={label+'滑块'} type="range" min={min} max={max} step={step}
         value={Number.isFinite(value)?value:min} onChange={event=>onChange(event.target.valueAsNumber)}/>}
       <div className={settingStyles.number}>{number}{unit&&<span>{unit}</span>}</div>
     </div>
   </SettingField>;
-  return <div className="studio-range">
+  return <div className={'studio-range '+settingStyles.field}>
     <div className="studio-range-heading">
-      <label htmlFor={id}>{label}</label>
+      <SettingLabel label={label} htmlFor={id} help={help}/>
       <div>
         {number}
         {unit && <span>{unit}</span>}
@@ -89,7 +89,6 @@ export function Range({ label, value, min, max, step, onChange, unit = '', help,
     {slider&&<><input aria-label={label + '滑块'} type="range" min={min} max={max} step={step}
       value={Number.isFinite(value) ? value : min} onChange={event => onChange(event.target.valueAsNumber)} />
     <div className="studio-range-limits"><span>{min}{unit}</span><span>{max}{unit}</span></div></>}
-    {help && <p className="studio-muted">{help}</p>}
   </div>;
 }
 

@@ -3,7 +3,7 @@ import type {GyroBindingField, GyroBindingRecording} from '../pad-capture';
 import {OptionPicker} from './OptionPicker';
 import {padChoices, padInputLabel} from './binding-choices';
 import styles from './MotionControls.module.css';
-import {SettingField} from './SettingLayout';
+import {SettingField,SettingLabel} from './SettingLayout';
 
 export function GyroBindingInput({field, value, blocked, split, recording, locked, available, onChange, onRecord, onCancel}: {
   field: GyroBindingField;
@@ -23,7 +23,7 @@ export function GyroBindingInput({field, value, blocked, split, recording, locke
   if (pause) groups.unshift({options:[{value:'', label:'不设置'}]});
   return <SettingField label={label} path={'gyro.'+field} inheritance={false}><div className={styles.bindingField}>
     <div className={styles.bindingRow}>
-      <div className="studio-field">{label}
+      <div className="studio-field"><SettingLabel label={label}/>
         <OptionPicker label={label} value={value ?? ''} groups={groups} disabled={locked} onChange={onChange}/>
       </div>
       <button type="button" className="secondary-btn" data-cancel-capture aria-pressed={!!recording}

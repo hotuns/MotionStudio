@@ -157,6 +157,7 @@ pub struct Flick {
     pub enable_input: Option<String>,
     pub deadzone: f32,
     pub release_ratio: f32,
+    pub time_exponent: f32,
     pub disengage_ms: f32,
     pub smooth_ms: f32,
     pub forward_deadzone: f32,
@@ -180,6 +181,7 @@ impl Default for Flick {
             enable_input: None,
             deadzone: 0.85,
             release_ratio: 0.5,
+            time_exponent: 0.0,
             disengage_ms: 10.0,
             smooth_ms: 100.0,
             forward_deadzone: 0.0,
@@ -401,6 +403,7 @@ impl MotionConfig {
             ("Flick 追踪下限比例", self.flick.release_ratio, 0., 1.),
             ("Flick 退出延时", self.flick.disengage_ms, 0., 60.),
             ("Flick 时间", self.flick.smooth_ms, 0., 2000.),
+            ("Flick 时间指数", self.flick.time_exponent, 0., 2.),
             (
                 "Flick 缓出强度",
                 self.flick.release_ease,
