@@ -79,7 +79,7 @@ pub(crate) fn standard_bindings(target: GamepadTarget) -> Vec<GamepadBinding> {
             layout
                 .dualshock_4
                 .iter()
-                .filter(|_| target == GamepadTarget::DualShock4),
+                .filter(|_| matches!(target, GamepadTarget::DualShock4 | GamepadTarget::DualSense)),
         )
         .map(|name| GamepadBinding {
             input: name.clone(),

@@ -127,6 +127,7 @@ export function GameProfilesPage(props: Props) {
               <option value="none">键盘与鼠标</option>
               <option value="xbox_360">虚拟 Xbox 360</option>
               <option value="dualshock_4">虚拟 DualShock 4（PS4）</option>
+              <option value="dualsense">虚拟 DualSense（PS5，音频触觉）</option>
             </select>
           </div>
           {props.layerControls}
@@ -162,7 +163,7 @@ export function GameProfilesPage(props: Props) {
     {feedbackOpen&&<Dialog title="游戏震动与灯光" onClose={()=>setFeedbackOpen(false)}
       actions={<button type="button" className="primary-btn" onClick={()=>setFeedbackOpen(false)}>完成</button>}>
       <fieldset disabled={blocked || !!capture || measuring} className="studio-content">
-        <FeedbackSettings profile={profile} device={device} status={status} update={onUpdate}/>
+      <FeedbackSettings profile={profile} device={device} status={status} layerMode={layerMode} update={onUpdate}/>
       </fieldset>
     </Dialog>}
     <div key={props.editingLayerKey} data-pad-zone="game-panel" className={styles.tabPanel}>

@@ -13,6 +13,7 @@ flexinput-core = { path = "vendor/flexinput/crates/core" }
 flexinput-devices = { path = "vendor/flexinput/crates/devices", default-features = false }
 flexinput-modules = { path = "vendor/flexinput/crates/modules", default-features = false }
 flexinput-virtual = { path = "vendor/flexinput/crates/virtual" }
+flexinput-usbip = { path = "vendor/flexinput/crates/usbip" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 glam = { version = "0.27", features = ["serde"] }

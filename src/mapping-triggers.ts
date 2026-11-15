@@ -16,7 +16,7 @@ export function triggerPeers(profile:Profile|undefined, kind:'action'|'gamepad',
     ...profile.actions.filter((_,i) => kind !== 'action' || i !== index),
     ...(profile.virtual_gamepad === 'none' ? [] : (profile.gamepad_bindings ?? [])
       .filter((binding,i) => (kind !== 'gamepad' || i !== index) && !isAnalogGamepadBinding(binding)
-        && (profile.virtual_gamepad === 'dualshock_4' || binding.output !== 'touchpad'))),
+        && (profile.virtual_gamepad === 'dualshock_4' || profile.virtual_gamepad === 'dualsense' || binding.output !== 'touchpad'))),
   ];
 }
 

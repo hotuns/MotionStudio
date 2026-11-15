@@ -70,6 +70,7 @@ pub fn profile_json(target: GamepadTarget) -> Option<&'static str> {
         GamepadTarget::None => return None,
         GamepadTarget::Xbox360 => XBOX360_JSON,
         GamepadTarget::DualShock4 => ds4_profile_json(),
+        GamepadTarget::DualSense => return None,
     })
 }
 

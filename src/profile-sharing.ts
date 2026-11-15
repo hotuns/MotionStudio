@@ -42,7 +42,7 @@ function parseCatalog(data: unknown): CommunityProfile[] {
       !isText(entry.name, 120) || !isText(entry.game, 100) || !isText(entry.author, 100) ||
       !isText(entry.controller, 160) || !isText(entry.description, 600) ||
       typeof entry.notes !== 'string' || entry.notes.length > 1200 || typeof entry.verified !== 'boolean' ||
-      !['none', 'xbox_360', 'dualshock_4'].includes(entry.output)) throw Error(invalid);
+      !['none', 'xbox_360', 'dualshock_4', 'dualsense'].includes(entry.output)) throw Error(invalid);
     codes.add(entry.code);
     return entry;
   });

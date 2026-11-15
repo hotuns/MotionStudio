@@ -9,6 +9,7 @@ export const gamepadNames: Record<GamepadTarget, string> = {
   none: '键盘与鼠标',
   xbox_360: 'Xbox 360',
   dualshock_4: 'DualShock 4（PS4）',
+  dualsense: 'DualSense（PS5）',
 };
 
 export function SettingsGroup({title, children}: {title: string; children: ReactNode}) {

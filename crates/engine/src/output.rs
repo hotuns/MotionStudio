@@ -24,6 +24,7 @@ pub enum GamepadBackend {
     #[default]
     Vigem,
     HidMaestro,
+    UsbIp,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -460,6 +461,7 @@ mod windows {
                 GamepadTarget::None => unreachable!(),
                 GamepadTarget::Xbox360 => VirtualTarget::Xbox360(VirtualXInput::new(0)),
                 GamepadTarget::DualShock4 => VirtualTarget::DualShock4(VirtualDS4::new(0)),
+                GamepadTarget::DualSense => bail!("DualSense requires the USB/IP backend"),
             };
             anyhow::ensure!(
                 device.device().is_connected(),

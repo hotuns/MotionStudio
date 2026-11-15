@@ -16,7 +16,7 @@ export function virtualGamepadControls(target: GamepadTarget) {
     ...layout.buttons,
     ...layout.sticks,
     ...layout.triggers,
-    ...(target === 'dualshock_4' ? layout.dualshock_4 : []),
+    ...(target === 'dualshock_4' || target === 'dualsense' ? layout.dualshock_4 : []),
   ];
 }
 
@@ -27,7 +27,7 @@ const dualShockLabels: Record<string, string> = {
 };
 
 export function gamepadControlLabel(control: string, target?: GamepadTarget) {
-  if (target === 'dualshock_4' && dualShockLabels[control]) return dualShockLabels[control];
+  if ((target === 'dualshock_4' || target === 'dualsense') && dualShockLabels[control]) return dualShockLabels[control];
   if (control === 'left_stick') return t('左摇杆');
   if (control === 'right_stick') return t('右摇杆');
   return t(padInputLabel(control));

@@ -24,6 +24,27 @@ pub(crate) struct SonyFeedback {
     pub(crate) fb: DsFeedback,
 }
 
+#[cfg(test)]
+mod studio_tests {
+    use super::*;
+    #[test]
+    fn dualsense_light_only_packets_do_not_replace_held_rumble() {
+        let profile = Profile::from_json(flexinput_usbip::profiles::DUALSENSE_COMPOSITE_JSON).unwrap();
+        let mut parser = SonyFeedback::default();
+        let mut rumble = (0.,0.);
+        let mut motors = [0u8;47]; motors[0] = 3; motors[2] = 64; motors[3] = 128;
+        parser.poll(&profile,&mut rumble,[motors.as_slice()]);
+        let held = rumble;
+        let mut lights = [0u8;47]; lights[1] = 4;
+        parser.poll(&profile,&mut rumble,[lights.as_slice()]);
+        assert_eq!(rumble,held);
+        assert_eq!(rumble,(128./255.,64./255.));
+        motors[2] = 0; motors[3] = 0;
+        parser.poll(&profile,&mut rumble,[motors.as_slice()]);
+        assert_eq!(rumble,(0.,0.));
+    }
+}
+
 impl SonyFeedback {
     /// Fold this poll's output reports (report id stripped, oldest first) into
     /// `rumble` and the non-rumble feedback, and return the source pins.
@@ -49,7 +70,12 @@ impl SonyFeedback {
         for data in frames {
             let strong = left_idx.and_then(|i| data.get(i)).map(|b| *b as f32 / 255.0);
             let weak = right_idx.and_then(|i| data.get(i)).map(|b| *b as f32 / 255.0);
-            if let (Some(s), Some(w)) = (strong, weak) {
+            // Studio composite adaptation: DualSense reports update selected
+            // fields. Motor bytes in LED/trigger-only reports are not commands.
+            let motor_valid = !profile.id.contains("dualsense")
+                || data.first().is_some_and(|v| v & 0x03 != 0)
+                || data.get(38).is_some_and(|v| v & 0x04 != 0);
+            if let (Some(s), Some(w)) = (strong.filter(|_| motor_valid), weak.filter(|_| motor_valid)) {
                 let (ps, pw) = peak.unwrap_or((0.0, 0.0));
                 peak = Some((s.max(ps), w.max(pw)));
                 self.rumble_latest = (s, w);

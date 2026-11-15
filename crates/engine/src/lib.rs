@@ -7,6 +7,9 @@ pub mod engine;
 pub mod feedback;
 pub mod flex_output;
 pub mod gamepad_bindings;
+pub mod haptics;
+#[cfg(windows)]
+pub mod dualsense;
 #[cfg(windows)]
 pub mod hidmaestro;
 pub mod jsm_import;

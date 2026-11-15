@@ -4,13 +4,13 @@ export {keyNames} from './keyboard';
 export type TriggerSettings = {trigger?:'down'|'short'|'long'|'double'|'on_press'|'on_release';trigger_ms?:number;sustain?:boolean;turbo_ms?:number|null;allow_simultaneous?:boolean;chord_wait_ms?:number};
 export type Action = TriggerSettings & {name:string;input:string;output:string;threshold:number;repeat_ms?:number|null};
 export type OutputBackend = 'hid_maestro'|'legacy';
-export type GamepadBackend = 'vigem'|'hid_maestro';
+export type GamepadBackend = 'vigem'|'hid_maestro'|'usb_ip';
 export type GamepadStatus = {target:GamepadTarget;backend:GamepadBackend;connected:boolean;player_index:number|null;protected_devices:string[]};
 export type MouseTracePoint = {sequence:number;time_ms:number;position:[number,number];age_ms?:number};
 export type VirtualPadPreview = {left_x:number;left_y:number;right_x:number;right_y:number;left_trigger:number;right_trigger:number};
 export type PadTracePoint = {sequence:number;time_ms:number;axes:[number,number,number,number]};
 export type OutputPreviewStatus = {generation:number;mouse:MouseTracePoint[];pad:VirtualPadPreview|null;pad_trace?:PadTracePoint[];pad_time_ms?:number;sample_ms?:number};
-export type GamepadTarget = 'none'|'xbox_360'|'dualshock_4';
+export type GamepadTarget = 'none'|'xbox_360'|'dualshock_4'|'dualsense';
 export type AimOutput='mouse'|'right_stick'|'both';
 export type MotionBinding={name:string;input:string;output:string;range:number;threshold:number;mode:'hold'|'toggle'|'turbo';turbo_ms:number;curve:number[][]};
 export type FilterStage='raw_gyro'|'before_builtin'|'after_builtin';
@@ -51,7 +51,8 @@ export type Gyro = {
 };
 export type StickDirections = 'axis_threshold'|'eight_way';
 export type ControllerInputConfig={deadzone_left?:number;deadzone_right?:number;lstick_directions?:StickDirections;rstick_directions?:StickDirections;lstick_center:number[];rstick_center:number[];lstick_radial:number[];rstick_radial:number[];ltrig_min:number;ltrig_max:number;rtrig_min:number;rtrig_max:number;digital_triggers:boolean;ltrig_digital_threshold:number;rtrig_digital_threshold:number;trig_hysteresis:number;trig_debounce_ms:number};
-export type FeedbackConfig={rumble_enabled:boolean;rumble_gain:number;lightbar_enabled:boolean};
+export type FeedbackConfig={rumble_enabled:boolean;rumble_gain:number;lightbar_enabled:boolean;audio_haptics_enabled?:boolean;audio_haptics_gain?:number};
+export type HapticStatus={state:string;received_frames:number;sent_packets:number;dropped_frames:number;underrun_samples:number;clipped_samples:number;queued_ms:number;error:string|null};
 export type TouchpadConfig={enabled:boolean;pointer_speed:number;scroll_speed:number;natural_scroll:boolean};
 export type TouchContact={active:boolean;x:number;y:number};
 export type JsmFile = {name:string;text:string};
@@ -71,7 +72,7 @@ export type NavCommand='up'|'down'|'left'|'right'|'confirm'|'back'|'edit'|'save'
 export type Status = {
   mouse_display_sync?:{live:boolean;frame_hz:number;reports_per_frame:number;vrr?:boolean;fallback_hz?:number};
   output_preview?: OutputPreviewStatus | null;
-  state:string;message:string;profile_id:string|null;profile_name:string|null;device:Device|null;emitting:boolean;binding_capture?:boolean;active_layers?:string[];visibility?:{requested:boolean;active:boolean;hidden_paths:string[];error:string|null};output_backend?:OutputBackend|null;output_gamepad?:GamepadStatus|null;feedback?:{active:boolean;awaiting_new_command:boolean;rumble:number[];lightbar:number[]|null;forwarded:number};touches?:TouchContact[][];revision:number;reconnects:number;reload_error:string|null;buttons:boolean[];axes:number[];processed_axes?:number[];gyro:number[];calibration_progress:number;motion:MotionTelemetry;input_serial:number;stick_regions?:('center'|'inner'|'outer')[];pad_region_capture?:{serial:number;chord:string[]};pad_shortcuts?:{input:string;target:string}[];pad_shortcut_events?:{serial:number;index:number}[];pad_shortcut_serial?:number;pad_shortcut_baseline?:number;last_input:string|null;input_chord?:string[];ui_navigation?:boolean;navigation_serial?:number;navigation_events?:{serial:number;command:NavCommand}[];navigation_held?:NavCommand[];stats:{gyro_events:number;gyro_hz:number;stale_events:number;invalid_timestamps:number;gaps:number;process_p99_us:number;queue_p99_us:number;mouse_counts:number[];output?:{queued:number;coalesced_motion:number;mouse_reports:number;keyboard_reports:number;wait_total_us:number;wait_max_us:number;queue_max_us:number}};
+  state:string;message:string;profile_id:string|null;profile_name:string|null;device:Device|null;emitting:boolean;binding_capture?:boolean;active_layers?:string[];visibility?:{requested:boolean;active:boolean;hidden_paths:string[];error:string|null};output_backend?:OutputBackend|null;output_gamepad?:GamepadStatus|null;feedback?:{active:boolean;awaiting_new_command:boolean;rumble:number[];lightbar:number[]|null;forwarded:number;haptics?:HapticStatus|null};touches?:TouchContact[][];revision:number;reconnects:number;reload_error:string|null;buttons:boolean[];axes:number[];processed_axes?:number[];gyro:number[];calibration_progress:number;motion:MotionTelemetry;input_serial:number;stick_regions?:('center'|'inner'|'outer')[];pad_region_capture?:{serial:number;chord:string[]};pad_shortcuts?:{input:string;target:string}[];pad_shortcut_events?:{serial:number;index:number}[];pad_shortcut_serial?:number;pad_shortcut_baseline?:number;last_input:string|null;input_chord?:string[];ui_navigation?:boolean;navigation_serial?:number;navigation_events?:{serial:number;command:NavCommand}[];navigation_held?:NavCommand[];stats:{gyro_events:number;gyro_hz:number;stale_events:number;invalid_timestamps:number;gaps:number;process_p99_us:number;queue_p99_us:number;mouse_counts:number[];output?:{queued:number;coalesced_motion:number;mouse_reports:number;keyboard_reports:number;wait_total_us:number;wait_max_us:number;queue_max_us:number}};
 };
 export type JsmReport={profile:Profile;lines:{file:string;line:number;source:string;status:'converted'|'approximate'|'skipped'|'ignored'|'overridden'|'included';message:string}[];warnings:string[];converted:number;approximate:number;skipped:number};
 export type Snapshot = {status:Status;devices:Device[];restart_count:number;engine_ready:boolean;policy_error:string|null;logs:string[]};

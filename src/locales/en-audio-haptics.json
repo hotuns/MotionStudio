@@ -1,0 +1,22 @@
+{
+  "回传普通游戏震动": "Forward standard game rumble",
+  "普通震动强度": "Standard rumble gain",
+  "音圈输出开关在基础层设置，配置层可以调整触觉强度。": "Enable audio haptics in the base profile; layers can adjust its gain.",
+  "DualSense（PS5）": "DualSense (PS5)",
+  "虚拟 DualSense（PS5，音频触觉）": "Virtual DualSense (PS5, audio haptics)",
+  "APEX 6 Pro 音圈触觉（实验性）": "APEX 6 Pro audio haptics (experimental)",
+  "转发游戏原生 DualSense 触觉到 APEX 6 Pro 握把。支持有线和接收器，启动时检查型号与音圈能力。自适应扳机效果尚未转发。": "Forward native DualSense game haptics to APEX 6 Pro grips. USB and receiver connections are supported; model and linear-grip capabilities are checked at startup. Adaptive trigger effects are not forwarded yet.",
+  "需要先安装 usbip-win2 虚拟 USB 主控制器。游戏声音请选择原有扬声器或耳机；虚拟手柄扬声器暂不转发。": "Install the usbip-win2 virtual USB host controller first. Keep game audio on your speakers or headphones; the virtual controller speaker is not forwarded yet.",
+  "音圈触觉强度": "Audio haptics gain",
+  "音圈输出异常": "Audio haptics error",
+  "音圈输出已建立": "Audio haptics output connected",
+  "正在检查音圈接口": "Checking audio haptics interface",
+  "音圈输出已暂停": "Audio haptics paused",
+  "音圈输出已停止": "Audio haptics stopped",
+  "接收音频帧：": "Audio frames received:",
+  "· 发送波形包：": "· Waveform packets sent:",
+  "· 缓冲：": "· Buffered:",
+  "选择虚拟手柄输出后，游戏反馈回传才会运行。": "Select a virtual gamepad output to forward game feedback.",
+  "DualSense 音频输出自动使用 USB/IP，需要已安装的 usbip-win2 主控制器。": "DualSense audio output uses USB/IP automatically and requires the usbip-win2 host controller to be installed.",
+  "切换时无法恢复手柄马达，已暂停：{0}": "Paused because controller motor modes could not be restored during the switch: {0}"
+}

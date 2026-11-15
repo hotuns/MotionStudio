@@ -207,7 +207,7 @@ fn existing_virtual_gamepad_booleans_migrate_on_save_and_in_ipc() {
             .virtual_gamepad,
         GamepadTarget::None
     );
-    assert!(parse_profile(&legacy.replace("true", "\"dualsense\"")).is_err());
+    assert!(parse_profile(&legacy.replace("true", "\"unsupported_pad\"")).is_err());
     let json =
         serde_json::json!({ "schema_version": 1, "name": "Legacy IPC", "virtual_gamepad": true });
     let decoded: Profile = serde_json::from_value(json).unwrap();

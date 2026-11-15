@@ -94,3 +94,5 @@ mod sony_feedback;
 pub mod hidmaestro_device;
 #[cfg(windows)]
 pub mod native_gamepads;
+#[cfg(windows)]
+pub mod composite_device;

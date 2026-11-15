@@ -1,20 +1,32 @@
 import type {Device,Profile,Status,FeedbackConfig,TouchpadConfig} from '../types';
 import {Range,Toggle} from './Controls';
 import styles from './MotionControls.module.css';
-export const feedbackConfig=(profile:Profile):FeedbackConfig=>({rumble_enabled:true,rumble_gain:1,lightbar_enabled:true,...profile.feedback});
+export const feedbackConfig=(profile:Profile)=>({rumble_enabled:true,rumble_gain:1,lightbar_enabled:true,...profile.feedback,audio_haptics_enabled:profile.feedback?.audio_haptics_enabled??false,audio_haptics_gain:profile.feedback?.audio_haptics_gain??1});
 export const touchpadConfig=(profile:Profile):TouchpadConfig=>({enabled:false,pointer_speed:1,scroll_speed:1,natural_scroll:true,...profile.touchpad});
-type Props={profile:Profile;device?:Device|null;status?:Status;update:(change:(profile:Profile)=>void)=>void};
+type Props={profile:Profile;device?:Device|null;status?:Status;layerMode?:boolean;update:(change:(profile:Profile)=>void)=>void};
 
-export function FeedbackSettings({profile,device,status,update}:Props){
+export function FeedbackSettings({profile,device,status,layerMode,update}:Props){
  const config=feedbackConfig(profile),runtime=status?.feedback;
  const set=<K extends keyof FeedbackConfig>(key:K,value:FeedbackConfig[K])=>update(p=>{p.feedback={...feedbackConfig(p),[key]:value};});
  return <div className={styles.group}>
   <p className={styles.hint}>把游戏发给虚拟手柄的震动／灯光交回当前所选实体手柄。Xbox 主要提供震动，DualShock 4 还可以提供灯光；实际能力取决于实体接口。</p>
-  <Toggle label="回传游戏震动" settingPath="feedback.rumble_enabled" value={config.rumble_enabled} onChange={v=>set('rumble_enabled',v)}/>
-  {config.rumble_enabled&&<Range label="震动强度" settingPath="feedback.rumble_gain" value={config.rumble_gain} min={0} max={2} step={0.05} unit="×" onChange={v=>set('rumble_gain',v)}/>}
+  <Toggle label="回传普通游戏震动" settingPath="feedback.rumble_enabled" value={config.rumble_enabled} onChange={v=>set('rumble_enabled',v)}/>
+  {config.rumble_enabled&&<Range label="普通震动强度" settingPath="feedback.rumble_gain" value={config.rumble_gain} min={0} max={2} step={0.05} unit="×" onChange={v=>set('rumble_gain',v)}/>}
   <Toggle label="回传游戏灯光" settingPath="feedback.lightbar_enabled" value={config.lightbar_enabled} onChange={v=>set('lightbar_enabled',v)}/>
+  {profile.virtual_gamepad==='dualsense'&&<>
+   <Toggle label="APEX 6 Pro 音圈触觉（实验性）" settingPath="feedback.audio_haptics_enabled" disabled={layerMode} value={config.audio_haptics_enabled} onChange={v=>set('audio_haptics_enabled',v)}/>
+   {layerMode&&<p className={styles.hint}>音圈输出开关在基础层设置，配置层可以调整触觉强度。</p>}
+   <p className={styles.hint}>转发游戏原生 DualSense 触觉到 APEX 6 Pro 握把。支持有线和接收器，启动时检查型号与音圈能力。自适应扳机效果尚未转发。</p>
+   <p className={styles.hint}>需要先安装 usbip-win2 虚拟 USB 主控制器。游戏声音请选择原有扬声器或耳机；虚拟手柄扬声器暂不转发。</p>
+   {config.audio_haptics_enabled&&<Range label="音圈触觉强度" settingPath="feedback.audio_haptics_gain" value={config.audio_haptics_gain} min={0} max={2} step={0.05} unit="×" onChange={v=>set('audio_haptics_gain',v)}/>}
+   {runtime?.haptics&&<div role="status">
+    <p>{runtime.haptics.error?'音圈输出异常':runtime.haptics.state==='streaming'?'音圈输出已建立':runtime.haptics.state==='starting'?'正在检查音圈接口':runtime.haptics.state==='paused'?'音圈输出已暂停':'音圈输出已停止'}</p>
+    {runtime.haptics.error&&<p>{runtime.haptics.error}</p>}
+    <p>接收音频帧：<span translate="no">{runtime.haptics.received_frames}</span> · 发送波形包：<span translate="no">{runtime.haptics.sent_packets}</span> · 缓冲：<span translate="no">{runtime.haptics.queued_ms} ms</span></p>
+   </div>}
+  </>}
   {device&&<p className={styles.hint}>所选接口：{device.rumble?'支持震动':'未报告震动支持'} · {device.lightbar?'支持灯光':'未报告灯光支持'}</p>}
-  {profile.virtual_gamepad==='none'?<p className={styles.hint}>选择虚拟 Xbox／DualShock 4 输出后，游戏反馈回传才会运行。</p>:runtime?.active?<p role="status">{runtime.awaiting_new_command?'等待新的游戏反馈':'正在回传游戏反馈'} · <span translate="no">{Math.round(runtime.rumble[0]*100)}% / {Math.round(runtime.rumble[1]*100)}%</span></p>:null}
+  {profile.virtual_gamepad==='none'?<p className={styles.hint}>选择虚拟手柄输出后，游戏反馈回传才会运行。</p>:runtime?.active?<p role="status">{runtime.awaiting_new_command?'等待新的游戏反馈':'正在回传游戏反馈'} · <span translate="no">{Math.round(runtime.rumble[0]*100)}% / {Math.round(runtime.rumble[1]*100)}%</span></p>:null}
   <p className={styles.hint}>录入、停止、断线和切换时释放震动，恢复后等待新的游戏命令。停止灯光回传时取消待发送颜色，设备保留最后颜色。</p>
  </div>;
 }

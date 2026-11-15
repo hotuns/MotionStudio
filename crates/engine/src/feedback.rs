@@ -9,6 +9,9 @@ pub struct FeedbackConfig {
     pub rumble_enabled: bool,
     pub rumble_gain: f32,
     pub lightbar_enabled: bool,
+    /// Opt-in, capability-checked APEX 6 Pro native grip waveform output.
+    pub audio_haptics_enabled: bool,
+    pub audio_haptics_gain: f32,
 }
 impl Default for FeedbackConfig {
     fn default() -> Self {
@@ -16,11 +19,14 @@ impl Default for FeedbackConfig {
             rumble_enabled: true,
             rumble_gain: 1.,
             lightbar_enabled: true,
+            audio_haptics_enabled: false,
+            audio_haptics_gain: 1.,
         }
     }
 }
 impl FeedbackConfig {
     pub fn validate(&self) -> Result<()> {
+        ensure!(self.audio_haptics_gain.is_finite() && (0.0..=2.).contains(&self.audio_haptics_gain), "Audio haptics gain must be between 0 and 2");
         ensure!(
             self.rumble_gain.is_finite() && (0.0..=2.).contains(&self.rumble_gain),
             "震动强度必须在 0–2 之间"
@@ -65,6 +71,8 @@ pub struct FeedbackStatus {
     pub rumble: [f32; 2],
     pub lightbar: Option<[f32; 3]>,
     pub forwarded: u64,
+    #[serde(default)]
+    pub haptics: Option<crate::haptics::HapticStatus>,
 }
 #[derive(Default, Debug)]
 pub struct FeedbackPlan {

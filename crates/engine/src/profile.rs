@@ -240,6 +240,8 @@ pub enum GamepadTarget {
     Xbox360,
     #[serde(rename = "dualshock_4")]
     DualShock4,
+    #[serde(rename = "dualsense")]
+    DualSense,
 }
 
 fn deserialize_gamepad_target<'de, D>(de: D) -> Result<GamepadTarget, D::Error>

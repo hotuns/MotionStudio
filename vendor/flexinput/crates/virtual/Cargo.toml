@@ -7,6 +7,7 @@ license = "MIT"
 path = "src/headless.rs"
 [dependencies]
 flexinput-core.workspace = true
+flexinput-usbip.workspace = true
 
 flexinput-hidmaestro = { path = "../hidmaestro" }
 glam.workspace = true

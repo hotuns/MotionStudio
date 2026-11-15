@@ -37,7 +37,8 @@ export function StudioOverview({ profile, device, status, deviceCount, guideStep
     ['running', 'observing', 'waiting', 'preparing_output', 'calibrating', 'capturing', 'capture_release'].includes(status.state);
   const pressed = buttonNames.filter((_, i) => live?.buttons[i]);
   const gyro = profile?.gyro;
-  const output = profile?.virtual_gamepad === 'dualshock_4' ? 'DualShock 4'
+  const output = profile?.virtual_gamepad === 'dualsense' ? 'DualSense'
+    : profile?.virtual_gamepad === 'dualshock_4' ? 'DualShock 4'
     : profile?.virtual_gamepad === 'xbox_360' ? 'Xbox 360' : '键盘与鼠标';
   const gyroMode = !gyro ? '—' : !gyro.enabled ? '关闭'
     : gyro.motion.mode === 'steering' ? '姿态控制摇杆'

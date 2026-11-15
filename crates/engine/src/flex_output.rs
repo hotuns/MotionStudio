@@ -119,6 +119,7 @@ impl<S: Sink + Send> VirtualDevice for FlexVirtualSink<S> {
         match self.inner.gamepad_status().map(|pad| pad.target) {
             Some(GamepadTarget::Xbox360) => layouts::XINPUT_SOURCE_PINS,
             Some(GamepadTarget::DualShock4) => layouts::DS4_SOURCE_PINS,
+            Some(GamepadTarget::DualSense) => layouts::DUALSENSE_USB_SOURCE_PINS,
             _ => &[],
         }
     }

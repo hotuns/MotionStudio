@@ -61,6 +61,7 @@ pub fn virtual_id(id: &str) -> bool {
         || id.contains("VIGEM")
         || id.contains("HIDMAESTRO")
         || id.starts_with("HID\\HIDCLASS\\")
+        || (id.starts_with("USB\\") && id.rsplit('\\').next().is_some_and(flexinput_core::own_virtual::is_own_usb_serial))
 }
 pub fn valid_physical_id(id: &str) -> bool {
     let up = id.to_ascii_uppercase();
@@ -375,6 +376,7 @@ mod tests {
             r"SWD\HIDMAESTRO\MS01",
             r"HID\HIDCLASS\MS01",
             r"HID\VIGEM\VID_054C&PID_09CC",
+            r"USB\VID_054C&PID_0CE6\FX0123456789AB",
         ] {
             assert!(acquire(&mut d, &mut j, vec![id.into()], engine()).is_err());
         }

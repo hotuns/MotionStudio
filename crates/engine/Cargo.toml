@@ -1,6 +1,6 @@
 [package]
 name = "motion-core"
-version = "0.17.9"
+version = "0.18.0"
 edition = "2021"
 license = "MIT"
 publish = false
@@ -13,6 +13,7 @@ flexinput-engine = { path = "../../vendor/flexinput/crates/engine" }
 flexinput-devices.workspace = true
 flexinput-modules.workspace = true
 flexinput-virtual.workspace = true
+flexinput-usbip.workspace = true
 glam.workspace = true
 libloading = "0.8"
 serde.workspace = true

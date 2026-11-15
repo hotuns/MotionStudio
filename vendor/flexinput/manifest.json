@@ -926,17 +926,17 @@
     {
       "path": "crates/virtual/Cargo.toml",
       "upstreamSha256": "a2aa3b9fbb05d6ee56e95318944bcb3e6268beae0506cf709ff364c3e23ade37",
-      "vendoredSha256": "ab4b25ee662541c1d44924d5de45ffc2a322a7b34d2ccaba43615c751dde3b6f",
+      "vendoredSha256": "303a64038f7fcedb3eac21657bcfcdad493016f258c429ad032d4f560ec3efff",
       "upstreamGitBlob": "b2d417c904f5379c11cd76322d5ca37f7e1b664f",
       "modified": true,
-      "patch": "Headless dependencies for original native HID/GIP/ViGEm gamepads; optional upstream tests do not run by default. Windows display clock uses the upstream Windows APIs."
+      "patch": "Headless dependencies for original native HID/GIP/ViGEm gamepads; optional upstream tests do not run by default. Windows display clock uses the upstream Windows APIs. Add the pinned flexinput-usbip dependency for composite DualSense output."
     },
     {
       "path": "crates/virtual/src/headless.rs",
-      "vendoredSha256": "c0e9f8142f8c882bd17ac8d0d599ce15418df0c91c3b3702a7498ffa2acc8f55",
+      "vendoredSha256": "2a55cab7ac3621610146d3535b39d7fabec3bce1c286b2c0416099f84e1d1697",
       "added": true,
       "modified": true,
-      "patch": "Headless lifecycle feedback_sequence metadata added with a default implementation; original virtual device source/feedback contract retained. Expose the upstream Windows display clock. Expose the extracted upstream I/O scheduling rules."
+      "patch": "Headless lifecycle feedback_sequence metadata added with a default implementation; original virtual device source/feedback contract retained. Expose the upstream Windows display clock. Expose the extracted upstream I/O scheduling rules. Expose the pinned composite_device module through the existing headless entry."
     },
     {
       "path": "crates/virtual/src/io_schedule.rs",
@@ -998,8 +998,9 @@
       "path": "crates/virtual/src/sony_feedback.rs",
       "upstreamSha256": "f66db7d53224a1d715e7a13c9418e5fab5329cca0eb4f2b6f90756b7bf096845",
       "upstreamGitBlob": "d09d541d4793607b2e2592cbe6b6992ba29ca218",
-      "modified": false,
-      "vendoredSha256": "f66db7d53224a1d715e7a13c9418e5fab5329cca0eb4f2b6f90756b7bf096845"
+      "modified": true,
+      "vendoredSha256": "330fcbed02c7f6233d900ac467efd182a9cb54431c6a36e0fbb1a202847c378b",
+      "patch": "Respect DualSense motor-update flags; add an offline regression for LED-only reports retaining rumble."
     },
     {
       "path": "crates/hidmaestro/src/helper.rs",
@@ -1036,6 +1037,122 @@
       "derivedFrom": "crates/virtual/src/windows.rs::instance_label, XRumble, VirtualXInput through VirtualDS4 and pure axis/button helpers; headless checked flush and player-index API exposure (see docs/flexinput-reuse.md)",
       "vendoredSha256": "771b4871df32d7e9fa0b4653258756f614d661d3b147350dffb7d6789748d5b6",
       "patch": "Preserve original reports, target and notifications. Add command sequence counters captured atomically with polled values; existing fallible flush/player-index exposure retained. Offline tests never connect a driver. DS4 checked submit treats only Win32 259 as transient; Studio resubmits retained DS4 state at output cadence. Preserve immediate IOCTL errors and wait only on pending operations; report encoding is unchanged."
+    },
+    {
+      "path": "crates/virtual/src/composite_device.rs",
+      "upstreamSha256": "b300de0f0cf7a45f78f784b7ea2d4c84d8da29c2ae0bba6a859b581e61b351c8",
+      "upstreamGitBlob": "b72a99f76296dd09d582e3240e159e860e6dc6eb",
+      "vendoredSha256": "8c3628969b6f4833bb4307db45a79271d499633a72935739fb41904afe27f942",
+      "modified": true,
+      "patch": "Add fallible attach_existing and raw PCM seam, host connection status and feedback command sequence. Disable automatic installation and global attachment sweeps. Gate original GUI-metadata tests behind upstream-output-tests."
+    },
+    {
+      "path": "crates/usbip/src/audio.rs",
+      "upstreamSha256": "bb5362dfd03bc95d9450186c366ff7ae6db3515c4aeaec63478b5bdd4db2b3f9",
+      "upstreamGitBlob": "5e1f562ac94bbe9fa8efd579bdda07c3fad63a69",
+      "vendoredSha256": "d711c0d6225c400d02a4aa101f878bc8f8d9d9f513b04a58e1017d0b95c1ef20",
+      "modified": true,
+      "patch": "Validate and compact ISO OUT ranges; empty PCM marks discontinuity; stream epochs prevent queued pre-reset audio reaching the consumer. Add offline compaction/reset regressions."
+    },
+    {
+      "path": "crates/usbip/src/device.rs",
+      "upstreamSha256": "cfbcfd0375a5596e4b1c023f80fb4df20184dbaddc6d8bd13bea4e30356bf257",
+      "upstreamGitBlob": "ff67d4eba439e5312a81dabea83113a2e2e093f3",
+      "vendoredSha256": "ae1a0ca30fb26edd8fd5b5ebaf3bdde9ce56775670cd49aec55005edc271e682",
+      "modified": true,
+      "patch": "Update ISO PCM callback regression for compacted bytes and stream-reset notifications."
+    },
+    {
+      "path": "crates/usbip/src/server.rs",
+      "upstreamSha256": "44b9ddd83ff2dad5825963eb60b073d6b63ce44d1538afc53bc0789f6647763e",
+      "upstreamGitBlob": "c0508a2863af2343f5ba8397b4cd97829cdeca6e",
+      "vendoredSha256": "f7b47fe69ff05dd2f14f7f4a829d833f7d6dee448bf6c17638ad93c581b32520",
+      "modified": true,
+      "patch": "Use Studio-owned loopback ports 18128-18143, disjoint from upstream application ranges."
+    },
+    {
+      "path": "crates/usbip/Cargo.toml",
+      "upstreamSha256": "3a41a4a26f3c6c91c538da2a419c26c40275fd0460fee29a695085dd61837928",
+      "upstreamGitBlob": "4735ffc6b8072bbefba9c5cf6268b5585f30e610",
+      "vendoredSha256": "3a41a4a26f3c6c91c538da2a419c26c40275fd0460fee29a695085dd61837928",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/profiles/dualsense-composite.json",
+      "upstreamSha256": "17060a5a636fe01ed6bb81908d8edf5f787cf8db987c80442269a0cf4c5e04a4",
+      "upstreamGitBlob": "0ef7302b7deb485c1b0f47d36466db3111399de0",
+      "vendoredSha256": "17060a5a636fe01ed6bb81908d8edf5f787cf8db987c80442269a0cf4c5e04a4",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/profiles/dualsense-edge-composite.json",
+      "upstreamSha256": "b3dbdeb37f5b3d7a9055633d89275965b1638ed3920fd578d273f0a29c644766",
+      "upstreamGitBlob": "0e8d5f0888e7f832213bf9b5f6a4bc0122b4935a",
+      "vendoredSha256": "b3dbdeb37f5b3d7a9055633d89275965b1638ed3920fd578d273f0a29c644766",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/descriptors.rs",
+      "upstreamSha256": "d552c2c2945fe21abe80c02844265550b8d1582926f55513dd2596f2d94a5772",
+      "upstreamGitBlob": "25e6859a3bbfaca22a918ccff78c897a8d3372e6",
+      "vendoredSha256": "d552c2c2945fe21abe80c02844265550b8d1582926f55513dd2596f2d94a5772",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/feature.rs",
+      "upstreamSha256": "ea150ec5ba321340a4c4fcbd78de634ed739e5f23effcf40bb2a6e07855a1bb5",
+      "upstreamGitBlob": "f3665eeda514ac76365d39340fc0037da5d7c260",
+      "vendoredSha256": "ea150ec5ba321340a4c4fcbd78de634ed739e5f23effcf40bb2a6e07855a1bb5",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/lib.rs",
+      "upstreamSha256": "35325e56dd5602df2e6480b1dc3c1c50cfe0c4c0e82a6ece56840b31a69682b2",
+      "upstreamGitBlob": "4369ad82dc484fd1ce3243467e74df99002e885e",
+      "vendoredSha256": "35325e56dd5602df2e6480b1dc3c1c50cfe0c4c0e82a6ece56840b31a69682b2",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/pacer.rs",
+      "upstreamSha256": "a62dc9f9858aaaaf865e6e8f5bf2e62a5f255e6162da625690fba82a3bbfb67a",
+      "upstreamGitBlob": "c45849b863959c5348fd54a9e6009557a92161f4",
+      "vendoredSha256": "a62dc9f9858aaaaf865e6e8f5bf2e62a5f255e6162da625690fba82a3bbfb67a",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/passthrough.rs",
+      "upstreamSha256": "b0281ecca8bec5f1700baa9a078a8c54509095c06da4062da533dc8d1158222a",
+      "upstreamGitBlob": "8109577da6656bedba433a842f20cf4b8699574c",
+      "vendoredSha256": "b0281ecca8bec5f1700baa9a078a8c54509095c06da4062da533dc8d1158222a",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/profiles.rs",
+      "upstreamSha256": "a958d6fc41bf9f0e806e78157fb081dc2e83286d3bd1dc7abd788cd8968be0d5",
+      "upstreamGitBlob": "2cc7f8568103306ca80a31d7799d1e9219803ae4",
+      "vendoredSha256": "a958d6fc41bf9f0e806e78157fb081dc2e83286d3bd1dc7abd788cd8968be0d5",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/protocol.rs",
+      "upstreamSha256": "d10f0bdc691a46bc0cae92cac19ecc07d1f1dc38bd73484800460c9d0305764f",
+      "upstreamGitBlob": "db481277738b6b14bc080136801d7252be295cbc",
+      "vendoredSha256": "d10f0bdc691a46bc0cae92cac19ecc07d1f1dc38bd73484800460c9d0305764f",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/vhci.rs",
+      "upstreamSha256": "bc709ee0224b5dc94264436e85219573eb71136d08f75965739075e53d9f0392",
+      "upstreamGitBlob": "f88da1aa9c5999d58275b1db51e781a48758eb20",
+      "vendoredSha256": "bc709ee0224b5dc94264436e85219573eb71136d08f75965739075e53d9f0392",
+      "modified": false
+    },
+    {
+      "path": "crates/usbip/src/vhci_linux.rs",
+      "upstreamSha256": "f132c367ac91041c1ee68132e0f4df3698089e25f0a8a182a6ebbcbf6b4b9216",
+      "upstreamGitBlob": "e26c0fda217a47978a23bb71ef3fca444a32935d",
+      "vendoredSha256": "f132c367ac91041c1ee68132e0f4df3698089e25f0a8a182a6ebbcbf6b4b9216",
+      "modified": false
     }
   ],
   "port": "Motion Studio headless adapter: excludes GUI and JSM evaluation; native SDL raw event seam, original physical-source processing and native gamepad devices; Studio owns configuration and bounded lifecycle"

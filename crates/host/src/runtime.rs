@@ -39,7 +39,9 @@ fn probe_output(
     if backend == OutputBackend::HidMaestro {
         motion_core::hidmaestro::probe()?;
     }
-    if target != GamepadTarget::None
+    if target == GamepadTarget::DualSense {
+        motion_core::dualsense::probe()?;
+    } else if target != GamepadTarget::None
         && (backend == OutputBackend::Legacy || pad_backend == GamepadBackend::Vigem)
     {
         probe_virtual_driver()?;
@@ -163,6 +165,8 @@ pub struct Runtime {
     measurement_input_interrupted: bool,
     pad_shortcut_edges: Vec<PadShortcutEdges>,
     feedback: motion_core::feedback::FeedbackRouter,
+    haptics: Option<motion_core::haptics::Session>,
+    haptic_identity: Option<(String, Vec<u8>)>,
     last_feedback: Instant,
 }
 impl Runtime {
@@ -230,6 +234,8 @@ impl Runtime {
             measurement_input_interrupted: false,
             pad_shortcut_edges: vec![],
             feedback: Default::default(),
+            haptics: None,
+            haptic_identity: None,
             last_feedback: Instant::now(),
         }
     }
@@ -255,6 +261,9 @@ impl Runtime {
         Ok(())
     }
     fn reset_feedback(&mut self) {
+        if let Some(session) = &self.haptics {
+            session.bus.suspend();
+        }
         let owned = self.feedback.status.active
             || self.feedback.status.rumble != [0.; 2]
             || self.feedback.status.lightbar.is_some();
@@ -270,7 +279,14 @@ impl Runtime {
             .unwrap_or_default();
         self.feedback.suspend(sequence, &config);
         if let Some(sdl) = self.sdl.as_mut().filter(|_| owned) {
-            sdl.stop_feedback();
+            if self.haptics.is_some() {
+                sdl.feedback(&motion_core::feedback::FeedbackPlan {
+                    clear_lightbar: true,
+                    ..Default::default()
+                });
+            } else {
+                sdl.stop_feedback();
+            }
         }
     }
     fn output_paused(&self) -> bool {
@@ -291,20 +307,62 @@ impl Runtime {
                 .map(|engine| engine.profile.feedback.clone())
                 .unwrap_or_default();
             let now = self.sdl.as_ref().map_or(0, |sdl| sdl.now_ns() / 1_000_000);
-            let plan = self.feedback.tick(&frame, &cfg, active, now);
+            let mut plan = self.feedback.tick(&frame, &cfg, active, now);
+            if let Some(session) = &self.haptics {
+                session.bus.update(
+                    active && cfg.audio_haptics_enabled,
+                    cfg.audio_haptics_gain,
+                    self.feedback.status.rumble,
+                );
+                let status = session.bus.status();
+                self.feedback.status.haptics = Some(status.clone());
+                // The audio worker owns all motors until restoration completes.
+                plan.rumble = None;
+                if let Some(error) = status.error {
+                    self.fault(format!("Haptic output failed: {error}"));
+                    return;
+                }
+            }
             if let Some(sdl) = &mut self.sdl {
                 sdl.feedback(&plan);
             }
         }
     }
     fn close_output(&mut self) -> Result<()> {
+        self.close_output_impl(false)
+    }
+    fn close_output_impl(&mut self, disconnected: bool) -> Result<()> {
         self.io_clock.set_enabled(false);
-        let result = self.clear_outputs();
+        let mut result = self.clear_outputs();
+        if let Err(error) = self.stop_haptics() {
+            // A removed HID link cannot acknowledge restoration. Keep its
+            // diagnostic, but let the original input reconnect path continue.
+            // Keyboard/mouse release failures still propagate and fault.
+            if !disconnected {
+                result = match result {
+                    Ok(()) => Err(error),
+                    Err(release) => Err(anyhow::anyhow!(
+                        "{release:#}; haptic cleanup failed: {error:#}"
+                    )),
+                };
+            }
+        }
         self.output.take(); // Dispatcher retries releases on Drop.
         self.guard.take(); // Guardian releases any outstanding intent on EOF.
         self.status.emitting = false;
         self.status.output_backend = None;
         result
+    }
+    fn stop_haptics(&mut self) -> Result<()> {
+        if let Some(mut session) = self.haptics.take() {
+            if let (Some(device), Some(uid)) = (&self.status.device, session.bus.identity()) {
+                self.haptic_identity = Some((device.path.clone(), uid));
+            }
+            let stopped = session.stop();
+            self.feedback.status.haptics = Some(session.bus.status());
+            stopped?;
+        }
+        Ok(())
     }
     fn connected_input(&self) -> Option<&Device> {
         self.status
@@ -456,6 +514,9 @@ impl Runtime {
             .is_some_and(|device| device.path.eq_ignore_ascii_case(&config.device_path));
         let keep_input = reuse || (self.config.is_none() && self.status.device.is_none());
         self.finish_session("正在连接手柄", keep_input)?;
+        // An explicit Start is a new user selection. Automatic reconnect does
+        // not call start(), and retains the previous receiver-bound identity.
+        self.haptic_identity = None;
         if config.output_backend == OutputBackend::Legacy {
             motion_core::hidmaestro::shutdown()?;
         }
@@ -516,20 +577,51 @@ impl Runtime {
                     "正在准备输出；HIDMaestro 首次启用可能请求 Windows 管理员授权".into();
                 self.publish_status();
                 let target = self.engine.as_ref().unwrap().profile.virtual_gamepad;
-                let sink: Box<dyn Sink + Send> = match config.output_backend {
-                    OutputBackend::HidMaestro
-                        if target != GamepadTarget::None
-                            && config.gamepad_backend == GamepadBackend::Vigem =>
-                    {
-                        Box::new(SplitSink::new(
+                if config.profile.feedback.audio_haptics_enabled
+                    && target == GamepadTarget::DualSense
+                {
+                    let device = self
+                        .status
+                        .device
+                        .as_ref()
+                        .context("Selected controller unavailable")?;
+                    let sdl = self.sdl.as_mut().context("SDL unavailable")?;
+                    sdl.stop_feedback();
+                    let factory = sdl.haptic_factory(device)?;
+                    let expected = self
+                        .haptic_identity
+                        .as_ref()
+                        .filter(|(path, _)| path.eq_ignore_ascii_case(&device.path))
+                        .map(|(_, uid)| uid.clone());
+                    self.haptics = Some(motion_core::haptics::Session::start(factory, expected)?);
+                }
+                let sink: Box<dyn Sink + Send> = if target == GamepadTarget::DualSense {
+                    let pad = motion_core::dualsense::DualSenseSink::new(
+                        self.haptics.as_ref().map(|s| s.bus.pcm_sink()),
+                    )?;
+                    let keys: Box<dyn Sink + Send> = match config.output_backend {
+                        OutputBackend::HidMaestro => Box::new(
                             motion_core::hidmaestro::HidMaestroSink::new(GamepadTarget::None)?,
-                            WindowsSink::new(target)?,
-                        ))
+                        ),
+                        OutputBackend::Legacy => Box::new(WindowsSink::new(GamepadTarget::None)?),
+                    };
+                    Box::new(SplitSink::new(keys, pad))
+                } else {
+                    match config.output_backend {
+                        OutputBackend::HidMaestro
+                            if target != GamepadTarget::None
+                                && config.gamepad_backend == GamepadBackend::Vigem =>
+                        {
+                            Box::new(SplitSink::new(
+                                motion_core::hidmaestro::HidMaestroSink::new(GamepadTarget::None)?,
+                                WindowsSink::new(target)?,
+                            ))
+                        }
+                        OutputBackend::HidMaestro => {
+                            Box::new(motion_core::hidmaestro::HidMaestroSink::new(target)?)
+                        }
+                        OutputBackend::Legacy => Box::new(WindowsSink::new(target)?),
                     }
-                    OutputBackend::HidMaestro => {
-                        Box::new(motion_core::hidmaestro::HidMaestroSink::new(target)?)
-                    }
-                    OutputBackend::Legacy => Box::new(WindowsSink::new(target)?),
                 };
                 let sink: Box<dyn Sink> =
                     Box::new(motion_core::flex_output::FlexVirtualSink::new(sink));
@@ -758,18 +850,23 @@ impl Runtime {
         }
         // The attached device may outlive a keyboard/mouse-only profile. Reuse
         // the neutral device when returning to its type within this session.
-        let recreate = if config.emit {
-            match self.output.as_ref().and_then(Dispatcher::gamepad_status) {
-                Some(pad) => {
-                    !pad.connected
-                        || (profile.virtual_gamepad != GamepadTarget::None
-                            && pad.target != profile.virtual_gamepad)
+        let recreate = (config.emit
+            && (config.profile.feedback.audio_haptics_enabled
+                != profile.feedback.audio_haptics_enabled
+                || (self.haptics.is_some()
+                    && profile.virtual_gamepad != GamepadTarget::DualSense)))
+            || if config.emit {
+                match self.output.as_ref().and_then(Dispatcher::gamepad_status) {
+                    Some(pad) => {
+                        !pad.connected
+                            || (profile.virtual_gamepad != GamepadTarget::None
+                                && pad.target != profile.virtual_gamepad)
+                    }
+                    None => profile.virtual_gamepad != GamepadTarget::None,
                 }
-                None => profile.virtual_gamepad != GamepadTarget::None,
-            }
-        } else {
-            config.profile.virtual_gamepad != profile.virtual_gamepad
-        };
+            } else {
+                config.profile.virtual_gamepad != profile.virtual_gamepad
+            };
         if config.emit && (recreate || self.output.is_none()) {
             probe_output(
                 config.output_backend,
@@ -798,6 +895,11 @@ impl Runtime {
         if recreate {
             // Drop the old device before creating the replacement, with the
             // guardian lease held for the entire switch.
+            if let Err(error) = self.stop_haptics() {
+                let message = format!("切换时无法恢复手柄马达，已暂停：{error:#}");
+                self.fault(message.clone());
+                bail!(message);
+            }
             self.output.take();
             self.status.emitting = false;
         }
@@ -1194,7 +1296,13 @@ impl Runtime {
             self.publish_status();
             return Ok(());
         }
-        self.close_output()?;
+        self.close_output_impl(true)?;
+        let haptic_cleanup = self
+            .feedback
+            .status
+            .haptics
+            .as_ref()
+            .and_then(|s| s.error.clone());
         self.calibration.take();
         self.pending_reload = None;
         self.engine.take();
@@ -1212,6 +1320,11 @@ impl Runtime {
         self.status.motion = Default::default();
         self.status.calibration_progress = 0.0;
         self.status.message = "手柄已断开，已释放输出，正在等待原接口".into();
+        if let Some(error) = haptic_cleanup {
+            self.status
+                .message
+                .push_str(&format!("; output cleanup unconfirmed: {error:#}"));
+        }
         self.next_discovery = Instant::now() + Duration::from_millis(500);
         self.publish_status();
         Ok(())

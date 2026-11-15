@@ -23,6 +23,19 @@ pub(crate) fn virtual_output_ids() -> Vec<String> {
     topology::virtual_ids(&topology::inventory())
 }
 
+#[cfg(windows)]
+pub(crate) fn wait_for_composite(serial: &str) -> anyhow::Result<Vec<String>> {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    loop {
+        let ids: Vec<_> = topology::inventory().into_iter().filter(|n| n.gaming &&
+            std::iter::once(&n.id).chain(&n.parents).any(|id| id.rsplit('\\').next().is_some_and(|part| part.eq_ignore_ascii_case(serial))))
+            .map(|n| n.id).collect();
+        if !ids.is_empty() { return Ok(ids); }
+        anyhow::ensure!(std::time::Instant::now() < until, "Timed out waiting for the virtual DualSense HID/audio composite device");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// Target readiness can precede the HID/XInput interface becoming enumerable.
 /// Finish identifying the new pad before merging its IDs with keyboard/mouse IDs.
 #[cfg(windows)]

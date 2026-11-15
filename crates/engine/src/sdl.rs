@@ -203,6 +203,7 @@ fn windows_input_origin(path: &str) -> InputOrigin {
 }
 
 fn virtual_device_ancestor(name: &str) -> bool {
+    if name.starts_with("USB\\") && name.rsplit('\\').next().is_some_and(flexinput_core::own_virtual::is_own_usb_serial) { return true; }
     [
         r"ROOT\VIGEMBUS\",
         r"ROOT\HIDMAESTRO\",
@@ -233,6 +234,9 @@ fn event_error(message: String) -> anyhow::Error {
 }
 
 impl Sdl {
+    pub fn haptic_factory(&self, device: &Device) -> Result<crate::haptics::transport::Factory> {
+        crate::haptics::transport::factory(self._library, &device.path, device.vendor, device.product)
+    }
     pub fn load(path: &Path) -> Result<Self> {
         let (path, library) = load_dll(path)?;
         let backend = SdlBackend::for_events().map_err(event_error)?;

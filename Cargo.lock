@@ -972,11 +972,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "flexinput-usbip"
+version = "0.16.9"
+dependencies = [
+ "flexinput-core",
+ "serde",
+ "serde_json",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "flexinput-virtual"
 version = "0.16.9"
 dependencies = [
  "flexinput-core",
  "flexinput-hidmaestro",
+ "flexinput-usbip",
  "glam",
  "vigem-client",
  "windows-sys 0.61.2",
@@ -2212,7 +2223,7 @@ dependencies = [
 
 [[package]]
 name = "motion-core"
-version = "0.17.9"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "flexinput-core",
@@ -2220,6 +2231,7 @@ dependencies = [
  "flexinput-engine",
  "flexinput-hidmaestro",
  "flexinput-modules",
+ "flexinput-usbip",
  "flexinput-virtual",
  "glam",
  "libloading 0.8.9",
@@ -2235,7 +2247,7 @@ dependencies = [
 
 [[package]]
 name = "motion-engine"
-version = "0.17.9"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "motion-core",
@@ -2257,7 +2269,7 @@ dependencies = [
 
 [[package]]
 name = "motion-studio"
-version = "0.17.9"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

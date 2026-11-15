@@ -299,7 +299,7 @@ fn mapped_actions(profile: &Profile) -> Vec<Action> {
                 .filter(|binding| !binding.is_analog())
                 .filter(|binding| {
                     binding.output != "touchpad"
-                        || profile.virtual_gamepad == GamepadTarget::DualShock4
+                        || matches!(profile.virtual_gamepad, GamepadTarget::DualShock4 | GamepadTarget::DualSense)
                 })
                 .map(|binding| binding.action()),
         );
@@ -438,7 +438,7 @@ fn controls(profile: &Profile, actions: &[Action]) -> (GraphRunner, Vec<PressCom
     }
     if profile.virtual_gamepad != GamepadTarget::None {
         let mut pad_pins: Vec<String> = PAD_PINS.iter().map(|s| s.to_string()).collect();
-        if profile.virtual_gamepad == GamepadTarget::DualShock4 {
+        if matches!(profile.virtual_gamepad, GamepadTarget::DualShock4 | GamepadTarget::DualSense) {
             pad_pins.push("btn_touchpad".into());
             pad_pins.extend(["btn_lt_dig".into(), "btn_rt_dig".into()]);
         }

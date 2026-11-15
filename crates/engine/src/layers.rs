@@ -106,6 +106,9 @@ pub fn validate(base: &Profile) -> Result<()> {
     );
     let mut ids = std::collections::HashSet::new();
     for layer in &base.layers {
+        if let Some(enabled) = layer.settings.get("feedback").and_then(|v| v.get("audio_haptics_enabled")) {
+            ensure!(enabled.as_bool() == Some(base.feedback.audio_haptics_enabled), "Audio haptics mode is a base-profile device setting; layers may change its gain");
+        }
         ensure!(
             layer.activation_threshold.is_finite()
                 && (0.05..=0.95).contains(&layer.activation_threshold)

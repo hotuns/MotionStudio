@@ -159,6 +159,7 @@ export function SystemPage(props: Props) {
           </select>
         </div></SettingField>
         <p>ViGEm 提供标准 Xbox／DS4 虚拟手柄，需安装 ViGEmBus。可以同时使用 HIDMaestro 键鼠输出。</p>
+        <p>DualSense 音频输出自动使用 USB/IP，需要已安装的 usbip-win2 主控制器。</p>
         <FrequencyField label="输入轮询频率" value={ioRates.polling_hz} disabled={busy}
           onChange={polling_hz => onIoRates({...ioRates, polling_hz})}/>
         <FrequencyField label="固定输出频率" value={outputFollowsPolling ? ioRates.polling_hz : ioRates.output_hz}
@@ -187,7 +188,7 @@ export function SystemPage(props: Props) {
         <p>首次启用映射时，Windows 会请求管理员授权来创建虚拟设备；同一引擎会话中的暂停和配置切换会复用辅助进程。</p>
         {props.outputActive && <p className={styles.notice}>停止映射或观察后可以切换输出后端。</p>}
         <p>当前键鼠输出：{snapshot?.status.emitting ? snapshot.status.output_backend === 'hid_maestro' ? 'HIDMaestro' : snapshot.status.output_backend==='legacy'?'SendInput':'状态未知' : '未发送输入'}。所选后端不可用时会暂停并报告原因。</p>
-        <p>当前虚拟手柄：{snapshot?.status.output_gamepad?<span translate="no">{gamepadNames[snapshot.status.output_gamepad.target]} · {snapshot.status.output_gamepad.backend==='vigem'?'ViGEm':'HIDMaestro'}</span>:'当前没有运行中的虚拟手柄输出'}</p>
+        <p>当前虚拟手柄：{snapshot?.status.output_gamepad?<span translate="no">{gamepadNames[snapshot.status.output_gamepad.target]} · {snapshot.status.output_gamepad.backend==='usb_ip'?'USB/IP':snapshot.status.output_gamepad.backend==='vigem'?'ViGEm':'HIDMaestro'}</span>:'当前没有运行中的虚拟手柄输出'}</p>
         <p>游戏是否接受虚拟设备仍取决于游戏本身，HID 输出不能保证通过反作弊检查。</p>
       </div>
     </details>
