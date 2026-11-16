@@ -2186,7 +2186,7 @@
   "触摸板右滑": "Touchpad swipe right",
   "触摸板方向手势": "Directional touchpad gestures",
   "在动作映射中添加动作，输入选择「触摸板上滑／下滑／左滑／右滑」，即可分别绑定按键。无需开启触摸板鼠标。": "Add an action and choose Touchpad swipe up, down, left or right as its input to assign a key. Touchpad mouse does not need to be enabled.",
-  "沿主要方向滑动超过触摸板约 18% 的距离触发一次，输出约 120 ms；抬手后可以再次滑动。双指或双触摸板的同方向手势会合并。建议使用默认的按住触发方式。": "Moving more than approximately 18% of the pad along the dominant axis produces one pulse of about 120 ms. Lift the finger before swiping again. Matching directions from two fingers or pads are combined. Use the default Hold activation.",
+  "沿主要方向滑动超过触摸板约 18% 的距离后，该方向保持触发，手指停住或移回也会继续，抬手时释放；再次落指可重新滑动。双指或双触摸板的同方向手势会合并，最后一根触发该方向的手指抬起才释放。建议使用默认的按住触发方式。": "Moving more than approximately 18% of the pad along the dominant axis holds that direction until the finger lifts, even when it stops or moves back. Touch again to start a new swipe. Matching directions from two fingers or pads stay active until the last finger that triggered that direction lifts. Use the default Hold activation.",
   "搜索全部键鼠键位": "Search all keyboard and mouse inputs",
   "虚拟手柄 · {0}": "Virtual controller · {0}",
   "虚拟手柄 ·": "Virtual controller ·",
@@ -2385,5 +2385,13 @@
   "DualSense 音频输出自动使用 USB/IP，需要已安装的 usbip-win2 主控制器。": "DualSense audio output uses USB/IP automatically and requires the usbip-win2 host controller to be installed.",
   "回传普通游戏震动": "Forward standard game rumble",
   "普通震动强度": "Standard rumble gain",
-  "切换时无法恢复手柄马达，已暂停：{0}": "Paused because controller motor modes could not be restored during the switch: {0}"
+  "切换时无法恢复手柄马达，已暂停：{0}": "Paused because controller motor modes could not be restored during the switch: {0}",
+  "按住暂停 Flick": "Hold to pause Flick",
+  "暂停摇杆瞄准": "Pause stick aim",
+  "按住启用与按住暂停互斥，设置一个会清除另一个；都不设置时常开，仍受功能启用开关控制。": "Hold to enable and hold to pause are mutually exclusive. Setting one clears the other. With neither set, no extra button is required; the feature enable switches still apply.",
+  "Flick 的按住开启和按住暂停不能同时设置": "Flick hold to enable and hold to pause cannot both be configured",
+  "按住时暂停 Flick 和配套摇杆瞄准，取消剩余转角并交还原始摇杆；松开后恢复。若暂停时摇杆已在外圈，先回中再重新推杆。它与体感暂停独立，与按住启用互斥。": "Hold to pause Flick and companion stick aim, cancel the remaining turn, and restore the original stick mapping. Release to resume. If the stick was at the rim while paused, return it to center before pushing again. This is independent of gyro pause and mutually exclusive with hold to enable.",
+  "计数/s": "counts/s",
+  "最大移动速度控制满杆速度；响应值越大，小幅推杆越慢，1 为线性。游戏内转速还取决于游戏鼠标灵敏度。": "Maximum speed controls full-stick speed. Higher response values slow partial stick movement; 1 is linear. In-game turning speed also depends on the game mouse sensitivity.",
+  "摇杆推满时每秒发送的鼠标计数。调大移动更快；游戏内转速还取决于游戏鼠标灵敏度，小幅推杆的速度还取决于响应曲线。": "Mouse counts sent per second at full stick deflection. Higher values move faster. In-game turning speed also depends on the game mouse sensitivity, and partial stick speed depends on the response curve."
 }

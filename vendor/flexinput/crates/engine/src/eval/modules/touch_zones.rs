@@ -156,6 +156,10 @@ pub(crate) fn eval_touch_zones_map_node(
     // [active, sx, sy, field, zone, dir, pulse_ms, cx, cy].
     const SWIPE_THRESH: f32 = 0.18;   // fraction of the field
     const SWIPE_PULSE_MS: f32 = 120.0;
+    // Studio can keep the native per-finger direction latched until lift.
+    // Existing graphs retain their 120 ms pulse unless explicitly opted in.
+    let swipe_hold_until_release = snap.params.get("swipe_hold_until_release")
+        .and_then(|v| v.as_bool()).unwrap_or(false);
     // Per-zone "adaptive centre" inner fraction (0..1): the central region within
     // which a touchdown becomes the RELATIVE centre. 0 = always the zone centre
     // (absolute deflection across the whole zone); 1 = wherever you land is the
@@ -310,7 +314,12 @@ pub(crate) fn eval_touch_zones_map_node(
             ns.aux_f32[base + 11] = 0.0;
             ns.aux_f32[base + 12] = 0.0;
         }
-        if ns.aux_f32[base + 6] > 0.0 {
+        let swipe_active = if swipe_hold_until_release {
+            active && ns.aux_f32[base + 5] > 0.5
+        } else {
+            ns.aux_f32[base + 6] > 0.0
+        };
+        if swipe_active {
             swipes.push((ns.aux_f32[base + 3] as usize,
                          ns.aux_f32[base + 4] as usize,
                          ns.aux_f32[base + 5] as u8));
@@ -359,7 +368,8 @@ pub(crate) fn eval_touch_zones_map_node(
         // how far the finger is pushed IN that direction: the curve-shaped directional
         // deflection ≥ threshold ("swipe → directional analog, thresholded"; the
         // adaptive/relative setting decides how off-centre the landing may be). With
-        // no threshold it keeps the original one-shot flick detection.
+        // no threshold it uses the latched direction, either as a pulse or
+        // held until lift according to swipe_hold_until_release.
         let swipe_threshold: Option<f32> =
             card.get("threshold").and_then(|v| v.as_f64()).map(|v| v as f32);
         // On a pad that reports its press, a touch or click card with a

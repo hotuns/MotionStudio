@@ -916,3 +916,163 @@ fn a_held_flick_snapshot_waits_for_center_before_starting_a_turn() {
     axis(&mut e, 2, 32767);
     assert!(e.advance(0.01, 210_000_000).mouse_delta[0] > 0.);
 }
+
+#[test]
+fn flick_pause_defaults_roundtrips_and_is_exclusive_with_hold_enable_in_layers() {
+    let mut p = profile();
+    assert!(p.gyro.motion.flick.pause_input.is_none());
+    p.gyro.motion.flick.pause_input = Some("east".into());
+    let loaded = parse_profile(&toml::to_string_pretty(&p).unwrap()).unwrap();
+    assert_eq!(
+        loaded.gyro.motion.flick.pause_input.as_deref(),
+        Some("east")
+    );
+    p.layers.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"hold", "name":"Hold", "input":"left_shoulder",
+            "settings":{"gyro":{"motion":{"flick":{
+                "pause_input":{"clear":true}, "enable_input":"south"
+            }}}}
+        }))
+        .unwrap(),
+    );
+    p.validate().unwrap();
+    let hold = motion_core::layers::resolve(&p, &[0]).unwrap();
+    assert!(hold.gyro.motion.flick.pause_input.is_none());
+    assert_eq!(
+        hold.gyro.motion.flick.enable_input.as_deref(),
+        Some("south")
+    );
+    assert_eq!(
+        motion_core::layers::resolve(&p, &[])
+            .unwrap()
+            .gyro
+            .motion
+            .flick
+            .pause_input
+            .as_deref(),
+        Some("east")
+    );
+    p.layers[0].settings = serde_json::from_value(serde_json::json!({
+        "gyro":{"motion":{"flick":{"enable_input":"south"}}}
+    }))
+    .unwrap();
+    assert!(
+        p.validate().is_err(),
+        "a layer cannot inherit pause while adding enable"
+    );
+    p.layers.clear();
+    for enable in ["east", "south"] {
+        p.gyro.motion.flick.enable_input = Some(enable.into());
+        assert!(
+            p.validate().is_err(),
+            "both controls are invalid even on different buttons"
+        );
+    }
+    p.gyro.motion.flick.enable_input = None;
+    p.gyro.motion.flick.pause_input = Some("missing_input".into());
+    assert!(p.validate().is_err());
+}
+
+#[test]
+fn flick_pause_cancels_remaining_mouse_and_stick_turns_without_replaying_on_resume() {
+    for output in [GyroOutput::Mouse, GyroOutput::RightStick] {
+        let mut p = profile();
+        gamepad(&mut p);
+        p.gyro.output = output;
+        p.gyro.stick_full_scale_dps = 90.;
+        p.gyro.motion.flick.enabled = true;
+        p.gyro.motion.flick.pause_input = Some("east".into());
+        let mut e = Engine::new(p).unwrap();
+        axis(&mut e, 2, 32767);
+        let first = e.advance(0.01, 10_000_000);
+        assert!(first.mouse_delta[0] > 0. || first.pad.unwrap().right_x > 0);
+        axis(&mut e, 2, 0);
+        button(&mut e, 1, true);
+        assert_eq!(e.frame.pad.unwrap().right_x, 0);
+        for n in 2..12 {
+            let paused = e.advance(0.01, n * 10_000_000);
+            assert_eq!(paused.mouse_delta, [0.; 2]);
+            assert_eq!(paused.pad.unwrap().right_x, 0);
+        }
+        button(&mut e, 1, false);
+        let resumed = e.advance(0.01, 120_000_000);
+        assert_eq!(resumed.mouse_delta, [0.; 2]);
+        assert_eq!(resumed.pad.unwrap().right_x, 0);
+        axis(&mut e, 2, 32767);
+        let fresh = e.advance(0.01, 130_000_000);
+        assert!(fresh.mouse_delta[0] > 0. || fresh.pad.unwrap().right_x > 0);
+    }
+}
+
+#[test]
+fn releasing_flick_pause_with_the_stick_at_the_rim_waits_for_recenter() {
+    let mut p = profile();
+    gamepad(&mut p);
+    p.gyro.output = GyroOutput::Mouse;
+    p.gyro.motion.flick.enabled = true;
+    p.gyro.motion.flick.pause_input = Some("east".into());
+    let mut e = Engine::new(p).unwrap();
+    button(&mut e, 1, true);
+    axis(&mut e, 2, 32767);
+    let paused = e.advance(0.01, 10_000_000);
+    assert_eq!(paused.mouse_delta, [0.; 2]);
+    assert_eq!(
+        paused.pad.unwrap().right_x,
+        32767,
+        "pause restores the original stick"
+    );
+    button(&mut e, 1, false);
+    for n in 2..12 {
+        let resumed = e.advance(0.01, n * 10_000_000);
+        assert_eq!(resumed.mouse_delta, [0.; 2]);
+        assert_eq!(resumed.pad.unwrap().right_x, 0);
+    }
+    axis(&mut e, 2, 0);
+    e.advance(0.01, 120_000_000);
+    axis(&mut e, 2, 32767);
+    assert!(e.advance(0.01, 130_000_000).mouse_delta[0] > 0.);
+}
+
+#[test]
+fn flick_pause_stops_companion_aim_but_keeps_gyro_and_resumes_on_release() {
+    let mut p = profile();
+    gamepad(&mut p);
+    p.gyro.output = GyroOutput::Mouse;
+    p.gyro.motion.flick.stick_aim = true;
+    p.gyro.motion.flick.pause_input = Some("east".into());
+    let mut e = Engine::new(p).unwrap();
+    axis(&mut e, 2, 16384);
+    assert!(e.advance(0.01, 10_000_000).mouse_delta[0] > 0.);
+    button(&mut e, 1, true);
+    let paused = e.advance(0.01, 20_000_000);
+    assert_eq!(paused.mouse_delta, [0.; 2]);
+    assert!(paused.pad.unwrap().right_x > 16000);
+    gyro(&mut e, 30, 0., 0., 90.);
+    gyro(&mut e, 40, 0., 0., 90.);
+    assert!(
+        e.frame.mouse_delta[0] > 0.,
+        "Flick pause must not pause gyro"
+    );
+    button(&mut e, 1, false);
+    let resumed = e.advance(0.01, 50_000_000);
+    assert!(resumed.mouse_delta[0] > 0.);
+    assert_eq!(resumed.pad.unwrap().right_x, 0);
+}
+
+#[test]
+fn flick_pause_applies_when_standalone_and_when_a_pause_binding_layer_is_entered() {
+    let mut p = profile();
+    p.gyro.enabled = false;
+    p.gyro.motion.flick.standalone = true;
+    p.gyro.motion.flick.stick_aim = true;
+    let mut e = Engine::new(p.clone()).unwrap();
+    button(&mut e, 1, true);
+    axis(&mut e, 2, 16384);
+    assert!(e.advance(0.01, 10_000_000).mouse_delta[0] > 0.);
+    p.gyro.motion.flick.pause_input = Some("east".into());
+    e.apply_layer(p).unwrap();
+    assert_eq!(e.advance(0.01, 20_000_000).mouse_delta, [0.; 2]);
+    button(&mut e, 1, false);
+    assert!(e.advance(0.01, 30_000_000).mouse_delta[0] > 0.);
+}

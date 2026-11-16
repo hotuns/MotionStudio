@@ -155,6 +155,7 @@ pub struct Flick {
     #[serde(rename = "output", skip_serializing)]
     _legacy_output: serde::de::IgnoredAny,
     pub enable_input: Option<String>,
+    pub pause_input: Option<String>,
     pub deadzone: f32,
     pub release_ratio: f32,
     pub time_exponent: f32,
@@ -179,6 +180,7 @@ impl Default for Flick {
             stick: Stick::Right,
             _legacy_output: serde::de::IgnoredAny,
             enable_input: None,
+            pause_input: None,
             deadzone: 0.85,
             release_ratio: 0.5,
             time_exponent: 0.0,
@@ -360,6 +362,7 @@ impl MotionConfig {
             &self.trackball.horizontal_input,
             &self.trackball.vertical_input,
             &self.flick.enable_input,
+            &self.flick.pause_input,
         ]
         .into_iter()
         .flatten()
@@ -367,6 +370,9 @@ impl MotionConfig {
             if input_pin(input).is_none() {
                 bail!("未知体感控制按键：{input}");
             }
+        }
+        if self.flick.pause_input.is_some() && self.flick.enable_input.is_some() {
+            bail!("Flick 的按住开启和按住暂停不能同时设置");
         }
         for angle in self.hold_angles {
             range("握持角度", angle, -180.0, 180.0)?;

@@ -1265,6 +1265,7 @@ impl Engine {
         g.flick_available()
             && self.measuring.is_none()
             && (f.enable_input.is_none() || self.pressed(&f.enable_input))
+            && !self.pressed(&f.pause_input)
     }
     fn flick_source_block(&self) -> Option<Stick> {
         let f = &self.profile.gyro.motion.flick;
@@ -1604,6 +1605,15 @@ impl Engine {
         }
         if paused {
             self.clear_turn_output();
+        }
+        let flick = &self.profile.gyro.motion.flick;
+        if flick.enabled
+            && self.pressed(&flick.pause_input)
+            && self.stick_value_radial(flick.stick).length() >= flick.deadzone
+        {
+            // Reuse the snapshot guard: releasing a pause at the rim must not
+            // create a new turn from a stick push that happened while paused.
+            self.flick_snapshot_blocked = true;
         }
         if !self.flick_active() {
             self.clear_flick_output();

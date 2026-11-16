@@ -396,8 +396,8 @@
     {
       "path": "crates/engine/src/eval/modules/touch_zones.rs",
       "upstreamSha256": "78b6ddcf96637d6fdef32ec0d700e5391f157206aa9caf237389d6405c16e43c",
-      "vendoredSha256": "78b6ddcf96637d6fdef32ec0d700e5391f157206aa9caf237389d6405c16e43c",
-      "modified": false
+      "vendoredSha256": "03abcb02827ecd9c81b281c2c497485ddfb8e98beac2cf705b5209525ce8ce4f",
+      "modified": true
     },
     {
       "path": "crates/engine/src/eval/publish.rs",

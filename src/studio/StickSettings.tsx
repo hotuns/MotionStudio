@@ -15,7 +15,7 @@ export function StickSettings({profile,update}:{profile:Profile;update:MotionUpd
   return <div className={settingStyles.page}>
     <StickInputSettings profile={profile} update={update}/>
     <FlickStickSettings profile={profile} update={update}/>
-    <SettingSection id="stick-mouse" title="摇杆鼠标" summary={stick.enabled?<>{stick.speed} /s</>:'关闭'}>
+    <SettingSection id="stick-mouse" title="摇杆鼠标" summary={stick.enabled?<>{stick.speed} 计数/s</>:'关闭'}>
       <Toggle label="启用摇杆鼠标" value={stick.enabled}
         onChange={value=>update(draft=>{freezeInputDeadzones(draft);draft.stick_mouse.enabled=value;})}/>
       {stick.enabled&&<>
@@ -23,10 +23,11 @@ export function StickSettings({profile,update}:{profile:Profile;update:MotionUpd
           <OptionPicker label="摇杆鼠标使用的摇杆" value={stick.stick} groups={stickChoices}
             onChange={value=>update(draft=>{freezeInputDeadzones(draft);draft.stick_mouse.stick=value;})}/>
         </div></SettingField>
-        <Range label="最大移动速度" value={stick.speed} min={100} max={4000} step={100} unit=" /s"
+        <Range label="最大移动速度" value={stick.speed} min={100} max={10000} step={100} unit=" 计数/s"
           onChange={value=>update(draft=>{draft.stick_mouse.speed=value;})}/>
         <Range label="摇杆鼠标响应" value={stick.exponent} min={1} max={4} step={0.1}
           onChange={value=>update(draft=>{draft.stick_mouse.exponent=value;})} help="1 为线性。数值越大，小幅拨动时移动越慢。"/>
+        <p className={styles.hint}>最大移动速度控制满杆速度；响应值越大，小幅推杆越慢，1 为线性。游戏内转速还取决于游戏鼠标灵敏度。</p>
       </>}
     </SettingSection>
     <StickDirectionSettings profile={profile} update={update}/>

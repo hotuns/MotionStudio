@@ -56,7 +56,7 @@ export const settingsCatalog: SettingTarget[] = [
   ]),
   ...group('sticks','flick-shared','gyro.motion.flick.',[
     ['standalone','关闭体感时也启用'],
-    ['enable_input','按住启用（不设置则常开）'], ['suppress','原始摇杆输出'],
+    ['enable_input','按住启用（不设置则常开）'], ['pause_input','按住暂停 Flick','暂停摇杆瞄准'], ['suppress','原始摇杆输出'],
   ]),
   ...group('sticks','flick-tracking','gyro.motion.flick.',[['release_ratio','追踪下限比例'], ['disengage_ms','Flick 退出延时'], ['stabilise_ms','绕圈方向稳定']]),
   ...group('sticks','flick-trigger','gyro.motion.flick.',[['forward_deadzone','正前方死角'], ['speed_gate_ms','快速推杆判定时间'], ['slow_lock','慢推锁定为连续瞄准']]),

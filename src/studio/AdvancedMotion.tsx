@@ -199,6 +199,11 @@ function EdgeTurning({profile,update}:Props) {
 export function FlickStickSettings({profile,update}:Props) {
   const f=profile.gyro.motion.flick;
   const change=(key:string,value:unknown)=>nested(update,'flick',key,value);
+  const setControl=(key:'enable_input'|'pause_input',value:string|null)=>update(p=>{
+    const flick=p.gyro.motion.flick;
+    flick[key]=value;
+    if(value)flick[key==='enable_input'?'pause_input':'enable_input']=null;
+  });
   const active=f.enabled||f.stick_aim;
   const release=Math.min(f.deadzone,Math.max(Math.min(0.15,f.deadzone),f.deadzone*(f.release_ratio??0.5)));
   return <>
@@ -247,7 +252,9 @@ export function FlickStickSettings({profile,update}:Props) {
     </>}
     {active&&<SettingSection id="flick-shared" title="共用启用与输出规则" summary={f.standalone?'关闭体感仍启用':'随体感总开关'}>
         <Toggle label="关闭体感时也启用" value={f.standalone??false} onChange={v=>change('standalone',v)}/>
-        <ControlInput label="按住启用（不设置则常开）" value={f.enable_input} onChange={v=>change('enable_input',v)}/>
+        <ControlInput label="按住启用（不设置则常开）" value={f.enable_input} onChange={v=>setControl('enable_input',v)}/>
+        <ControlInput label="按住暂停 Flick" value={f.pause_input??null} onChange={v=>setControl('pause_input',v)}/>
+        <p className={styles.hint}>按住启用与按住暂停互斥，设置一个会清除另一个；都不设置时常开，仍受功能启用开关控制。</p>
         <Choice label="原始摇杆输出" value={f.suppress} options={[["full","使用时屏蔽"],["deadzone","只屏蔽外圈"],["off","保留原始输出"]]} onChange={v=>change('suppress',v)}/>
         {!f.standalone&&!profile.gyro.enabled&&<p className={styles.hint}>请在「体感」页启用体感，以使用 Flick Stick 和配套摇杆瞄准。</p>}
         <p className={styles.hint}>这些规则由 Flick Stick 和配套摇杆瞄准共用。</p>

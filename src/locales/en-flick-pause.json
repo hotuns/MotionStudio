@@ -1,0 +1,7 @@
+{
+  "按住暂停 Flick": "Hold to pause Flick",
+  "暂停摇杆瞄准": "Pause stick aim",
+  "按住启用与按住暂停互斥，设置一个会清除另一个；都不设置时常开，仍受功能启用开关控制。": "Hold to enable and hold to pause are mutually exclusive. Setting one clears the other. With neither set, no extra button is required; the feature enable switches still apply.",
+  "Flick 的按住开启和按住暂停不能同时设置": "Flick hold to enable and hold to pause cannot both be configured",
+  "按住时暂停 Flick 和配套摇杆瞄准，取消剩余转角并交还原始摇杆；松开后恢复。若暂停时摇杆已在外圈，先回中再重新推杆。它与体感暂停独立，与按住启用互斥。": "Hold to pause Flick and companion stick aim, cancel the remaining turn, and restore the original stick mapping. Release to resume. If the stick was at the rim while paused, return it to center before pushing again. This is independent of gyro pause and mutually exclusive with hold to enable."
+}

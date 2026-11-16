@@ -1,0 +1,5 @@
+{
+  "计数/s": "counts/s",
+  "最大移动速度控制满杆速度；响应值越大，小幅推杆越慢，1 为线性。游戏内转速还取决于游戏鼠标灵敏度。": "Maximum speed controls full-stick speed. Higher response values slow partial stick movement; 1 is linear. In-game turning speed also depends on the game mouse sensitivity.",
+  "摇杆推满时每秒发送的鼠标计数。调大移动更快；游戏内转速还取决于游戏鼠标灵敏度，小幅推杆的速度还取决于响应曲线。": "Mouse counts sent per second at full stick deflection. Higher values move faster. In-game turning speed also depends on the game mouse sensitivity, and partial stick speed depends on the response curve."
+}

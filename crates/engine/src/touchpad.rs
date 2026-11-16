@@ -56,7 +56,7 @@ const SWIPE_BUS: &str = "studio.touch_swipes";
 const SWIPE_OUTPUTS: [&str; 4] = ["dpad_up", "dpad_down", "dpad_left", "dpad_right"];
 
 // Only graph wiring and lifecycle live here. FlexInput Touch Zones owns all
-// direction detection, distance thresholds, latching and pulse timing.
+// direction detection, distance thresholds and per-contact direction holds.
 struct NativeSwipes {
     graph: GraphRunner,
     last_ns: Option<u64>,
@@ -67,6 +67,7 @@ impl NativeSwipes {
         let mut zones = node(0, "module.touch_zones", 1);
         zones.params.extend([
             ("zone_mode".into(), json!("mapping")),
+            ("swipe_hold_until_release".into(), json!(true)),
             ("_automap_device_id".into(), json!(SOURCE)),
             ("zone_maps".into(), json!((0..2).flat_map(|field| {
                 ["up", "down", "left", "right"].into_iter().enumerate().map(move |(i, direction)|
@@ -349,5 +350,41 @@ impl NativeTouchpad {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upstream_swipes_keep_the_original_pulse_without_the_hold_option() {
+        let mut swipes = NativeSwipes::new();
+        swipes.graph.graph.nodes[0]
+            .params
+            .remove("swipe_hold_until_release");
+        let mut contacts = [
+            TouchContact {
+                active: true,
+                x: 0.5,
+                y: 0.5,
+            },
+            TouchContact::default(),
+        ];
+        assert_eq!(swipes.tick(contacts, false, 10_000_000, false), [false; 4]);
+        contacts[0].x = 0.8;
+        assert_eq!(
+            swipes.tick(contacts, false, 20_000_000, false),
+            [false, false, false, true]
+        );
+        contacts[0].active = false;
+        assert_eq!(
+            swipes.tick(contacts, false, 21_000_000, false),
+            [false, false, false, true]
+        );
+        for ms in (30..=160).step_by(10) {
+            swipes.tick(contacts, false, ms * 1_000_000, false);
+        }
+        assert_eq!(swipes.tick(contacts, false, 170_000_000, false), [false; 4]);
     }
 }
