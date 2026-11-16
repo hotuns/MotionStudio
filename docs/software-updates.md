@@ -12,6 +12,8 @@
 
 默认在本机编译、签名并上传 GitHub，复用本地 Cargo 构建缓存。推送提交或版本标签不会自动启动云端发布构建。
 
+本机发布脚本为桌面程序依赖的 `motion-core` 使用单个代码生成单元，保留 Release 优化级别，避开本机 Windows Rust 编译器在并行代码生成时出现的访问异常。该覆盖只传给桌面构建，独立输入引擎仍使用原来的编译设置。
+
 1. 本机需有 Windows、Rust/MSVC 和 Node/npm；正式构建时脚本会执行 `npm ci`，按锁文件准备前端依赖，保留 Cargo 编译缓存。默认使用 `~/.tauri/motion-studio-release/updater.key`，并核对旁边 `.pub` 与应用公钥一致。也可以在当前终端设置 `TAURI_SIGNING_PRIVATE_KEY`（私钥路径或内容）及需要的 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。后续版本沿用现有密钥，私钥保存在仓库之外。
 2. 同步 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json` 和 `src-tauri`、`crates/engine`、`crates/host` 的 Cargo 版本及 `Cargo.lock`，写好 `docs/releases/vX.Y.Z.md`。
 3. 完成本次改动必要的检查，提交并推送到 `origin/main`，保持工作区干净。已通过且未受修改影响的检查不再重复。

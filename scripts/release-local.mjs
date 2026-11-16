@@ -82,7 +82,11 @@ export async function main(args = process.argv.slice(2)) {
     console.log('Building ' + config.tag + ' from ' + commit + ' using the existing local Cargo cache.');
     runNode([npmCli, 'ci']);
     runNode(['scripts/check-mapping.mjs']);
-    runNode([tauri, 'build', '--ci', '--bundles', 'nsis', '--config', 'src-tauri/tauri.release.conf.json', '--', '--locked'], buildEnv);
+    // The Windows desktop dependency build can crash in parallel motion-core
+    // code generation. Keep its optimization level and serialize just that
+    // crate's codegen; the separately built input engine keeps its own settings.
+    runNode([tauri, 'build', '--ci', '--bundles', 'nsis', '--config', 'src-tauri/tauri.release.conf.json',
+      '--', '--locked', '--config', 'profile.release.package.motion-core.codegen-units=1'], buildEnv);
     if (cleanCommit() !== commit) throw new Error('Source changed during the build');
     runNode(['scripts/package-update.mjs']);
     const files = readReleaseAssets(config);
