@@ -1,8 +1,12 @@
-name: Prepare Windows release
+name: Build Windows release (manual fallback)
 
 on:
-  push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag (vX.Y.Z)'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -10,11 +14,17 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
     permissions:
       contents: write
     steps:
+      - name: Validate release tag
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw 'Expected a stable vX.Y.Z tag.' }
       - uses: actions/checkout@v4
         with:
+          ref: refs/tags/${{ inputs.tag }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -22,7 +32,7 @@ jobs:
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: node scripts/package-update.mjs --check-tag
+      - run: node scripts/package-update.mjs --check-tag "$env:RELEASE_TAG"
       - run: npm ci
       - name: Build and sign the Windows installer
         env:
@@ -38,7 +48,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
+          $tag = $env:RELEASE_TAG
           $release = Join-Path $PWD "artifacts/release-$tag"
           $assets = @(Get-ChildItem -LiteralPath $release -File | ForEach-Object { $_.FullName })
           $notes = (Get-Content -LiteralPath (Join-Path $release 'latest.json') -Raw | ConvertFrom-Json).notes

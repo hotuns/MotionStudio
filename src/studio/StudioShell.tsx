@@ -228,6 +228,14 @@ export function StudioShell(props: Props) {
               </div>
             </details>
           </div>
+          {props.updateVersion && <aside className={styles.updateNotice} aria-label="软件更新提醒">
+            <span className={styles.updateNoticeIcon}><StudioIcon name="refresh" size={20}/></span>
+            <div className={styles.updateNoticeText} role="status" aria-live="polite">
+              <strong>{t('发现新版本 v{0}').replace('{0}', props.updateVersion)}</strong>
+              <p>查看版本说明，下载并安装更新。</p>
+            </div>
+            <button type="button" className="primary-btn" onClick={openUpdates}>查看更新<StudioIcon name="arrow" size={16}/></button>
+          </aside>}
         </header>
         <div className={styles.scrollArea} ref={scrollArea} data-pad-scroll>
           <main className={styles.main} id="studio-workspace" data-pad-zone="content">

@@ -28,6 +28,12 @@
 .toolsMenu > button:hover:not(:disabled) { background: var(--bg-btn-hover); }
 .toolsMenu > button:disabled, .commandList button:disabled { opacity: .45; cursor: default; }
 .toolsMenu > .updateLink { color: var(--accent); }
+.updateNotice { display: flex; align-items: center; gap: 12px; flex: 0 0 100%; min-width: 0; box-sizing: border-box; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border-1)); border-radius: var(--panel-radius); background: color-mix(in srgb, var(--accent) 13%, var(--bg-2)); box-shadow: inset 3px 0 0 var(--accent); }
+.updateNoticeIcon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 36px; height: 36px; border-radius: 50%; color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--bg-2)); }
+.updateNoticeText { flex: 1; min-width: 0; }
+.updateNoticeText strong { display: block; color: var(--text-strong); font-size: 14px; line-height: 1.5; }
+.updateNoticeText p { margin: 3px 0 0; color: var(--text-mid); font-size: 12px; line-height: 1.5; }
+.updateNotice > button { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; min-height: 36px; }
 .preferences { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--border-1); margin-top: 4px; padding: 8px 6px; }
 .preferences > :first-child { flex: 1; min-width: 0; }
 .preferences > label { display: flex; align-items: center; gap: 7px; padding: 5px; border: 1px solid var(--border-1); border-radius: var(--control-radius); background: var(--bg-input); }

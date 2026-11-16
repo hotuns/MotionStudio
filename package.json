@@ -10,6 +10,8 @@
     "build": "tauri build",
     "package:portable": "node scripts/package-portable.mjs",
     "package:update": "node scripts/package-update.mjs",
+    "release:local": "node scripts/release-local.mjs",
+    "test:release": "node --test tests/release.test.mjs",
     "engine:dev": "node scripts/build-engine.mjs",
     "engine:build": "node scripts/build-engine.mjs --release",
     "test": "cargo test --locked -p motion-core -p motion-engine -p motion-studio -p motion-filters -p flexinput-engine -p flexinput-devices -p flexinput-modules -p flexinput-virtual -p flexinput-usbip",
