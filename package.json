@@ -1,6 +1,6 @@
 {
   "name": "motion-studio",
-  "version": "0.18.3",
+  "version": "0.18.4",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,6 +12,7 @@
     "package:update": "node scripts/package-update.mjs",
     "release:local": "node scripts/release-local.mjs",
     "test:release": "node --test tests/release.test.mjs",
+    "test:controller-preview": "node --test tests/controller-preview.test.mjs",
     "engine:dev": "node scripts/build-engine.mjs",
     "engine:build": "node scripts/build-engine.mjs --release",
     "test": "cargo test --locked -p motion-core -p motion-engine -p motion-studio -p motion-filters -p flexinput-engine -p flexinput-devices -p flexinput-modules -p flexinput-virtual -p flexinput-usbip",

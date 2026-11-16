@@ -2,6 +2,7 @@
 mod binding_window;
 mod client;
 mod components;
+mod controller_overlay;
 mod game_calibration;
 mod hid_inventory;
 mod import_files;
@@ -385,6 +386,7 @@ async fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), St
 }
 #[tauri::command]
 async fn save_settings(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     mut settings: Settings,
 ) -> Result<Settings, String> {
@@ -426,7 +428,29 @@ async fn save_settings(
         settings.motion_calibrations = current.motion_calibrations.clone();
         settings.selected_profile = current.selected_profile.clone();
         settings.device_path = current.device_path.clone();
-        state.store.save_settings(&settings).map_err(text)?;
+        settings.validate().map_err(text)?;
+        let previous_overlay = current.controller_overlay.clone();
+        let overlay_changed = previous_overlay != settings.controller_overlay;
+        if overlay_changed {
+            // Window creation dispatches to the UI thread. Do not hold the
+            // settings mutex while the new WebView reads its initial state.
+            drop(current);
+            if let Err(error) = controller_overlay::configure(&app, &settings.controller_overlay) {
+                let _ = controller_overlay::configure(&app, &previous_overlay);
+                return Err(error);
+            }
+            current = state.settings.lock().map_err(text)?;
+            // Calibration events may arrive while the display is being created.
+            settings.calibrations = current.calibrations.clone();
+            settings.motion_calibrations = current.motion_calibrations.clone();
+            settings.selected_profile = current.selected_profile.clone();
+            settings.device_path = current.device_path.clone();
+        }
+        if let Err(error) = state.store.save_settings(&settings) {
+            drop(current);
+            if overlay_changed { let _ = controller_overlay::configure(&app, &previous_overlay); }
+            return Err(text(error));
+        }
         *current = settings.clone();
         if !settings.overlay_enabled {
             state.overlay.dismiss();
@@ -659,7 +683,7 @@ async fn save_sensor_calibration(
     .await
 }
 #[tauri::command]
-async fn restore_backup(state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn restore_backup(app: tauri::AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let state = state.inner().clone();
     background(move || {
         let _lock = state.operations.lock().map_err(text)?;
@@ -671,7 +695,8 @@ async fn restore_backup(state: State<'_, AppState>, id: String) -> Result<(), St
             if !settings.overlay_enabled {
                 state.overlay.dismiss();
             }
-            *state.settings.lock().unwrap() = settings;
+            *state.settings.lock().unwrap() = settings.clone();
+            controller_overlay::configure(&app, &settings.controller_overlay)?;
         } else {
             state.store.restore_backup(&id).map_err(text)?;
         }
@@ -800,12 +825,22 @@ fn main() {
                 client.snapshot.lock().unwrap().status.message = error;
             }
             client.monitor();
+            let overlay_app = app.handle().clone();
+            let overlay_state = state.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                // Serialize startup with a user immediately changing the option.
+                let _operation = overlay_state.operations.lock().unwrap();
+                let settings = overlay_state.settings.lock().unwrap().controller_overlay.clone();
+                if let Err(error) = controller_overlay::configure(&overlay_app, &settings) {
+                    overlay_state.client.log(error);
+                }
+            });
             policy::start(state);
             Ok(())
         })
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
-                for label in [binding_window::LABEL, game_calibration::LABEL] {
+                for label in [binding_window::LABEL, game_calibration::LABEL, controller_overlay::LABEL] {
                     if let Some(floating) = window.get_window(label) {
                         let _ = floating.destroy();
                     }
@@ -824,6 +859,9 @@ fn main() {
             updates::download_studio_update,
             updates::install_studio_update,
             preview_overlay,
+            controller_overlay::controller_overlay_state,
+            controller_overlay::controller_overlay_displays,
+            controller_overlay::controller_overlay_ready,
             workspace,
             snapshot,
             save_profile,

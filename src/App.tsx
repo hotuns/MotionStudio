@@ -15,6 +15,7 @@ import { ProfileLibrary } from './studio/ProfileLibrary';
 import { ProfileShareDialog } from './studio/ProfileShareDialog';
 import type { CommunityProfile, SharedSource } from './profile-sharing';
 import { SystemPage, type ComponentAction } from './studio/SystemPage';
+import {ControllerOverlaySettings} from './studio/ControllerOverlaySettings';
 import { SoftwareUpdate } from './studio/SoftwareUpdate';
 import { useStudioUpdate } from './studio/software-update';
 import { SwitchSettings } from './studio/SwitchSettings';
@@ -861,6 +862,8 @@ export default function App() {
           </section>)}
       {page === 'controllerStatus' && <Suspense fallback={<p className="studio-muted">正在载入设备状态…</p>}>
         <DevicePage snapshot={snapshot} devicePath={devicePath} device={device} active={active} revealCalibration={revealDeviceCalibration}
+          controllerOverlay={workspace&&<ControllerOverlaySettings value={workspace.settings.controller_overlay} busy={busy}
+            onChange={controller_overlay=>void run(()=>changeSettings({controller_overlay}))}/>}
         busy={busy} canObserve={canObserve} onSelect={selectDevice} onObserve={() => void run(() => startMapping(false))}
         calibration={device?.gyro && workspace && <DeviceCalibration key={device.path} device={device} status={status}
           sensor={workspace.settings.motion_calibrations[devicePath]} canCalibrate={canCalibrate}
@@ -893,6 +896,8 @@ export default function App() {
           const current=await invoke<Snapshot>('snapshot');setSnapshot(current);return current.status;
         }} />}
       {page === 'settings' && workspace && <SystemPage components={components} snapshot={snapshot} dataDir={workspace.data_dir}
+        controllerOverlay={<ControllerOverlaySettings value={workspace.settings.controller_overlay} busy={busy}
+          onChange={controller_overlay=>void run(()=>changeSettings({controller_overlay}))}/>}
         softwareUpdate={<SoftwareUpdate update={studioUpdate} blocked={updateBlocked}
           onInstall={() => { if (!updateBlocked) void run(studioUpdate.install); }} onOpenReleases={() => openLocation('releases')}/>}
         backend={workspace.settings.output_backend ?? 'hid_maestro'} outputActive={active}

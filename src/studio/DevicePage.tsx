@@ -6,7 +6,7 @@ import { StudioIcon } from './StudioIcon';
 import styles from './DevicePage.module.css';
 import motionStyles from './MotionControls.module.css';
 
-export default function DevicePage({ snapshot, devicePath, device, active, busy, canObserve, calibration, revealCalibration, onSelect, onObserve, onStop, onScan, onSettings }: {
+export default function DevicePage({ snapshot, devicePath, device, active, busy, canObserve, calibration, controllerOverlay, revealCalibration, onSelect, onObserve, onStop, onScan, onSettings }: {
   snapshot: Snapshot | null;
   devicePath: string;
   device?: Device | null;
@@ -14,6 +14,7 @@ export default function DevicePage({ snapshot, devicePath, device, active, busy,
   busy: boolean;
   canObserve: boolean;
   calibration?: ReactNode;
+  controllerOverlay?: ReactNode;
   revealCalibration: boolean;
   onSelect: (path: string) => void;
   onObserve: () => void;
@@ -100,6 +101,7 @@ export default function DevicePage({ snapshot, devicePath, device, active, busy,
         <p className={latest.state === 'faulted' ? styles.connectionError : styles.connectionHint} role={latest.state === 'faulted' ? 'alert' : 'status'}>{latest.message}</p>}
     </section>
     {device && <DeviceMonitor key={device.path + ':' + restartCount} device={device} status={status} />}
+    {controllerOverlay}
     {calibration && <details className={styles.details} ref={calibrationDetails}>
       <summary className={styles.foldHeading}><strong>设备校准</strong><span>静止校准 · 六面校准 · 设备方向与噪声</span></summary>
       {calibration}

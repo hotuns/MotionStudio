@@ -2,6 +2,7 @@ import { lazy, Suspense, useState } from 'react';
 import { Quaternion, Vector3 } from 'three';
 import { buttonNames, labels, type Device, type Status } from '../types';
 import Controller from './Controller';
+import {controllerOrientation as orientation,controllerViewPose as viewPose} from '../controller-pose';
 import { OutputMonitor } from './OutputMonitor';
 import type { ControllerPreviewFailure } from './Controller3D';
 import styles from './DevicePage.module.css';
@@ -18,20 +19,6 @@ const degrees = 180 / Math.PI;
 
 function reading(value: number | undefined, precision: number, unit: string) {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(precision) + unit : '—';
-}
-
-function orientation(status?: Status) {
-  const values = status?.motion.orientation_quat;
-  if (!values || values.length !== 4 || !values.every(Number.isFinite)) return null;
-  const pose = new Quaternion().fromArray(values);
-  return pose.lengthSq() > 0.01 ? pose.normalize() : null;
-}
-
-// Same canonical-to-Y-up basis as flexinput_core::frames. The preview origin
-// is local to this page. Both the numbers and mesh use the resulting rotation.
-function viewPose(orientation: Quaternion, origin?: Quaternion) {
-  const q = origin ? orientation.clone().premultiply(origin.clone().invert()) : orientation;
-  return new Quaternion(-q.y, q.z, -q.x, q.w);
 }
 
 function anglesFor(pose: Quaternion) {

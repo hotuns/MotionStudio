@@ -39,6 +39,7 @@ pub struct Settings {
     pub overlay_duration_ms: u32,
     // Retained for compatibility with settings saved by older versions.
     pub overlay_position: OverlayPosition,
+    pub controller_overlay: ControllerOverlaySettings,
     pub language: Language,
     pub cursor_enabled: bool,
     pub cursor_debounce_ms: u32,
@@ -66,6 +67,7 @@ impl Default for Settings {
             overlay_enabled: true,
             overlay_duration_ms: 2500,
             overlay_position: OverlayPosition::default(),
+            controller_overlay: ControllerOverlaySettings::default(),
             language: Language::ZhCn,
             cursor_enabled: false,
             cursor_debounce_ms: 250,
@@ -89,6 +91,42 @@ pub enum OverlayPosition {
     BottomLeft,
     #[default]
     BottomRight,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ControllerOverlaySettings {
+    pub enabled: bool,
+    pub width: u32,
+    pub opacity: u32,
+    pub position: OverlayPosition,
+    pub monitor: Option<String>,
+    pub follow_motion: bool,
+}
+impl Default for ControllerOverlaySettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            width: 320,
+            opacity: 100,
+            position: OverlayPosition::BottomLeft,
+            monitor: None,
+            follow_motion: true,
+        }
+    }
+}
+impl ControllerOverlaySettings {
+    pub fn validate(&self) -> Result<()> {
+        if !(160..=640).contains(&self.width) || !(20..=100).contains(&self.opacity) {
+            bail!("悬浮手柄宽度应为 160–640，透明度应为 20–100%");
+        }
+        if self.monitor.as_ref().is_some_and(|name| {
+            name.len() > 256 || name.chars().any(char::is_control)
+        }) {
+            bail!("悬浮手柄显示器设置无效");
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
@@ -265,6 +303,7 @@ impl Settings {
             bail!("Unsupported settings version");
         }
         self.io_rates.validate()?;
+        self.controller_overlay.validate()?;
         if !(1000..=8000).contains(&self.overlay_duration_ms) {
             bail!("配置提示显示时长应在 1 到 8 秒之间");
         }

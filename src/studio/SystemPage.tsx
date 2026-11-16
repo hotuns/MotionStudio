@@ -19,6 +19,7 @@ const driverNames: Record<string, string> = {
 export type ComponentAction = 'allow' | 'hide' | 'show' | 'restore';
 type Props = {
   softwareUpdate: ReactNode;
+  controllerOverlay?: ReactNode;
   components: ComponentStatus | null;
   snapshot: Snapshot | null;
   dataDir: string;
@@ -85,6 +86,7 @@ export function SystemPage(props: Props) {
   const outputFollowsPolling = ioRates.output_hz === 0;
   return <div className={styles.page}>
     {props.softwareUpdate}
+    {props.controllerOverlay}
     {snapshot?.status.state === 'faulted' && snapshot.status.message &&
       <p className={styles.error} role="alert">{snapshot.status.message}</p>}
     {snapshot && !snapshot.engine_ready && <div className={styles.notice} role="status">
