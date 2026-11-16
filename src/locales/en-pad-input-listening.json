@@ -1,0 +1,7 @@
+{
+  "监听手柄输入": "Listen for controller input",
+  "监听手柄输入：{0}": "Listen for controller input: {0}",
+  "取消监听：{0}": "Cancel listening: {0}",
+  "一次只录入一个手柄输入，请重试。": "Record one controller input at a time. Please try again.",
+  "此输入不可用于当前设置，请重新录入。": "This input is unavailable for this setting. Please record another input."
+}

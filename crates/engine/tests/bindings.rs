@@ -20,6 +20,7 @@ fn action(input: &str, output: &str) -> Action {
         turbo_ms: None,
         allow_simultaneous: false,
         chord_wait_ms: 80,
+        toggle: false,
     }
 }
 fn profile(actions: Vec<Action>) -> Profile {
@@ -113,6 +114,48 @@ fn releasing_a_chord_modifier_does_not_scroll_the_still_held_single_binding() {
     assert_eq!(press(&mut e, "south", true).scroll, [0; 2]);
     e.advance_input(81_000_000);
     assert_eq!(e.frame.scroll, [0, -1]);
+}
+
+#[test]
+fn a_single_binding_rearms_on_its_release_even_without_an_idle_tick_after_a_chord() {
+    for output in ["key:SPACE", "wheel:down"] {
+        let mut e = Engine::new(profile(vec![
+            action("south", output),
+            action("left_shoulder+south", "key:E"),
+        ]))
+        .unwrap();
+        for (ms, input, down) in [
+            (1, "left_shoulder", true),
+            (2, "south", true),
+            (20, "left_shoulder", false),
+            (30, "south", false),
+            (31, "south", true),
+        ] {
+            let InputEvent::Button { index, .. } = event(input, down) else {
+                unreachable!()
+            };
+            let frame = e.process(&InputEvent::Button {
+                time: SampleTime {
+                    host_ns: ms * 1_000_000,
+                    sensor_ns: ms * 1_000_000,
+                },
+                index,
+                down,
+            });
+            assert_eq!(frame.scroll, [0; 2]);
+            assert!(!frame.held.contains("key:SPACE"));
+        }
+        e.advance_input(112_000_000);
+        assert_eq!(e.frame.held.contains("key:SPACE"), output == "key:SPACE");
+        assert_eq!(
+            e.frame.scroll,
+            if output == "wheel:down" {
+                [0, -1]
+            } else {
+                [0, 0]
+            }
+        );
+    }
 }
 
 #[test]

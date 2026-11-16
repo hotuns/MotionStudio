@@ -69,9 +69,6 @@
 .group summary { cursor: pointer; font-size: 13px; color: var(--text-mid); }
 .group button { margin-top: 10px; }
 .bindingField { margin-top: 12px; }
-.bindingRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; }
-.bindingRow :global(.studio-field), .bindingRow button { margin: 0; }
-.bindingRow > button { white-space: nowrap; }
 .activationModes { display: flex; gap: 5px; flex-wrap: wrap; }
 .activationModes button { margin: 0; font-size: 12px; }
 .activationModes button[aria-pressed='true'] { border-color: color-mix(in srgb, var(--accent) 38%, var(--border-1)); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg-2)); }

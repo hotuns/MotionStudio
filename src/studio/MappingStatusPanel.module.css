@@ -1,0 +1,9 @@
+.panel { min-width: 0; border-top: 1px solid var(--panel-border); margin-top: 14px; padding-top: 12px; font-size: 12px; }
+.panel summary { cursor: pointer; color: var(--text-strong); line-height: 24px; }
+.panel summary > span { margin-left: 10px; color: var(--accent); }
+.panel p { color: var(--text-muted); line-height: 1.7; margin: 8px 0; }
+.panel ul { list-style: none; padding: 0; margin: 12px 0 0; max-height: 320px; overflow-y: auto; }
+.panel li { display: grid; gap: 5px; padding: 10px 0; border-top: 1px solid var(--panel-border); overflow-wrap: anywhere; }
+.panel li > span { color: var(--text-muted); line-height: 1.5; }
+.panel em { font-style: normal; color: var(--text-mid); }
+.panel em[data-active='true'] { color: var(--accent); }

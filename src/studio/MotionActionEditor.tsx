@@ -1,8 +1,9 @@
-import {useState} from 'react';
+import {useContext,useState} from 'react';
 import {t} from '../i18n';
 import {inputLabel, outputLabel, type MotionBinding, type TurnBinding} from '../types';
 import {Dialog, Range} from './Controls';
 import {OptionPicker} from './OptionPicker';
+import {PadInputCaptureContext,PadInputPicker} from './PadInputPicker';
 import {outputChoices, padChoices, motionPadChoices} from './binding-choices';
 import {imuOptions, motionPadOutputs, padInputLabel} from './controller-catalog';
 import {CurveEditor} from './CurveEditor';
@@ -70,7 +71,7 @@ function MotionFields({action, onChange}: {action: MotionBinding; onChange: (pat
 function TurnFields({action, onChange}: {action: TurnBinding; onChange: (patch: Partial<TurnBinding>)=>void}) {
   return <>
     <div className="studio-field">转身按键
-      <OptionPicker label="转身按键" value={action.input} groups={padChoices()} onChange={input=>onChange({input})}/>
+      <PadInputPicker label="转身按键" value={action.input} groups={padChoices()} onChange={input=>onChange({input})}/>
     </div>
     <div className="studio-field">转身输出
       <OptionPicker label="转身输出" value={action.output} groups={[{options:turnOutputs}]}
@@ -90,6 +91,7 @@ export function MotionActionEditor({action, onClose, onSave, blocked}: {
   blocked: boolean;
 }) {
   const [draft, setDraft] = useState<MotionAction>(()=>structuredClone(action));
+  const recording=!!useContext(PadInputCaptureContext)?.recording;
   const within = (value: number, min: number, max: number) => value >= min && value <= max;
   const ready = !!draft.value.name.trim() && !!draft.value.input && (draft.kind==='motion'
     ? !!draft.value.output && within(draft.value.range,0.01,4000)
@@ -98,10 +100,10 @@ export function MotionActionEditor({action, onClose, onSave, blocked}: {
 
   return <Dialog title={draft.kind==='motion'?'设置体感动作':'设置定角转身'}
     description="动作在体感开启后生效，暂停体感时会停止输出。"
-    onClose={onClose} onSubmit={()=>{if (ready && !blocked) onSave(draft);}}
+    onClose={onClose} onSubmit={()=>{if (ready && !blocked && !recording) onSave(draft);}}
     actions={<>
       <button type="button" className="secondary-btn" onClick={onClose}>取消</button>
-      <button type="submit" formNoValidate className="primary-btn" disabled={!ready || blocked}>完成</button>
+      <button type="submit" formNoValidate className="primary-btn" disabled={!ready || blocked || recording}>完成</button>
     </>}>
     <fieldset className="studio-content" disabled={blocked}>
       <label className="studio-field">动作名称

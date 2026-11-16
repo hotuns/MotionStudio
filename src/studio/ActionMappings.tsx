@@ -1,4 +1,4 @@
-import {useEffect,useRef,useState} from 'react';
+import {useEffect,useMemo,useRef,useState} from 'react';
 import {chordParts,outputLabel,type Action,type Device,type GamepadBinding,type Profile,type Status} from '../types';
 import {t} from '../i18n';
 import Controller from './Controller';
@@ -13,12 +13,20 @@ import {
   maxGamepadBindings, virtualGamepadControls,
 } from './GamepadBindingEditor';
 import styles from './GameProfilesPage.module.css';
+import {MappingStatusPanel} from './MappingStatusPanel';
+import {MappingOverview} from './MappingOverview';
+import {buildMappingOverview,physicalControl,type OverviewEntry} from './controller-mapping-overview';
 
 export type CaptureKind = 'key' | 'pad';
 export type Capture = {kind: CaptureKind; index: number | null; preview?: string[]};
 
 export type ActionMappingsProps = {
+  profileId?: string;
   profile: Profile;
+  baseProfile?: Profile;
+  layerId?: string;
+  onEditBase?: () => void;
+  onOverviewSetting?: (tab:'motion'|'sticks') => void;
   device?: Device | null;
   status?: Status;
   blocked: boolean;
@@ -40,15 +48,10 @@ type MappingAction = {kind: 'binding'; value: Action} | {kind: 'gamepad'; value:
 type MappingRow = {action: MappingAction; index: number; input: string; output: string; tag: string};
 type InputGroup = {input: string; rows: MappingRow[]};
 
-const groupedControls = ['left_stick', 'right_stick', 'left_trigger', 'right_trigger'];
-function physicalControl(input: string): string {
-  if (input === 'touch1' || input === 'touch2' || input.startsWith('touch_swipe_')) return 'touchpad';
-  return groupedControls.find(control => input.startsWith(control + '_')) ?? input;
-}
 const actionCountLabel = (count: number) => count === 1
   ? t('1 个动作') : t('{0} 个动作').replace('{0}', String(count));
 
-export function ActionMappings({profile, status, device, blocked, capture, gamepadRecording, canRecordGamepad,
+export function ActionMappings({profile, baseProfile, layerId='', onEditBase, onOverviewSetting, profileId, status, device, blocked, capture, gamepadRecording, canRecordGamepad,
   touchOnly, onClearTouch, onUpdate, onEdit, onCapture, onRecordGamepad, onCancelCapture, onAssignEscape, onBatch}: ActionMappingsProps) {
   const [query,setQuery] = useState('');
   const [controlFilter,setControlFilter] = useState<string | null>(null);
@@ -56,6 +59,9 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
   const [removing,setRemoving] = useState<string | null>(null);
   const [extra,setExtra] = useState<{action: MotionAction; index: number | null} | null>(null);
   const [gamepadEdit,setGamepadEdit] = useState<{value: GamepadBinding; index: number | null} | null>(null);
+  const [overviewOpen,setOverviewOpen] = useState(false);
+  const overviewBase=baseProfile??profile;
+  const overview=useMemo(()=>buildMappingOverview(overviewBase,layerId),[overviewBase,layerId]);
   const actionList = useRef<HTMLElement>(null);
   const clearFilter = useRef<HTMLButtonElement>(null);
   useEffect(() => {
@@ -80,8 +86,8 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
     ? controlLabel(part) : t(padInputLabel(part, split))).join(' + ');
   const touches = (part: string) => physicalControl(part) === 'touchpad' || (split && part === 'misc2');
   const motion = profile.gyro.motion;
-  const gamepadBindings = profile.gamepad_bindings ?? [];
   const gamepadOutputs = virtualGamepadControls(profile.virtual_gamepad);
+  const gamepadBindings = profile.gamepad_bindings ?? gamepadOutputs.map(output=>({input:output,output}));
   const canFillGamepad = fillStandardGamepadBindings(profile.virtual_gamepad, gamepadBindings).length
     > gamepadBindings.length;
   const actions: {action: MappingAction; index: number}[] = [
@@ -136,6 +142,15 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
     setRemoving(null);
     if (touchOnly) onClearTouch();
   }
+  function openOverviewEntry(entry:OverviewEntry) {
+    if(locked)return;
+    setOverviewOpen(false);
+    if(entry.kind==='setting') {onOverviewSetting?.(entry.setting==='gyro'?'motion':'sticks');return;}
+    if(layerId&&!entry.layerId) {onEditBase?.();return;}
+    if(entry.kind==='binding')edit(entry.index);
+    else if(entry.kind==='gamepad')setGamepadEdit({value:entry.value,index:entry.index});
+    else setExtra({action:entry,index:entry.index});
+  }
   const rowActions = (key: string, name: string, edit: ()=>void, remove: ()=>void) =>
     <div className={styles.rowActions}>{removing===key ? <>
       <button type="button" className={styles.deleteButton} disabled={blocked||!!capture} onClick={()=>{remove();setRemoving(null);}}>确认删除</button>
@@ -159,10 +174,11 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
           <button type="button" className={styles.bindingButton} disabled={locked} onClick={open}>{input}</button>
           <span className={styles.triggerBadge}>{tag}</span>
           {action.value.turbo_ms!=null&&<span className={styles.triggerBadge}>连发</span>}
+          {action.value.toggle&&<span className={styles.triggerBadge}>输出保持</span>}
           {action.value.allow_simultaneous&&<span className={styles.triggerBadge}>同时触发</span>}
         </div></td>
         <td>{rowActions('gamepad:'+index, name, open, () => {
-          onUpdate(draft => { draft.gamepad_bindings?.splice(index, 1); });
+          onUpdate(draft => { (draft.gamepad_bindings??=structuredClone(gamepadBindings)).splice(index, 1); });
         })}</td>
       </tr>;
     }
@@ -171,9 +187,10 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
       <td><div className={styles.actionName}>
         <button type="button" translate="no" disabled={locked} onClick={() => edit(index)}>{value.name}</button>
         {value.turbo_ms!=null&&<span className={styles.triggerBadge}>连发</span>}
+        {value.toggle&&<span className={styles.triggerBadge}>输出保持</span>}
       </div></td>
       <td><button type="button" className={styles.bindingButton} disabled={locked} aria-label={'录入键鼠 ' + value.name}
-        onClick={() => { setSelected(index); onCapture('key', index); }}><kbd>{output}</kbd>{value.repeat_ms!=null&&<small> · 按住每 {value.repeat_ms} ms</small>}</button></td>
+        onClick={() => { setSelected(index); onCapture('key', index); }}><kbd>{output}</kbd>{value.repeat_ms!=null&&<small> · 每 {value.repeat_ms} ms</small>}</button></td>
       <td><div className={styles.inputBinding}>
         <button type="button" className={styles.bindingButton} disabled={locked} aria-label={'录入手柄 ' + value.name}
           onClick={() => { setSelected(index); onCapture('pad', index); }}>{input}</button>
@@ -208,7 +225,8 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
   return <div className={styles.actionLayout}>
     <aside className={styles.preview} aria-label="手柄映射概览" data-pad-zone="mapping-overview">
       <h3>手柄映射概览</h3>
-      <p className={styles.overviewHint}>数字表示当前编辑层中与该控件关联的自定义动作数。点控件可查看，包括组合键。</p>
+      <p className={styles.overviewHint}>数字表示当前编辑层的映射数量。打开详图可查看动作名称、输出按键、触发方式与继承映射。</p>
+      <button type="button" className={styles.overviewButton} disabled={locked} onClick={()=>setOverviewOpen(true)}>查看具体映射<span aria-hidden="true">↗</span></button>
       <div className={styles.overviewBody}>
         <Controller device={device} status={live} bindingCounts={bindingCounts}
           selectedControl={controlFilter ?? (selection && physicalControl(chordParts(selection.input)[0] ?? ''))}
@@ -221,7 +239,10 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
           </button>)}
         </div> : <p className={styles.hint}>添加手柄绑定后，这里会显示映射分布。</p>}
       </div>
+      <MappingStatusPanel status={status} profileId={profileId}/>
     </aside>
+    {overviewOpen&&<MappingOverview profile={overview.profile} layerId={layerId} layerName={overview.layer?.name} entries={overview.entries}
+      device={device} status={live} blocked={locked} onClose={()=>setOverviewOpen(false)} onOpen={openOverviewEntry}/>}
     <section ref={actionList} className={styles.tableCard} aria-label="游戏动作" data-pad-zone="mapping-actions">
       {capture?.index != null && <div className={styles.quickCapture} role="status">
         <span>{capture.kind === 'key' ? '按下组合键或鼠标按钮，全部松开后完成；也可滚动滚轮。' : '同时按住手柄按键或摇杆方向，全部松开后完成。'}
@@ -286,7 +307,7 @@ export function ActionMappings({profile, status, device, blocked, capture, gamep
       onClose={()=>{onCancelCapture();setGamepadEdit(null);}}
       onSave={binding=>{
         onUpdate(draft=>{
-          const bindings = draft.gamepad_bindings ??= [];
+          const bindings = draft.gamepad_bindings ??= structuredClone(gamepadBindings);
           if(gamepadEdit.index===null) bindings.push(binding);
           else bindings[gamepadEdit.index]=binding;
         });

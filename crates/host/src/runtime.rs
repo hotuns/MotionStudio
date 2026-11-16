@@ -160,6 +160,7 @@ pub struct Runtime {
     capture_until: Option<Instant>,
     capture_releasing: bool,
     active_layers: Vec<usize>,
+    layer_activation: motion_core::layers::LayerActivation,
     seeding: bool,
     resync_input: bool,
     measurement_input_interrupted: bool,
@@ -190,6 +191,7 @@ impl Runtime {
             && !status.ui_navigation
         {
             status.output_preview = self.output.as_ref().map(Dispatcher::preview);
+            status.mapping = self.engine.as_ref().map(Engine::mapping_status).unwrap_or_default();
         }
         status.motion.filters = self
             .engine
@@ -229,6 +231,7 @@ impl Runtime {
             capture_until: None,
             capture_releasing: false,
             active_layers: vec![],
+            layer_activation: Default::default(),
             seeding: false,
             resync_input: false,
             measurement_input_interrupted: false,
@@ -409,6 +412,7 @@ impl Runtime {
         self.capture_until = None;
         self.capture_releasing = false;
         self.status.binding_capture = false;
+        self.layer_activation = Default::default();
         self.active_layers.clear();
         self.status.active_layers.clear();
         self.seeding = false;
@@ -549,6 +553,7 @@ impl Runtime {
             .context("Missing configuration")?
             .clone();
         let mut engine = Engine::new(motion_core::layers::resolve(&config.profile, &[])?)?;
+        self.layer_activation = Default::default();
         self.active_layers.clear();
         self.status.active_layers.clear();
         engine.bias_rad_s = config.bias;
@@ -707,7 +712,7 @@ impl Runtime {
         self.seeding = false;
         self.resync_input = false;
         self.measurement_input_interrupted = false;
-        self.sync_layers()?;
+        self.sync_layer_edges(false)?;
         self.track_pad_shortcut(true);
         if let Some(engine) = &self.engine {
             self.dispatch(engine.frame.clone())?;
@@ -958,13 +963,14 @@ impl Runtime {
         self.status.profile_name = Some(config.profile.name.clone());
         self.status.reload_error = None;
         self.status.revision += 1;
+        self.layer_activation = Default::default();
         self.active_layers.clear();
         self.status.active_layers.clear();
         self.reset_feedback();
         if let Some(output) = &mut self.output {
             output.discard_pending_motion();
         }
-        self.sync_layers()?;
+        self.sync_layer_edges(false)?;
         if let Some(engine) = &self.engine {
             self.dispatch(engine.frame.clone())?;
         }
@@ -1280,6 +1286,7 @@ impl Runtime {
             self.publish_status();
             return Ok(());
         }
+        self.layer_activation = Default::default();
         self.active_layers.clear();
         self.status.active_layers.clear();
         self.capture_until = None;
@@ -1652,37 +1659,33 @@ impl Runtime {
             contacts[1].active.then_some("touch2"),
         ]
     }
+    fn reset_layer_activation(&mut self) -> Result<()> {
+        self.layer_activation = Default::default();
+        self.active_layers.clear();
+        self.status.active_layers.clear();
+        if let (Some(engine), Some(config)) = (&mut self.engine, &self.config) {
+            if !engine.is_measuring() {
+                engine.apply_layer(config.profile.clone())?;
+            }
+        }
+        Ok(())
+    }
     fn sync_layers(&mut self) -> Result<()> {
+        self.sync_layer_edges(true)
+    }
+    fn sync_layer_edges(&mut self, allow_edges: bool) -> Result<()> {
         let Some(config) = self.config.as_ref() else {
             return Ok(());
         };
         if self.engine.is_none() || self.engine.as_ref().is_some_and(Engine::is_measuring) {
             return Ok(());
         }
-        let active: Vec<_> = config
-            .profile
-            .layers
-            .iter()
-            .enumerate()
-            .filter(|(index, layer)| {
-                let threshold = layer.activation_threshold
-                    - if self.active_layers.contains(index) {
-                        layer.activation_hysteresis
-                    } else {
-                        0.
-                    };
-                motion_core::bindings::input_chord(&layer.input).is_some_and(|parts| {
-                    parts.iter().all(|p| {
-                        self.engine.as_ref().unwrap().layer_input_value(
-                            p,
-                            &config.profile,
-                            self.active_layers.contains(index),
-                        ) > threshold
-                    })
-                })
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let engine = self.engine.as_ref().unwrap();
+        let active =
+            self.layer_activation
+                .sample(&config.profile, allow_edges, |input, pressed| {
+                    engine.layer_input_value(input, &config.profile, pressed)
+                });
         if active == self.active_layers {
             return Ok(());
         }
@@ -1713,6 +1716,7 @@ impl Runtime {
                     self.fault(message.clone());
                     bail!(message);
                 }
+                self.reset_layer_activation()?;
                 self.status.pad_region_capture = Default::default();
                 if let Some(engine) = &mut self.engine {
                     engine.reset();
@@ -1798,6 +1802,7 @@ impl Runtime {
         Ok(())
     }
     fn begin_input_resync(&mut self) -> Result<()> {
+        self.reset_layer_activation()?;
         self.resync_input = true;
         self.reset_pad_shortcut_events();
         self.clear_outputs()?;
@@ -1820,7 +1825,7 @@ impl Runtime {
         }
         self.resync_input = false;
         if !self.status.binding_capture {
-            self.sync_layers()?;
+            self.sync_layer_edges(false)?;
         }
         self.track_pad_shortcut(true);
         if !self.output_paused() {
@@ -2175,6 +2180,79 @@ mod tests {
     }
 
     #[test]
+    fn latched_outputs_and_layers_clear_on_capture_disconnect_stop_and_fault() {
+        for operation in ["capture", "disconnect", "stop", "fault", "resync"] {
+            let (mut runtime, held, _rx) = fixture();
+            let profile = &mut runtime.config.as_mut().unwrap().profile;
+            profile.actions = serde_json::from_value(serde_json::json!([
+                {"name":"Latch", "input":"south", "output":"key:SPACE", "toggle":true}
+            ]))
+            .unwrap();
+            profile.layers = serde_json::from_value(serde_json::json!([
+                {"id":"toggle", "name":"Toggle layer", "input":"left_shoulder", "activation_mode":"toggle"}
+            ])).unwrap();
+            runtime.engine = Some(Engine::new(profile.clone()).unwrap());
+            let edge = |index, down, ns| InputEvent::Button {
+                index,
+                down,
+                time: SampleTime {
+                    host_ns: ns,
+                    sensor_ns: ns,
+                },
+            };
+            let shoulder = motion_core::profile::BUTTONS
+                .iter()
+                .position(|p| *p == "left_shoulder")
+                .unwrap() as u8;
+            runtime
+                .input(edge(shoulder, true, 1_000_000), false)
+                .unwrap();
+            runtime
+                .input(edge(shoulder, false, 2_000_000), false)
+                .unwrap();
+            runtime.input(edge(0, true, 3_000_000), false).unwrap();
+            runtime.input(edge(0, false, 4_000_000), false).unwrap();
+            assert!(held.borrow().contains("key:SPACE"), "{operation}");
+            assert_eq!(runtime.status.active_layers, ["Toggle layer"]);
+            match operation {
+                "capture" => runtime.set_binding_capture(true).unwrap(),
+                "disconnect" => runtime.lost_device().unwrap(),
+                "stop" => runtime.stop("test").unwrap(),
+                "fault" => runtime.fault("Synthetic fault".into()),
+                _ => {
+                    runtime.begin_input_resync().unwrap();
+                    runtime
+                        .finish_input_resync(vec![
+                            edge(shoulder, true, 5_000_000),
+                            edge(0, true, 5_000_000),
+                        ])
+                        .unwrap();
+                }
+            }
+            assert!(held.borrow().is_empty(), "{operation}");
+            assert!(runtime.status.active_layers.is_empty(), "{operation}");
+            if let Some(engine) = &runtime.engine {
+                assert!(
+                    engine.mapping_status().iter().all(|a| !a.latched),
+                    "{operation}"
+                );
+            }
+            if operation == "resync" {
+                runtime
+                    .input(edge(shoulder, false, 6_000_000), false)
+                    .unwrap();
+                runtime.input(edge(0, false, 7_000_000), false).unwrap();
+                runtime
+                    .input(edge(shoulder, true, 8_000_000), false)
+                    .unwrap();
+                runtime.input(edge(0, true, 9_000_000), false).unwrap();
+                assert_eq!(runtime.status.active_layers, ["Toggle layer"]);
+                assert!(held.borrow().contains("key:SPACE"));
+            }
+        }
+    }
+
+    #[test]
     fn input_resync_interrupts_angle_measurement_until_finish() {
         let (mut runtime, held, rx) = fixture();
         let engine = runtime.engine.as_mut().unwrap();
@@ -2439,6 +2517,8 @@ mod tests {
                 input: "left_stick_outer".into(),
                 activation_threshold: 0.5,
                 activation_hysteresis: 0.1,
+                activation_mode: Default::default(),
+                exit_input: None,
                 settings: serde_json::from_value(
                     serde_json::json!({"stick_zones":{"left_outer":0.98}}),
                 )
@@ -2498,6 +2578,8 @@ mod tests {
                 input: "left_trigger".into(),
                 activation_threshold: 0.5,
                 activation_hysteresis: 0.1,
+                activation_mode: Default::default(),
+                exit_input: None,
                 settings: serde_json::from_value(serde_json::json!({"gyro":{"sensitivity":0.4}}))
                     .unwrap(),
                 actions: vec![],
@@ -2570,11 +2652,14 @@ mod tests {
             turbo_ms: None,
             allow_simultaneous: false,
             chord_wait_ms: 80,
+            toggle: false,
         }];
         let sensitivity = base.gyro.sensitivity;
         base.layers.push(motion_core::layers::Layer {
             activation_threshold: 0.5,
             activation_hysteresis: 0.1,
+            activation_mode: Default::default(),
+            exit_input: None,
             id: "ads".into(),
             name: "ADS layer".into(),
             input: "left_shoulder".into(),

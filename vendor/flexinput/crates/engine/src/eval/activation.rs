@@ -8,6 +8,33 @@
 
 use super::*;
 
+/// Headless adapter to the unchanged module.switch evaluator. Only edges need
+/// evaluation; persistent output is read without allocating on idle samples.
+#[derive(Default)]
+pub struct SwitchLatch {
+    state: NodeState,
+    input: Option<bool>,
+}
+impl SwitchLatch {
+    pub fn active(&self) -> bool {
+        self.state.aux_f32.first().is_some_and(|v| *v > 0.5)
+    }
+    pub fn sample(&mut self, pressed: bool) -> bool {
+        if self.input != Some(pressed) {
+            static SNAP: std::sync::OnceLock<crate::graph::NodeSnap> = std::sync::OnceLock::new();
+            let snap = SNAP.get_or_init(|| crate::graph::NodeSnap {
+                node_uid: 0, module_id: "module.switch".into(), params: HashMap::new(),
+                n_outputs: 1, input_sources: vec![], device_id: None, output_pin_ids: vec![],
+                aux_f32_override: None, sink_target: None, inline_subgraph: None,
+            });
+            let empty = BusMap::default();
+            compute_node(snap, &[None, Some(Signal::Bool(pressed))], &mut self.state, &empty, &empty, 0.0);
+            self.input = Some(pressed);
+        }
+        self.active()
+    }
+}
+
 /// Headless single-output adapter to the native Remapper hold-back/replay.
 /// Studio supplies chord arbitration; recognition and replay stay native.
 #[derive(Default)]
@@ -194,9 +221,21 @@ pub struct PressGate {
     arbiter: PressArbiter,
     last_ns: Option<u64>,
     firing: bool,
+    activation_serial: u64,
 }
 
 impl PressGate {
+    /// Recognized activations remain distinguishable even if pulse outputs overlap.
+    pub fn activation_serial(&self) -> u64 { self.activation_serial }
+    /// Read-only explanation of native arbitration; never advances its clock.
+    pub fn pending_reason(&self, competition: PressCompetition) -> Option<&'static str> {
+        if self.arbiter.claim.is_some() { return Some("claimed"); }
+        if matches!(self.arbiter.double_slots[3] as u8, 1 | 2) { return Some("waiting_double"); }
+        if self.arbiter.held && !self.firing {
+            return Some(if competition.long_ms.is_some() { "waiting_long" } else { "waiting_release" });
+        }
+        None
+    }
     /// Sample an ordered input edge or a drained input clock. Competition
     /// belongs to one chord, including its analog threshold.
     pub fn sample_at(
@@ -212,6 +251,7 @@ impl PressGate {
         let dt = self.last_ns.replace(now_ns).map_or(0.0, |last| {
             (now_ns.saturating_sub(last) as f64 / 1e9) as f32
         });
+        let prior_claim = self.arbiter.claim;
         let decision = self.arbiter.sample(held, competition, now_ns);
         let window_ns = u64::from(window_ms) * 1_000_000;
         let mode = PressMode::from_str(mode);
@@ -259,6 +299,15 @@ impl PressGate {
                 pulse || (matches!(mode, PressMode::Down | PressMode::Sequence) && decision.ordinary_held)
             }
         };
+        let fresh = gate && (!self.firing || match mode {
+            PressMode::Down | PressMode::Sequence | PressMode::OnPress => (decision.rising && decision.ordinary_held)
+                || (decision.tap.is_some_and(|tap| tap.deferred) && decision.claim.is_none()),
+            PressMode::Short => decision.tap.is_some() && decision.claim == Some(PressClaim::Short),
+            PressMode::OnRelease => decision.tap.is_some() && decision.claim.is_none(),
+            PressMode::Double => decision.rising,
+            PressMode::Long => decision.claim == Some(PressClaim::Long) && prior_claim != Some(PressClaim::Long),
+        });
+        if fresh { self.activation_serial = self.activation_serial.wrapping_add(1); }
         let phase_dt = if self.firing { dt } else { 0.0 };
         self.firing = gate;
         if let Some(period) = turbo_ms {

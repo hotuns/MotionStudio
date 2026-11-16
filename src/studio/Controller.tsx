@@ -3,6 +3,7 @@ import styles from './ControllerStatusSvg.module.css';
 
 type ControllerStatusSvgProps = {
   bindingCounts?: ReadonlyMap<string, number>
+  showBindingCounts?: boolean
   device?: Device | null
   status?: Status | null
   selectedControl?: string | null
@@ -348,6 +349,7 @@ function Stick({
 
 export default function Controller({
   bindingCounts,
+  showBindingCounts = true,
   device,
   status,
   selectedControl,
@@ -603,7 +605,7 @@ export default function Controller({
             title="触摸板"
           />
         )}
-        {bindingCounts && <g aria-hidden="true">{BINDING_BADGES.map(([control, x, y]) => {
+        {bindingCounts && showBindingCounts && <g aria-hidden="true">{BINDING_BADGES.map(([control, x, y]) => {
           const count = bindingCounts.get(control)
           if (!count) return null
           const width = Math.max(49, String(count).length * 21 + 20)

@@ -1,4 +1,4 @@
-//! Hold layers merge bounded configuration patches over one physical session.
+//! Layers merge bounded configuration patches over one physical session.
 use crate::profile::{Action, Profile};
 use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -9,6 +9,10 @@ pub struct Layer {
     pub id: String,
     pub name: String,
     pub input: String,
+    #[serde(default)]
+    pub activation_mode: LayerMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_input: Option<String>,
     #[serde(default = "default_threshold")]
     pub activation_threshold: f32,
     #[serde(default = "default_hysteresis")]
@@ -19,6 +23,76 @@ pub struct Layer {
     pub actions: Vec<Action>,
     #[serde(default)]
     pub disabled_inputs: Vec<String>,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerMode {
+    #[default]
+    Hold,
+    Toggle,
+}
+
+#[derive(Default)]
+struct LayerState {
+    pressed: bool,
+    blocked: bool,
+    latch: flexinput_engine::eval::SwitchLatch,
+}
+
+/// Lifecycle and physical-condition adapter; the latch is FlexInput's switch.
+#[derive(Default)]
+pub struct LayerActivation {
+    states: Vec<LayerState>,
+}
+impl LayerActivation {
+    pub fn sample(
+        &mut self,
+        profile: &Profile,
+        allow_edges: bool,
+        mut value: impl FnMut(&str, bool) -> f32,
+    ) -> Vec<usize> {
+        self.states
+            .resize_with(profile.layers.len(), Default::default);
+        let reset = profile.layer_reset_input.as_ref().is_some_and(|input| {
+            crate::bindings::input_chord(input)
+                .is_some_and(|parts| parts.iter().all(|p| value(p, false) > 0.5))
+        });
+        let mut active = Vec::with_capacity(profile.layers.len());
+        for (index, (layer, state)) in profile.layers.iter().zip(&mut self.states).enumerate() {
+            let threshold = layer.activation_threshold
+                - if state.pressed {
+                    layer.activation_hysteresis
+                } else {
+                    0.0
+                };
+            let pressed = crate::bindings::input_chord(&layer.input)
+                .is_some_and(|parts| parts.iter().all(|p| value(p, state.pressed) > threshold));
+            let exit = layer.exit_input.as_ref().is_some_and(|input| {
+                crate::bindings::input_chord(input)
+                    .is_some_and(|parts| parts.iter().all(|p| value(p, false) > 0.5))
+            });
+            state.pressed = pressed;
+            if reset || exit || (!allow_edges && layer.activation_mode == LayerMode::Toggle) {
+                state.latch = Default::default();
+                state.blocked = pressed;
+            }
+            if !pressed {
+                state.blocked = false;
+            }
+            let on = if reset || exit || state.blocked {
+                false
+            } else {
+                match layer.activation_mode {
+                    LayerMode::Hold => pressed,
+                    LayerMode::Toggle => state.latch.sample(pressed),
+                }
+            };
+            if on {
+                active.push(index);
+            }
+        }
+        active
+    }
 }
 fn default_threshold() -> f32 {
     0.5
@@ -93,12 +167,13 @@ pub fn resolve(base: &Profile, active: &[usize]) -> Result<Profile> {
     Ok(serde_json::from_value(value)?)
 }
 pub fn validate(base: &Profile) -> Result<()> {
+    ensure!(base.layer_reset_input.as_ref().is_none_or(|input| crate::bindings::input_chord(input).is_some()), "返回基础层输入无效");
     if base.layers.is_empty() {
         return Ok(());
     }
     ensure!(
         base.layers.len() <= 8,
-        "每个游戏配置最多支持 8 个按住配置层"
+        "每个游戏配置最多支持 8 个配置层"
     );
     ensure!(
         base.actions.len() + base.layers.iter().map(|l| l.actions.len()).sum::<usize>() <= 128,
@@ -106,6 +181,7 @@ pub fn validate(base: &Profile) -> Result<()> {
     );
     let mut ids = std::collections::HashSet::new();
     for layer in &base.layers {
+        ensure!(layer.exit_input.as_ref().is_none_or(|input| crate::bindings::input_chord(input).is_some()), "关闭配置层输入无效");
         if let Some(enabled) = layer.settings.get("feedback").and_then(|v| v.get("audio_haptics_enabled")) {
             ensure!(enabled.as_bool() == Some(base.feedback.audio_haptics_enabled), "Audio haptics mode is a base-profile device setting; layers may change its gain");
         }

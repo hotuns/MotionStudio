@@ -24,6 +24,7 @@ impl PressHandoff {
             .filter(|(_, (action, state))| {
                 state.active
                     && state.raw
+                    && !action.toggle
                     && action.turbo_ms.is_none()
                     && (matches!(action.trigger, Trigger::Down | Trigger::Double)
                         || action.trigger == Trigger::Long && action.sustain)

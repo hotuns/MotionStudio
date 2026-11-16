@@ -1,7 +1,7 @@
 import type { MotionConfig, Profile, Status } from '../types';
 import { Range, Toggle } from './Controls';
 import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
-import {OptionPicker} from './OptionPicker';
+import {PadInputPicker} from './PadInputPicker';
 import {padChoices} from './binding-choices';
 import { CurveEditor } from './CurveEditor';
 import { AccelerationCurve, FlickReleaseCurve, ResponseCurve, useStabilityPreview } from './StabilityCurves';
@@ -18,7 +18,7 @@ export function MotionChoice({label,value,options,onChange,disabled,settingPath}
 }
 const Choice=MotionChoice;
 function ControlInput({label,value,onChange}:{label:string;value:string|null;onChange:(v:string|null)=>void}) {
-  return <SettingField label={label}><div className="studio-field"><SettingLabel label={label}/><OptionPicker label={label} value={value??''}
+  return <SettingField label={label}><div className="studio-field"><SettingLabel label={label}/><PadInputPicker label={label} value={value??''}
     groups={[{options:[{value:'',label:'不设置'}]}, ...padChoices()]} onChange={v=>onChange(v||null)}/></div></SettingField>;
 }
 const sticks:[string,string][]=[['right','右摇杆'],['left','左摇杆']];

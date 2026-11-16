@@ -151,10 +151,10 @@
     {
       "path": "crates/engine/src/eval/activation.rs",
       "upstreamSha256": "df3820738330d9e85339b0e5e4a032dd9b296fa5b73102dd6263df0e4118aa85",
-      "vendoredSha256": "cf633b8f45aee9ad9796103a316cea133abb84967f66334ea94ecc188f03705b",
+      "vendoredSha256": "d523169b5efd709343c5a6a164a06f1dfc1ffe14be92c94b54ef0bd942b1a129",
       "modified": true,
       "upstreamGitBlob": "01478509933679693a2fac094d479bd3babe10d3",
-      "patch": "Expose timestamped PressGate sampling over native double recognition, long output, pulse and turbo logic. Coordinate same-condition short, long and double recognition before ordinary outputs, with exact deadlines and release catch-up. Retain the double-press state 3 fix so a recognized second press stays held. Add OutputHoldBack, a timestamped single-output adapter calling the unchanged native remapper_hold_back::hold_back_tick for deferred output and replay; Studio supplies unordered chord deadlines and full-release claims."
+      "patch": "Expose timestamped PressGate sampling over native double recognition, long output, pulse and turbo logic. Coordinate same-condition short, long and double recognition before ordinary outputs, with exact deadlines and release catch-up. Retain the double-press state 3 fix so a recognized second press stays held. Add OutputHoldBack, a timestamped single-output adapter calling the unchanged native remapper_hold_back::hold_back_tick for deferred output and replay; Studio supplies unordered chord deadlines and full-release claims. Expose SwitchLatch as an edge-only headless wrapper over the unchanged module.switch evaluator; expose read-only PressGate arbitration reasons and an activation serial for overlapping recognized pulses."
     },
     {
       "path": "crates/engine/src/eval/combiner_motion.rs",

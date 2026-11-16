@@ -1,7 +1,7 @@
 import {t} from './i18n';
 import {keyboardKeys} from './keyboard';
 export {keyNames} from './keyboard';
-export type TriggerSettings = {trigger?:'down'|'short'|'long'|'double'|'on_press'|'on_release';trigger_ms?:number;sustain?:boolean;turbo_ms?:number|null;allow_simultaneous?:boolean;chord_wait_ms?:number};
+export type TriggerSettings = {toggle?:boolean;trigger?:'down'|'short'|'long'|'double'|'on_press'|'on_release';trigger_ms?:number;sustain?:boolean;turbo_ms?:number|null;allow_simultaneous?:boolean;chord_wait_ms?:number};
 export type Action = TriggerSettings & {name:string;input:string;output:string;threshold:number;repeat_ms?:number|null};
 export type OutputBackend = 'hid_maestro'|'legacy';
 export type GamepadBackend = 'vigem'|'hid_maestro'|'usb_ip';
@@ -59,8 +59,8 @@ export type JsmFile = {name:string;text:string};
 export type TriggerStageMode = 'no_full'|'no_skip'|'no_skip_exclusive'|'may_skip'|'must_skip'|'may_skip_r'|'must_skip_r';
 export type TriggerStagesConfig = {left_mode:TriggerStageMode;right_mode:TriggerStageMode;soft_threshold:number;skip_delay_ms:number};
 export type GamepadBinding = TriggerSettings & {input:string;output:string;threshold?:number};
-export type Profile = {trigger_stages?:TriggerStagesConfig;feedback?:FeedbackConfig;touchpad?:TouchpadConfig;input?:ControllerInputConfig;schema_version:number;name:string;virtual_gamepad:GamepadTarget;gamepad_bindings?:GamepadBinding[];stick_deadzone:number;gyro:Gyro;stick_mouse:{enabled:boolean;stick:string;speed:number;deadzone:number;exponent:number};actions:Action[];stick_rebound_ms?:number|null;stick_zones?:{left_outer:number;right_outer:number;hysteresis:number};layers?:ProfileLayer[]};
-export type ProfileLayer={id:string;name:string;input:string;activation_threshold?:number;activation_hysteresis?:number;settings:Record<string,unknown>;actions:Action[];disabled_inputs:string[]};
+export type Profile = {trigger_stages?:TriggerStagesConfig;feedback?:FeedbackConfig;touchpad?:TouchpadConfig;input?:ControllerInputConfig;schema_version:number;name:string;virtual_gamepad:GamepadTarget;gamepad_bindings?:GamepadBinding[];stick_deadzone:number;gyro:Gyro;stick_mouse:{enabled:boolean;stick:string;speed:number;deadzone:number;exponent:number};actions:Action[];stick_rebound_ms?:number|null;stick_zones?:{left_outer:number;right_outer:number;hysteresis:number};layer_reset_input?:string|null;layers?:ProfileLayer[]};
+export type ProfileLayer={id:string;name:string;input:string;activation_mode?:'hold'|'toggle';exit_input?:string|null;activation_threshold?:number;activation_hysteresis?:number;settings:Record<string,unknown>;actions:Action[];disabled_inputs:string[]};
 export type Entry = {id:string;profile:Profile};
 export type Target = {kind:'none'|'restore'}|{kind:'profile';profile_id:string};
 export type Shortcut={key:string;ctrl:boolean;alt:boolean;shift:boolean};
@@ -70,7 +70,9 @@ export type ControllerOverlayConfig={enabled:boolean;width:number;opacity:number
 export type Settings = {controller_overlay?:ControllerOverlayConfig;mouse_display_sync?:boolean;io_rates?:IoRates;language?:'zh-CN'|'en';auto_hide:boolean;overlay_enabled:boolean;overlay_duration_ms:number;overlay_position:'top_left'|'top_right'|'bottom_left'|'bottom_right';output_backend:OutputBackend;gamepad_backend?:GamepadBackend;version:number;selected_profile:string;device_path:string;cursor_enabled:boolean;cursor_debounce_ms?:number;cursor_shown:Target;cursor_hidden:Target;shortcut_profile:string|null;shortcut_key:Shortcut|null;shortcut_pad?:string|null;shortcut_rules?:ShortcutRule[]|null;calibrations:Record<string,number[]>;motion_calibrations:Record<string,SensorCalibration>};
 export type Device = {touchpads?:number;rumble?:boolean;lightbar?:boolean;id:number;name:string;vendor:number;product:number;path:string;origin:'physical'|'virtual'|'unknown';gyro:boolean;gamepad:boolean;accelerometer:boolean;buttons:string[];open_error?:string};
 export type NavCommand='up'|'down'|'left'|'right'|'confirm'|'back'|'edit'|'save'|'sidebar'|'menu'|'previous_zone'|'next_zone';
+export type MappingStatus={name:string;input:string;output:string;trigger:NonNullable<TriggerSettings['trigger']>;active:boolean;latched:boolean;reason:string};
 export type Status = {
+  mapping?:MappingStatus[];
   mouse_display_sync?:{live:boolean;frame_hz:number;reports_per_frame:number;vrr?:boolean;fallback_hz?:number};
   output_preview?: OutputPreviewStatus | null;
   state:string;message:string;profile_id:string|null;profile_name:string|null;device:Device|null;emitting:boolean;binding_capture?:boolean;active_layers?:string[];visibility?:{requested:boolean;active:boolean;hidden_paths:string[];error:string|null};output_backend?:OutputBackend|null;output_gamepad?:GamepadStatus|null;feedback?:{active:boolean;awaiting_new_command:boolean;rumble:number[];lightbar:number[]|null;forwarded:number;haptics?:HapticStatus|null};touches?:TouchContact[][];revision:number;reconnects:number;reload_error:string|null;buttons:boolean[];axes:number[];processed_axes?:number[];gyro:number[];calibration_progress:number;motion:MotionTelemetry;input_serial:number;stick_regions?:('center'|'inner'|'outer')[];pad_region_capture?:{serial:number;chord:string[]};pad_shortcuts?:{input:string;target:string}[];pad_shortcut_events?:{serial:number;index:number}[];pad_shortcut_serial?:number;pad_shortcut_baseline?:number;last_input:string|null;input_chord?:string[];ui_navigation?:boolean;navigation_serial?:number;navigation_events?:{serial:number;command:NavCommand}[];navigation_held?:NavCommand[];stats:{gyro_events:number;gyro_hz:number;stale_events:number;invalid_timestamps:number;gaps:number;process_p99_us:number;queue_p99_us:number;mouse_counts:number[];output?:{queued:number;coalesced_motion:number;mouse_reports:number;keyboard_reports:number;wait_total_us:number;wait_max_us:number;queue_max_us:number}};

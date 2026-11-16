@@ -24,6 +24,7 @@ fn profile() -> Profile {
             turbo_ms: None,
             allow_simultaneous: false,
             chord_wait_ms: 80,
+            toggle: false,
         });
     }
     profile

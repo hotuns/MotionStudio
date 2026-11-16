@@ -5,6 +5,7 @@ import {padInputNeutral, padBindingCandidates} from '../pad-capture';
 import {chordParts, inputs, type Status} from '../types';
 import {InputChordFields, inputOpposites} from './BindingFields';
 import {padInputLabel} from './binding-choices';
+import {PadInputRow, PadInputValue} from './PadInputPicker';
 import styles from './CursorSwitchPanel.module.css';
 
 const modes = [['controls', '按键与方向'], ['regions', '摇杆内外圈']] as const;
@@ -160,19 +161,20 @@ export function PadShortcutSettings({input, status, busy, onChange, onPrepare, o
     <p className={styles.hint}>支持手柄单键、触摸、摇杆方向与内外圈，最多可组合 4 个输入。</p>
     <button type="button" className="secondary-btn" disabled={locked} onClick={() => changeDraft('left_stick_outer')}>使用左摇杆外圈</button>
     <fieldset disabled={locked} aria-label="手柄快捷键输入">
-      <InputChordFields value={input} split={split} onChange={changeDraft} showHint={false}/>
+      <InputChordFields value={input} split={split} onChange={changeDraft} showHint={false} listen={false}/>
     </fieldset>
     <div className={styles.recordMode} role="group" aria-label="手柄录入方式">
       {modes.map(([id, name]) => <button key={id} type="button" className="secondary-btn" disabled={locked}
         aria-pressed={mode === id} onClick={() => setMode(id)}>{name}</button>)}
-      <button type="button" className="secondary-btn" aria-label="录入手柄切换快捷键" disabled={locked}
-        onClick={() => void record()}>{starting ? '正在准备…' : recording ? '正在录入手柄…' : '监听手柄'}</button>
     </div>
-    <div className={styles.shortcutActions}>
-      {recording ? <button type="button" className="ghost-btn" onClick={() => { cancel(); setError(null); }}>取消录入</button> :
-        <button type="button" className="ghost-btn" disabled={locked || !input}
-          onClick={() => changeDraft('')}>清除手柄快捷键</button>}
-    </div>
+    <PadInputRow recording={recording} starting={starting} disabled={!recording && locked}
+      recordLabel="录入手柄切换快捷键" onRecord={() => { if (recording) { cancel(); setError(null); } else void record(); }}>
+      <PadInputValue label="手柄快捷键输入" value={label(candidate.length ? candidate : chordParts(input))}/>
+    </PadInputRow>
+    {!recording && <div className={styles.shortcutActions}>
+      <button type="button" className="ghost-btn" disabled={locked || !input}
+        onClick={() => changeDraft('')}>清除手柄快捷键</button>
+    </div>}
     {recording && <p className={styles.hint} role="status">
       {candidate.length ? <strong translate="no">{label(candidate)}</strong> : mode === 'regions' ?
         '请让摇杆回中，再推到要录入的区域并松开。' : '请先松开已有按键，再按住所需组合并全部松开。'}

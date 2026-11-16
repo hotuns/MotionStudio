@@ -1,9 +1,10 @@
-import {useEffect,useState} from 'react';
+import {useContext,useEffect,useState} from 'react';
 import {chordParts,inputs,outputLabel,wheelOutputs,type Action,type TriggerSettings} from '../types';
 import {triggerCompetition,type TriggerBinding} from '../mapping-triggers';
 import {t} from '../i18n';
 import {Range,Toggle} from './Controls';
 import {OptionPicker} from './OptionPicker';
+import {PadInputCaptureContext, PadInputPicker, PadInputRow, PadInputValue} from './PadInputPicker';
 import {padChoices, outputChoices, padInputLabel} from './binding-choices';
 import {controllerCategory,controllerGroups} from './controller-catalog';
 import editorStyles from './ActionEditor.module.css';
@@ -17,13 +18,13 @@ export function InputCaptureButton({value, recording, disabled, hint, onClick}: 
   hint?: string;
   onClick: () => void;
 }) {
-  return <button type="button" className={editorStyles.capturePad} data-cancel-capture
-    aria-label={recording ? '取消手柄录入' : '录入手柄'} aria-pressed={recording}
-    disabled={disabled} onClick={onClick}>
-    <small>{recording ? '正在录入手柄…' : '点击录入手柄'}</small>
-    <strong>{value || '选择手柄输入'}</strong>
-    <span>{hint ?? (recording ? '全部松开后完成 · 点击取消' : '也可以选择下面的按键')}</span>
-  </button>;
+  return <>
+    <PadInputRow recording={recording} disabled={disabled} onRecord={onClick}
+      recordLabel="录入手柄" cancelLabel="取消手柄录入">
+      <PadInputValue label="已选手柄输入" value={value}/>
+    </PadInputRow>
+    <p className={editorStyles.hint}>{hint ?? (recording ? '全部松开后完成 · 点击取消' : '也可以选择下面的按键')}</p>
+  </>;
 }
 
 export function ControllerInputChoices({value, combo, split = false, allowed = inputs, exclusive = [], onChange}: {
@@ -79,11 +80,14 @@ export function ActionTriggerFields({action,onChange,peers=[]}:{action:TriggerBi
      <small>超过等待时间后按单键处理，本次按压不再触发组合。模拟扳机从开始扣动时计时。</small>
    </>}
    <div className={styles.triggerModes} role="group" aria-label="动作触发方式">{Object.entries(triggerNames).map(([value,label])=><button type="button" key={value} aria-pressed={trigger===value} onClick={()=>choose(value as Action['trigger'])}>{label}</button>)}</div>
-   {trigger!=='down'&&<Range label={trigger==='long'?'长按时间':trigger==='double'?'双击时间窗':trigger==='short'?'短按最长时间':'触发持续时间'} value={action.trigger_ms??250} min={10} max={5000} step={10} unit=" ms" onChange={trigger_ms=>onChange({trigger_ms})}/>}
-   {trigger==='long'&&<Toggle label="长按触发后保持，直到松开" value={action.sustain!==false} onChange={sustain=>onChange({sustain})}/>}
-   <Toggle label="按住连发" value={action.turbo_ms!=null} onChange={enabled=>onChange({turbo_ms:enabled?100:null})}/>
+   {trigger!=='down'&&(!action.toggle||trigger==='short'||trigger==='long'||trigger==='double')&&<Range label={trigger==='long'?'长按时间':trigger==='double'?'双击时间窗':trigger==='short'?'短按最长时间':'触发持续时间'} value={action.trigger_ms??250} min={10} max={5000} step={10} unit=" ms" onChange={trigger_ms=>onChange({trigger_ms})}/>}
+   {trigger==='long'&&!action.toggle&&<Toggle label="长按触发后保持，直到松开" value={action.sustain!==false} onChange={sustain=>onChange({sustain})}/>}
+   <Toggle label="再次触发才停止输出" value={!!action.toggle} onChange={toggle=>onChange({toggle})}
+     help="按所选触发方式启动输出，松开手柄后仍保持；再次触发时停止。停止映射、断连或开始录入会清除保持状态。"/>
+   {action.toggle&&<small>支持键盘、鼠标按键和虚拟手柄按键。滚轮需开启连续滚动才会持续滚动；组合键优先触发时会取消对应单键的保持状态。</small>}
+   <Toggle label={action.toggle?'保持期间连发':'按住连发'} value={action.turbo_ms!=null} onChange={enabled=>onChange({turbo_ms:enabled?100:null})}/>
    {action.turbo_ms!=null&&<Range label="连发周期" value={action.turbo_ms} min={20} max={2000} step={10} unit=" ms" onChange={turbo_ms=>onChange({turbo_ms})}/>}
-   <small>{triggerHints[trigger]}</small>
+   <small>{action.toggle?'每次识别成功切换输出状态；松开手柄不会停止输出。':triggerHints[trigger]}</small>
    <Toggle label="允许同时触发" value={!!action.allow_simultaneous} onChange={allow_simultaneous=>onChange({allow_simultaneous})}
      help="开启后，这条映射独立判断触发方式，可与同一输入的其他动作一起输出。"/>
    {!action.allow_simultaneous&&<>
@@ -94,24 +98,28 @@ export function ActionTriggerFields({action,onChange,peers=[]}:{action:TriggerBi
    </>}
  </div>;
 }
-export function InputChordFields({value,onChange,allowed=inputs,showHint=true,split=false}: {
+export function InputChordFields({value,onChange,allowed=inputs,showHint=true,split=false,listen=true}: {
   value: string;
   onChange: (value: string) => void;
   allowed?: string[];
   showHint?: boolean;
   split?: boolean;
+  listen?: boolean;
 }) {
   const parts=chordParts(value);
+  const capture=useContext(PadInputCaptureContext);
+  const locked=listen&&!!capture?.locked;
   const blocked = (others: string[]) => others.flatMap(input => [input, inputOpposites[input]].filter(Boolean));
   const add = parts.length ? '添加组合按键' : '选择手柄输入';
+  const Picker = listen ? PadInputPicker : OptionPicker;
   return <div className={styles.bindingFields}>
     <span>手柄输入 · 同时按住</span>
     {parts.map((part,i)=><div key={i} className={styles.bindingRow}>
-      <OptionPicker label={'手柄输入 '+(i+1)} value={part} groups={padChoices(allowed, blocked(parts.filter((_,j)=>j!==i)), split)}
+      <Picker label={'手柄输入 '+(i+1)} value={part} groups={padChoices(allowed, blocked(parts.filter((_,j)=>j!==i)), split)}
         onChange={next=>onChange(parts.map((value,j)=>j===i?next:value).join('+'))}/>
-      {parts.length>1&&<button type="button" className="ghost-btn" aria-label={'移除手柄输入 '+(i+1)} onClick={()=>onChange(parts.filter((_,j)=>j!==i).join('+'))}>移除</button>}
+      {parts.length>1&&<button type="button" className="ghost-btn" disabled={locked} aria-label={'移除手柄输入 '+(i+1)} onClick={()=>onChange(parts.filter((_,j)=>j!==i).join('+'))}>移除</button>}
     </div>)}
-    {parts.length<4&&<OptionPicker label={add} placeholder={add} value={null} groups={padChoices(allowed, blocked(parts), split)}
+    {parts.length<4&&<Picker label={add} placeholder={add} value={null} groups={padChoices(allowed, blocked(parts), split)}
       className={styles.addInput} onChange={next=>onChange([...parts,next].join('+'))}/>}
     {showHint&&<small>最多 4 个输入。组合动作生效时，优先于其中的单键动作。</small>}
   </div>;
@@ -143,8 +151,8 @@ export function OutputChordFields({action,onChange,showRepeat=true}:{action:Acti
     {parts.length<4&&<OptionPicker label="添加同时输出" placeholder="添加同时输出" value={null} className={styles.addInput}
       groups={outputChoices(false, [...parts,...(hasWheel?wheelOutputs:[])])} onChange={next=>emit([...parts,next])}/>}
     {hasWheel&&showRepeat&&<>
-      <Toggle label="按住连续滚动" value={action.repeat_ms!=null} onChange={value=>onChange({repeat_ms:value?100:null})}/>
-      {action.repeat_ms!=null?<Range label="滚动间隔" value={action.repeat_ms} min={20} max={2000} step={10} unit=" ms" onChange={value=>onChange({repeat_ms:value})}/>:<small>每次触发滚动 1 格，松开后可再次触发。</small>}
+      <Toggle label={action.toggle?'保持期间连续滚动':'按住连续滚动'} value={action.repeat_ms!=null} onChange={value=>onChange({repeat_ms:value?100:null})}/>
+      {action.repeat_ms!=null?<Range label="滚动间隔" value={action.repeat_ms} min={20} max={2000} step={10} unit=" ms" onChange={value=>onChange({repeat_ms:value})}/>:<small>{action.toggle?'每次开启时滚动 1 格；关闭时不滚动。':'每次触发滚动 1 格，松开后可再次触发。'}</small>}
     </>}
   </div>;
 }

@@ -1,5 +1,5 @@
 import {t} from './i18n';
-import type {Profile,ProfileLayer} from './types';
+import type {Action,Profile,ProfileLayer} from './types';
 const object=(value:unknown):value is Record<string,unknown>=>!!value&&typeof value==='object'&&!Array.isArray(value);
 export function mergeSettings(target:Record<string,unknown>,patch:Record<string,unknown>){
   for(const [key,value] of Object.entries(patch)) {
@@ -43,6 +43,25 @@ function mergePatch(target:Record<string,unknown>,patch:Record<string,unknown>){
   }
 }
 export function newLayer():ProfileLayer{return {id:crypto.randomUUID(),name:t('新配置层'),input:'left_shoulder',activation_threshold:0.5,activation_hysteresis:0.1,settings:{},actions:[],disabled_inputs:[]};}
+
+export type LayerConflict={source:string;action:Action;kind:'replaces'|'disabled'|'overridden'};
+// Input identity matches Rust layers::input_key. Every trigger on that input
+// is replaced; lower optional layers are shown as conditional conflicts.
+export function layerConflicts(base:Profile,id:string):LayerConflict[] {
+  const layers=base.layers??[],index=layers.findIndex(layer=>layer.id===id);
+  if(index<0)return [];
+  const layer=layers[index],key=(input:string)=>input.split('+').map(s=>s.trim()).sort().join('+');
+  const replacements=new Set(layer.actions.map(a=>key(a.input))),disabled=new Set(layer.disabled_inputs.map(key));
+  const lower=[{name:t('基础层'),actions:base.actions},...layers.slice(0,index)];
+  const conflicts:LayerConflict[]=lower.flatMap(source=>source.actions.flatMap(action=>
+    disabled.has(key(action.input))||replacements.has(key(action.input))
+      ? [{source:source.name,action,kind:disabled.has(key(action.input))?'disabled' as const:'replaces' as const}]:[]));
+  for(const higher of layers.slice(index+1)) {
+    const overridden=new Set([...higher.disabled_inputs,...higher.actions.map(a=>a.input)].map(key));
+    for(const action of layer.actions)if(overridden.has(key(action.input)))conflicts.push({source:higher.name,action,kind:'overridden'});
+  }
+  return conflicts;
+}
 
 export function layerSettingOverridden(layer: ProfileLayer, path: string): boolean {
   let value: unknown = layer.settings;

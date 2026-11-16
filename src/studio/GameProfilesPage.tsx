@@ -167,7 +167,8 @@ export function GameProfilesPage(props: Props) {
       </fieldset>
     </Dialog>}
     <div key={props.editingLayerKey} data-pad-zone="game-panel" className={styles.tabPanel}>
-      {tab==='actions' ? <ActionMappings profile={profile} device={device} status={status} blocked={blocked}
+      {tab==='actions' ? <ActionMappings profileId={props.profileId} profile={profile} baseProfile={props.baseProfile} layerId={props.editingLayerKey}
+        onEditBase={props.onEditBase} onOverviewSetting={props.onTab} device={device} status={status} blocked={blocked}
         gamepadRecording={props.gamepadRecording} canRecordGamepad={props.canRecordGamepad} onRecordGamepad={props.onRecordGamepad}
         capture={capture} onCapture={props.onCapture} onCancelCapture={props.onCancelCapture} onAssignEscape={props.onAssignEscape}
         onUpdate={onUpdate} onEdit={props.onEdit} onBatch={props.onBatch} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :

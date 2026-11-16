@@ -1,6 +1,6 @@
 {
   "name": "motion-studio",
-  "version": "0.18.4",
+  "version": "0.18.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,8 @@
     "package:portable": "node scripts/package-portable.mjs",
     "package:update": "node scripts/package-update.mjs",
     "release:local": "node scripts/release-local.mjs",
-    "test:release": "node --test tests/release.test.mjs",
+    "test:release": "node --test tests/release.test.mjs tests/mapping-checks.test.mjs",
+    "test:mapping": "node scripts/check-mapping.mjs",
     "test:controller-preview": "node --test tests/controller-preview.test.mjs",
     "engine:dev": "node scripts/build-engine.mjs",
     "engine:build": "node scripts/build-engine.mjs --release",

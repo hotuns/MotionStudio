@@ -189,6 +189,7 @@ fn touch_contact_activators_and_chords_work_even_with_pointer_routing_disabled()
         turbo_ms: None,
         allow_simultaneous: false,
         chord_wait_ms: 80,
+        toggle: false,
     });
     let mut e = Engine::new(p).unwrap();
     click(&mut e, 1, 9, true);
@@ -214,6 +215,7 @@ fn invalid_coordinates_cancel_touch_state_without_releasing_another_mapping() {
         turbo_ms: None,
         allow_simultaneous: false,
         chord_wait_ms: 80,
+        toggle: false,
     });
     let mut e = Engine::new(p).unwrap();
     click(&mut e, 1, 0, true);

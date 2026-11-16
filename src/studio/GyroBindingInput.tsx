@@ -1,6 +1,7 @@
 import {t} from '../i18n';
 import type {GyroBindingField, GyroBindingRecording} from '../pad-capture';
 import {OptionPicker} from './OptionPicker';
+import {PadInputRow} from './PadInputPicker';
 import {padChoices, padInputLabel} from './binding-choices';
 import styles from './MotionControls.module.css';
 import {SettingField,SettingLabel} from './SettingLayout';
@@ -22,15 +23,11 @@ export function GyroBindingInput({field, value, blocked, split, recording, locke
   const groups = padChoices(undefined, blocked ? [blocked] : [], split);
   if (pause) groups.unshift({options:[{value:'', label:'不设置'}]});
   return <SettingField label={label} path={'gyro.'+field} inheritance={false}><div className={styles.bindingField}>
-    <div className={styles.bindingRow}>
-      <div className="studio-field"><SettingLabel label={label}/>
+    <div className="studio-field"><SettingLabel label={label}/>
+      <PadInputRow recording={!!recording} recordLabel={pause ? '录入暂停输入' : '录入开启输入'}
+        disabled={!recording && (locked || !available)} onRecord={recording ? onCancel : onRecord}>
         <OptionPicker label={label} value={value ?? ''} groups={groups} disabled={locked} onChange={onChange}/>
-      </div>
-      <button type="button" className="secondary-btn" data-cancel-capture aria-pressed={!!recording}
-        aria-label={recording ? '取消录入' : pause ? '录入暂停输入' : '录入开启输入'}
-        disabled={!recording && (locked || !available)} onClick={recording ? onCancel : onRecord}>
-        {recording ? '取消录入' : '监听手柄'}
-      </button>
+      </PadInputRow>
     </div>
     {recording && <p className={styles.hint} role="status">
       {recording.issue === 'duplicate' ? '开启和暂停不能使用同一个输入，请重新录入。' :

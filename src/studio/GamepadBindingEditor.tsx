@@ -87,7 +87,7 @@ export function GamepadBindingEditor({value, index, bindings, profile, target, s
     && validMs(draft.trigger_ms,10,5000) && validMs(draft.turbo_ms,20,2000) && validMs(draft.chord_wait_ms,0,500);
   const change = (patch:Partial<GamepadBinding>) => setDraft(current => {
     const next = {...current,...patch};
-    return isAnalogGamepadBinding(next) ? {...next,trigger:'down',turbo_ms:null,allow_simultaneous:false} : next;
+    return isAnalogGamepadBinding(next) ? {...next,trigger:'down',toggle:false,turbo_ms:null,allow_simultaneous:false} : next;
   });
   const chooseInput = (input: string) => change({
     input, output: !input || layout.sticks.includes(input) === stickOutput ? draft.output : '',

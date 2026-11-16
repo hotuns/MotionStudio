@@ -13,6 +13,7 @@ use std::rc::Rc;
 fn profile() -> Profile {
     Profile {
         layers: vec![],
+        layer_reset_input: None,
         stick_zones: Default::default(),
         stick_rebound_ms: None,
         schema_version: 1,
@@ -173,6 +174,7 @@ fn binding(input: &str, output: &str) -> Action {
         turbo_ms: None,
         allow_simultaneous: false,
         chord_wait_ms: 80,
+        toggle: false,
     }
 }
 
@@ -496,9 +498,18 @@ fn full_native_automap_preserves_buttons_trigger_and_stick_axes() {
             right_y: -32768,
             left_trigger: 255,
             right_trigger: 255,
+            // Full analog travel also carries the digital trigger state.
+            left_trigger_pressed: true,
+            right_trigger_pressed: true,
             ..Default::default()
         }
     );
+    for index in [4, 5] {
+        e.process(&InputEvent::Axis { time: time(2), index, value: 0 });
+    }
+    let released = e.frame.pad.unwrap();
+    assert_eq!((released.left_trigger, released.right_trigger), (0, 0));
+    assert!(!released.left_trigger_pressed && !released.right_trigger_pressed);
     e.process(&InputEvent::Disconnected { time: time(2) });
     assert_eq!(e.frame.pad.unwrap(), PadState::default());
 }

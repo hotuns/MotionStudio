@@ -13,6 +13,8 @@ const MAX_GAMEPAD_BINDINGS: usize = 64;
 pub struct GamepadBinding {
     pub input: String,
     pub output: String,
+    #[serde(default)]
+    pub toggle: bool,
     #[serde(default = "crate::profile::default_threshold")]
     pub threshold: f32,
     #[serde(default)]
@@ -45,6 +47,7 @@ impl GamepadBinding {
                 output_pin(&self.output).expect("digital pad output")
             ),
             threshold: self.threshold,
+            toggle: self.toggle,
             repeat_ms: None,
             trigger: self.trigger,
             trigger_ms: self.trigger_ms,
@@ -85,6 +88,7 @@ pub(crate) fn standard_bindings(target: GamepadTarget) -> Vec<GamepadBinding> {
             input: name.clone(),
             output: name.clone(),
             threshold: crate::profile::default_threshold(),
+            toggle: false,
             trigger: Trigger::Down,
             trigger_ms: crate::profile::default_trigger_ms(),
             sustain: true,
@@ -141,6 +145,7 @@ pub(crate) fn validate(bindings: &[GamepadBinding]) -> Result<()> {
         if binding.is_analog() {
             ensure!(
                 binding.trigger == Trigger::Down
+                    && !binding.toggle
                     && binding.turbo_ms.is_none()
                     && !binding.allow_simultaneous,
                 "模拟摇杆和扳机行程映射需要使用按住方式"

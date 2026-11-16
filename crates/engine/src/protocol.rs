@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -121,6 +121,16 @@ pub struct DisplaySyncStatus {
     pub fallback_hz: u32,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MappingStatus {
+    pub name: String,
+    pub input: String,
+    pub output: String,
+    pub trigger: crate::profile::Trigger,
+    pub active: bool,
+    pub latched: bool,
+    pub reason: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Status {
     pub state: String,
     pub message: String,
@@ -132,6 +142,8 @@ pub struct Status {
     pub binding_capture: bool,
     #[serde(default)]
     pub active_layers: Vec<String>,
+    #[serde(default)]
+    pub mapping: Vec<MappingStatus>,
     #[serde(default)]
     pub visibility: crate::visibility::VisibilityStatus,
     #[serde(default)]
@@ -194,6 +206,7 @@ impl Default for Status {
             emitting: false,
             binding_capture: false,
             active_layers: vec![],
+            mapping: vec![],
             visibility: Default::default(),
             output_backend: None,
             output_gamepad: None,

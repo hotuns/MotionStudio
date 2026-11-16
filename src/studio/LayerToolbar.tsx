@@ -1,19 +1,21 @@
-import {useState} from 'react';
+import {useContext,useState} from 'react';
 import type {Profile,Status} from '../types';
 import {Dialog} from './Controls';
 import {LayerPanel} from './LayerPanel';
 import {StudioIcon} from './StudioIcon';
+import {PadInputCaptureContext} from './PadInputPicker';
 import styles from './LayerToolbar.module.css';
 
 export function LayerToolbar({profile,profileId,selected,onSelect,onUpdate,blocked,status}:{profile:Profile;profileId:string;selected:string;onSelect:(id:string)=>void;onUpdate:(change:(profile:Profile)=>void)=>void;blocked:boolean;status?:Status}) {
   const [managing,setManaging]=useState(false);
+  const recording=!!useContext(PadInputCaptureContext)?.recording;
   const active=status?.profile_id===profileId&&status.emitting;
   const hasLayers=!!profile.layers?.length;
   return <div className={styles.tools}>
     {active&&hasLayers&&<span className={styles.active} role="status">运行：{status.active_layers?.length?<span translate="no">{status.active_layers.join(' + ')}</span>:'基础层'}</span>}
-    {hasLayers&&<label className={styles.selector} title="选择要编辑的层；按住启用输入时才会在游戏中生效。">
+    {hasLayers&&<label className={styles.selector} title="选择要编辑的层；游戏中由该层的启用方式控制。">
       <span>编辑层</span>
-      <select aria-label="正在编辑的配置层" data-layer-selector value={selected} disabled={blocked} onChange={event=>onSelect(event.target.value)}>
+      <select aria-label="正在编辑的配置层" data-layer-selector value={selected} disabled={blocked||recording} onChange={event=>onSelect(event.target.value)}>
         <option value="">基础层</option>
         {(profile.layers??[]).map(layer=><option key={layer.id} value={layer.id} translate="no">{layer.name}</option>)}
       </select>
@@ -22,7 +24,7 @@ export function LayerToolbar({profile,profileId,selected,onSelect,onUpdate,block
       <StudioIcon name="settings" size={16}/>{!hasLayers&&<span>配置层</span>}
     </button>
     {managing&&<Dialog title="管理配置层" className={styles.dialog} onClose={()=>setManaging(false)}
-      description="配置层与当前配置一起保存。选择编辑层不会立即启用它，游戏中仍由按住输入控制。"
+      description="配置层与当前配置一起保存。选择编辑层不会立即启用它，游戏中由按住或切换输入控制。"
       actions={<button type="button" className="primary-btn" disabled={(profile.layers??[]).some(layer=>!layer.name.trim())} onClick={()=>setManaging(false)}>完成</button>}>
       <LayerPanel profile={profile} selected={selected} onSelect={onSelect} onUpdate={onUpdate} blocked={blocked} status={status?.profile_id===profileId?status:undefined}/>
     </Dialog>}

@@ -419,6 +419,7 @@ fn flick_source_block_applies_to_normal_mappings_and_keeps_physical_controls() {
         turbo_ms: None,
         allow_simultaneous: false,
         chord_wait_ms: 80,
+        toggle: false,
     };
     p.actions = vec![
         Action {

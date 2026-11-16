@@ -600,6 +600,10 @@ struct ActionState {
     repeat_armed: bool,
     elapsed: f32,
     gate: flexinput_engine::eval::PressGate,
+    latch: flexinput_engine::eval::SwitchLatch,
+    turbo_gate: flexinput_engine::eval::PressGate,
+    latch_serial: u64,
+    reason: &'static str,
     hold_back: flexinput_engine::eval::OutputHoldBack,
     competition: PressCompetition,
     blocked: bool,
@@ -702,6 +706,27 @@ fn stick_mouse_graph(profile: &Profile) -> GraphRunner {
     GraphRunner::new(vec![src, curve, rate, sink])
 }
 impl Engine {
+    /// Bounded UI snapshot, built at status cadence instead of per input sample.
+    pub fn mapping_status(&self) -> Vec<crate::protocol::MappingStatus> {
+        self.mapped_actions
+            .iter()
+            .zip(&self.action_states)
+            .map(|(action, state)| crate::protocol::MappingStatus {
+                name: action.name.clone(),
+                input: action.input.clone(),
+                output: action.output.clone(),
+                trigger: action.trigger,
+                active: state.active,
+                latched: state.latch.active(),
+                reason: if state.reason.is_empty() {
+                    "idle"
+                } else {
+                    state.reason
+                }
+                .into(),
+            })
+            .collect()
+    }
     pub fn new(mut profile: Profile) -> Result<Self> {
         profile.materialize_gamepad_bindings();
         profile.validate()?;
@@ -882,7 +907,7 @@ impl Engine {
                         ActionState {
                             raw: true,
                             active: true,
-                            blocked: action.trigger != Trigger::Down
+                            blocked: action.toggle || action.trigger != Trigger::Down
                                 || action.turbo_ms.is_some()
                                 || !competition.is_empty()
                                 || previous.is_some_and(|i| {
@@ -1487,14 +1512,21 @@ impl Engine {
             if disposition.consumed {
                 state.gate = Default::default();
                 state.hold_back = Default::default();
-                state.blocked = true;
+                state.latch = Default::default();
+                state.latch_serial = 0;
+                state.turbo_gate = Default::default();
+                state.reason = "consumed";
+                // Suppress this release, but clear the baseline immediately.
+                // FIFO release/repress edges need not have an idle tick between them.
+                state.blocked = raw;
                 state.active = false;
                 state.repeat_armed = false;
                 state.pending_scroll = [0; 2];
                 state.raw = raw;
                 continue;
             }
-            let immediate = action.trigger == Trigger::Down && state.competition.is_empty();
+            let immediate =
+                !action.toggle && action.trigger == Trigger::Down && state.competition.is_empty();
             if !immediate && raw && (!allow_toggle || !condition) {
                 state.blocked = true;
             }
@@ -1502,6 +1534,7 @@ impl Engine {
                 if !raw {
                     state.blocked = false;
                     state.gate = Default::default();
+                    state.latch_serial = 0;
                 }
                 false
             } else {
@@ -1509,8 +1542,8 @@ impl Engine {
                     condition,
                     action.trigger.as_str(),
                     action.trigger_ms,
-                    action.sustain,
-                    action.turbo_ms,
+                    action.toggle || action.sustain,
+                    if action.toggle { None } else { action.turbo_ms },
                     state.competition,
                     self.action_time_ns,
                 )
@@ -1519,6 +1552,40 @@ impl Engine {
                 state
                     .hold_back
                     .sample_at(active, disposition.waiting, self.action_time_ns);
+            let active = if action.toggle {
+                let serial = state.gate.activation_serial();
+                if allow_toggle && active && serial != state.latch_serial {
+                    state.latch.sample(false);
+                    state.latch.sample(true);
+                    state.latch_serial = serial;
+                }
+                let latched = state.latch.active();
+                state.turbo_gate.sample_at(
+                    latched,
+                    "down",
+                    action.trigger_ms,
+                    true,
+                    action.turbo_ms,
+                    PressCompetition::default(),
+                    self.action_time_ns,
+                )
+            } else {
+                active
+            };
+            state.reason = if state.blocked {
+                "blocked"
+            } else if disposition.waiting {
+                "waiting_chord"
+            } else if action.toggle && state.latch.active() {
+                "latched"
+            } else if active {
+                "active"
+            } else {
+                state
+                    .gate
+                    .pending_reason(state.competition)
+                    .unwrap_or("idle")
+            };
             if active {
                 if let Some(pin) = action.output.strip_prefix("pad:") {
                     if let Some(pad) = &mut self.physical_pad {

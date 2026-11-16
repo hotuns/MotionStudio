@@ -190,6 +190,8 @@ pub struct Profile {
     pub stick_rebound_ms: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<crate::layers::Layer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layer_reset_input: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -418,6 +420,8 @@ pub struct Action {
     pub name: String,
     pub input: String,
     pub output: String,
+    #[serde(default)]
+    pub toggle: bool,
     #[serde(default = "default_threshold")]
     pub threshold: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]

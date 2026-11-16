@@ -21,6 +21,7 @@ fn action(mode: Trigger) -> Action {
         turbo_ms: None,
         allow_simultaneous: false,
         chord_wait_ms: 80,
+        toggle: false,
     }
 }
 fn button(down: bool) -> InputEvent {
@@ -223,6 +224,8 @@ fn layers_merge_only_overrides_preserve_inheritance_and_roundtrip_nullable_field
     p.layers.push(Layer {
         activation_threshold: 0.5,
         activation_hysteresis: 0.1,
+        activation_mode: Default::default(),
+        exit_input: None,
         id: "ads".into(),
         name: "ADS".into(),
         input: "left_shoulder".into(),
@@ -275,6 +278,8 @@ fn layer_validation_rejects_conflicts_hidden_by_a_later_override() {
             input: "left_shoulder".into(),
             activation_threshold: 0.5,
             activation_hysteresis: 0.1,
+            activation_mode: Default::default(),
+            exit_input: None,
             settings: serde_json::from_value(patch).unwrap(),
             actions: vec![],
             disabled_inputs: vec![],

@@ -1,0 +1,6 @@
+.field { min-width: 0; }
+.row { display: grid; grid-template-columns: minmax(0,1fr) max-content; align-items: center; gap: 8px; min-width: 0; width: 100%; }
+.row > button, .row > input { box-sizing: border-box; height: 36px; min-height: 36px; margin: 0; }
+.row > button:last-child { white-space: nowrap; }
+.value { width: 100%; min-width: 0; padding: 7px 11px; border: 1px solid var(--border-1); border-radius: var(--control-radius); color: var(--text-strong); background: var(--bg-input); font: inherit; font-size: 12px; text-overflow: ellipsis; }
+.hint { margin: 8px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
