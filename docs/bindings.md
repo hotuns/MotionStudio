@@ -100,6 +100,7 @@ sustain = true
 [input]
 lstick_directions = "eight_way"
 rstick_directions = "axis_threshold"
+lstick_overlap_degrees = 45.0
 ```
 
-`eight_way` 使用 JSM 的八向重叠方向判定，动作阈值作用于摇杆整体幅度；默认 `axis_threshold` 保持原来的单轴阈值判定。
+`eight_way` 复用 JSM 的八向重叠方向判定，动作阈值作用于摇杆整体幅度。可用 `lstick_overlap_degrees` / `rstick_overlap_degrees` 分别指定 0–90° 的斜向双键范围；省略字段时保持原生约 36.87° 的重叠。默认 `axis_threshold` 保持原来的单轴阈值判定，不使用重叠角度。

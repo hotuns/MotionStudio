@@ -50,7 +50,7 @@ export type Gyro = {
   motion:MotionConfig;
 };
 export type StickDirections = 'axis_threshold'|'eight_way';
-export type ControllerInputConfig={deadzone_left?:number;deadzone_right?:number;lstick_directions?:StickDirections;rstick_directions?:StickDirections;lstick_center:number[];rstick_center:number[];lstick_radial:number[];rstick_radial:number[];ltrig_min:number;ltrig_max:number;rtrig_min:number;rtrig_max:number;digital_triggers:boolean;ltrig_digital_threshold:number;rtrig_digital_threshold:number;trig_hysteresis:number;trig_debounce_ms:number};
+export type ControllerInputConfig={deadzone_left?:number;deadzone_right?:number;lstick_directions?:StickDirections;rstick_directions?:StickDirections;lstick_overlap_degrees?:number|null;rstick_overlap_degrees?:number|null;lstick_center:number[];rstick_center:number[];lstick_radial:number[];rstick_radial:number[];ltrig_min:number;ltrig_max:number;rtrig_min:number;rtrig_max:number;digital_triggers:boolean;ltrig_digital_threshold:number;rtrig_digital_threshold:number;trig_hysteresis:number;trig_debounce_ms:number};
 export type FeedbackConfig={rumble_enabled:boolean;rumble_gain:number;lightbar_enabled:boolean;audio_haptics_enabled?:boolean;audio_haptics_gain?:number};
 export type HapticStatus={state:string;received_frames:number;sent_packets:number;dropped_frames:number;underrun_samples:number;clipped_samples:number;queued_ms:number;error:string|null};
 export type TouchpadConfig={enabled:boolean;pointer_speed:number;scroll_speed:number;natural_scroll:boolean};

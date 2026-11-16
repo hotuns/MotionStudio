@@ -201,5 +201,15 @@
   "统一用于方向映射与摇杆鼠标；外死区与特殊死区需核验": "Used for direction bindings and stick mouse; verify outer and special deadzone behavior",
   "已采用 JSM 八向重叠判定；斜向同时输出相邻两键，输入死区与其他摇杆模式需核验": "Uses JSM eight-way overlap: diagonals output adjacent keys together. Verify the input deadzone and other stick modes",
   "已转为摇杆区域输入；区域边界需核验": "Converted to a stick-region input; verify the region boundaries",
-  "动作触发阈值必须在 0–1 之间（不含 1）": "The action threshold must be between 0 and 1 (excluding 1)"
+  "动作触发阈值必须在 0–1 之间（不含 1）": "The action threshold must be between 0 and 1 (excluding 1)",
+  "左摇杆斜向重叠角度": "Left stick diagonal overlap angle",
+  "右摇杆斜向重叠角度": "Right stick diagonal overlap angle",
+  "左摇杆方向区域预览": "Left stick direction regions",
+  "右摇杆方向区域预览": "Right stick direction regions",
+  "单方向": "Single direction",
+  "相邻双方向": "Two adjacent directions",
+  "恢复默认角度": "Restore default angle",
+  "重叠角度越大，同时触发相邻两方向的范围越宽。0° 只触发单方向，90° 时除正方向外均触发相邻两方向。默认约 36.87°。": "A larger overlap angle makes adjacent directions activate together over a wider region. At 0°, only one direction activates; at 90°, all angles except the cardinal axes activate two adjacent directions. The default is about 36.87°.",
+  "每个斜向同时触发两键的角度范围。调大更容易斜向移动，调小更容易保持单方向；恢复默认可回到原来的判定范围。": "The angular width where each diagonal activates two keys. Increase it for easier diagonal movement, or decrease it to stay on one direction. Restore the default to use the original regions.",
+  "摇杆斜向重叠角度必须在 0–90 度之间": "Stick diagonal overlap angles must be between 0 and 90 degrees"
 }

@@ -46,7 +46,7 @@ export const settingsCatalog: SettingTarget[] = [
     ['output','体感与 Flick 输出'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),
   ...group('sticks','stick-input','input.',[['deadzone_left','左摇杆输入死区'], ['deadzone_right','右摇杆输入死区']]),
-  ...group('sticks','stick-directions','input.',[['lstick_directions','左摇杆方向判定'], ['rstick_directions','右摇杆方向判定']]),
+  ...group('sticks','stick-directions','input.',[['lstick_directions','左摇杆方向判定'], ['lstick_overlap_degrees','左摇杆斜向重叠角度'], ['rstick_directions','右摇杆方向判定'], ['rstick_overlap_degrees','右摇杆斜向重叠角度']]),
   ...group('sticks','stick-calibration','input.',[['lstick_center','左摇杆中心偏移'], ['rstick_center','右摇杆中心偏移'], ['lstick_radial','左摇杆圆周倍率'], ['rstick_radial','右摇杆圆周倍率']]),
   ...group('sticks','stick-zones','stick_zones.',[['left_outer','左摇杆外圈阈值'], ['right_outer','右摇杆外圈阈值'], ['hysteresis','区域切换回差']]),
   ...group('sticks','stick-input','', [['stick_rebound_ms','防回弹窗口','启用摇杆防回弹']]),

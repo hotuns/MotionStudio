@@ -2,5 +2,6 @@
   "radial_buckets": 72,
   "trigger_digital_threshold": 0.1,
   "trigger_hysteresis": 0.02,
-  "trigger_debounce_ms": 4
+  "trigger_debounce_ms": 4,
+  "stick_direction_ratio": 0.5
 }

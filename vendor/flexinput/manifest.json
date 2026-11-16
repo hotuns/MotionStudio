@@ -229,9 +229,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/analog.rs",
       "upstreamSha256": "5507641cfc818588a30cced635ce178ab98581bfaaaa59b33f4646f6c9ab4895",
-      "vendoredSha256": "0f204d5910c5db3a05449fe390e94e6ce799599e72219cf69260f25ef838d2a6",
+      "vendoredSha256": "c06ef9cad1bcaaec13eb6e05fe3fdfa6def51569fc334f1ceab7db70e6d2cb8a",
       "modified": true,
-      "notes": "Add a trigger-only headless entry point that calls the original analog state machine. Extract the unchanged NoMouse overlapping direction predicate for both native JSM and Studio callers."
+      "notes": "Add a trigger-only headless entry point that calls the original analog state machine. Share the NoMouse direction predicate between native JSM and Studio; expose its component ratio for configurable overlap while preserving the native 0.5 entry. A ratio of 1 assigns exact diagonal ties horizontally to avoid a zero-overlap gap."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/bind.rs",
@@ -297,9 +297,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/mod.rs",
       "upstreamSha256": "e317c5c110afcdbaa630e0ea9006b0c3bc3a0a944495997e5fe3afdd2907797e",
-      "vendoredSha256": "90355c9a9551bc3aec153b6daa99ae027003213015bb652f520cf3bc16a3b467",
+      "vendoredSha256": "d1e18804370b85091c4ec863d1e69bf86e3506d720bd48472dcae3c2c3ac6427",
       "modified": true,
-      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point and shared NoMouse stick direction predicate."
+      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point, shared NoMouse stick direction predicate and its configurable-ratio entry."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/motion.rs",
@@ -358,9 +358,9 @@
     {
       "path": "crates/engine/src/eval/modules/mod.rs",
       "upstreamSha256": "09db165887dde2c343b4b8f461af4f22acb0c747aa378cec8d77615aa8d7e2ce",
-      "vendoredSha256": "40c70e37ebb69f7f2652cfcbcf6f160a8c05c187af342d7ec424edf45d496b84",
+      "vendoredSha256": "462ddff38e47ad805ff73fa7091f558da9c29e5ef8c3219ab1739fb55e060243",
       "modified": true,
-      "notes": "Compile JSM Config and expose its parser, trigger-only entry point and shared NoMouse direction predicate in the headless evaluator."
+      "notes": "Compile JSM Config and expose its parser, trigger-only entry point and shared NoMouse direction predicate, including the configurable-ratio entry, in the headless evaluator."
     },
     {
       "path": "crates/engine/src/eval/modules/remapper.rs",

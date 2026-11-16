@@ -1,0 +1,10 @@
+.preview { display: flex; align-items: center; gap: 20px; margin: 8px 0 16px; padding: 8px 12px; }
+.preview svg { width: 128px; height: 128px; flex-shrink: 0; }
+.preview path { stroke: var(--border-1); stroke-width: .7; }
+.preview text { fill: var(--text-strong); font-size: 14px; }
+.cardinal { fill: var(--bg-1-5); background: var(--bg-1-5); }
+.diagonal { fill: color-mix(in srgb, var(--accent) 30%, var(--bg-2)); background: color-mix(in srgb, var(--accent) 30%, var(--bg-2)); }
+.legend { display: grid; gap: 9px; color: var(--text-mid); font-size: 12px; }
+.legend > span { display: flex; align-items: center; gap: 7px; }
+.legend i { width: 12px; height: 12px; border: 1px solid var(--border-1); border-radius: 3px; }
+.legend button { margin-top: 3px; }

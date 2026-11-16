@@ -68,9 +68,23 @@ impl TriggerMode {
 
 /// JSM's overlapping direction sectors, after calibration and deadzones.
 /// Ordered left, right, up, down. A diagonal asserts both adjacent directions.
+pub const STICK_DIRECTION_RATIO: f32 = 0.5;
+
 pub fn digital_stick_directions(x: f32, y: f32) -> [bool; 4] {
+    digital_stick_directions_with_ratio(x, y, STICK_DIRECTION_RATIO)
+}
+
+/// Studio's configurable seam for the same predicate. The original JSM caller
+/// keeps ratio 0.5; 0..=1 spans full diagonal overlap through cardinal-only.
+pub fn digital_stick_directions_with_ratio(x: f32, y: f32, ratio: f32) -> [bool; 4] {
+    let ratio = ratio.clamp(0.0, 1.0);
     let (ax, ay) = (x.abs(), y.abs());
-    [x < -0.5 * ay, x > 0.5 * ay, y > 0.5 * ax, y < -0.5 * ax]
+    // With no overlap, assign the exact diagonal to the horizontal direction
+    // instead of leaving a gap where both strict comparisons would be false.
+    if ratio == 1.0 && ax == ay && ax > 0.0 {
+        return [x < 0.0, x > 0.0, false, false];
+    }
+    [x < -ratio * ay, x > ratio * ay, y > ratio * ax, y < -ratio * ax]
 }
 
 /// The stick modes this module runs, plus one standing for the rest.

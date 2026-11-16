@@ -97,12 +97,22 @@ pub enum StickDirections {
 }
 
 impl StickDirections {
-    pub(crate) fn values(self, value: Vec2) -> [f32; 4] {
+    pub(crate) fn values(self, value: Vec2, overlap_degrees: Option<f32>) -> [f32; 4] {
         match self {
             Self::AxisThreshold => [-value.x, value.x, value.y, -value.y].map(|v| v.max(0.)),
             Self::EightWay => {
                 let magnitude = value.length().min(1.);
-                flexinput_engine::eval::jsm_stick_directions(value.x, value.y).map(|active| {
+                let active = if let Some(degrees) = overlap_degrees {
+                    let ratio = if degrees == 0. {
+                        1.
+                    } else {
+                        ((90. - degrees) * 0.5).to_radians().tan()
+                    };
+                    flexinput_engine::eval::jsm_stick_directions_with_ratio(value.x, value.y, ratio)
+                } else {
+                    flexinput_engine::eval::jsm_stick_directions(value.x, value.y)
+                };
+                active.map(|active| {
                     if active {
                         magnitude
                     } else {
@@ -123,6 +133,10 @@ pub struct InputConfig {
     pub deadzone_right: Option<f32>,
     pub lstick_directions: StickDirections,
     pub rstick_directions: StickDirections,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lstick_overlap_degrees: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rstick_overlap_degrees: Option<f32>,
     pub lstick_center: [f32; 2],
     pub rstick_center: [f32; 2],
     pub lstick_radial: Vec<f32>,
@@ -145,6 +159,8 @@ impl Default for InputConfig {
             deadzone_right: None,
             lstick_directions: StickDirections::default(),
             rstick_directions: StickDirections::default(),
+            lstick_overlap_degrees: None,
+            rstick_overlap_degrees: None,
             lstick_center: [0.; 2],
             rstick_center: [0.; 2],
             lstick_radial: vec![1.; RADIAL_BUCKETS],
@@ -163,6 +179,15 @@ impl Default for InputConfig {
 }
 impl InputConfig {
     pub fn validate(&self) -> Result<()> {
+        for value in [self.lstick_overlap_degrees, self.rstick_overlap_degrees]
+            .into_iter()
+            .flatten()
+        {
+            ensure!(
+                value.is_finite() && (0.0..=90.0).contains(&value),
+                "摇杆斜向重叠角度必须在 0–90 度之间"
+            );
+        }
         for value in [self.deadzone_left, self.deadzone_right]
             .into_iter()
             .flatten()
@@ -241,6 +266,8 @@ impl InputConfig {
             .collect();
         params.remove("deadzone_left");
         params.remove("deadzone_right");
+        params.remove("lstick_overlap_degrees");
+        params.remove("rstick_overlap_degrees");
         params.insert("deadzone".into(), json!(self.deadzone(profile, true)));
         params.insert("deadzone_r".into(), json!(self.deadzone(profile, false)));
         params.insert(

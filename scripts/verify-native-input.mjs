@@ -5,7 +5,7 @@ const numeric=(file,name)=>{
   return Number(match[1]);
 };
 const automap='vendor/flexinput/crates/core/src/automap.rs';
-const defaults={radial_buckets:numeric('vendor/flexinput/crates/engine/src/eval/device_cal.rs','STICK_RADIAL_BUCKETS'),trigger_digital_threshold:numeric(automap,'TRIGGER_DIGITAL_THRESHOLD'),trigger_hysteresis:numeric(automap,'TRIGGER_HYSTERESIS'),trigger_debounce_ms:numeric(automap,'TRIGGER_DEBOUNCE_MS')};
+const defaults={radial_buckets:numeric('vendor/flexinput/crates/engine/src/eval/device_cal.rs','STICK_RADIAL_BUCKETS'),trigger_digital_threshold:numeric(automap,'TRIGGER_DIGITAL_THRESHOLD'),trigger_hysteresis:numeric(automap,'TRIGGER_HYSTERESIS'),trigger_debounce_ms:numeric(automap,'TRIGGER_DEBOUNCE_MS'),stick_direction_ratio:numeric('vendor/flexinput/crates/engine/src/eval/modules/jsm/analog.rs','STICK_DIRECTION_RATIO')};
 const path='src/native-input-defaults.json';
 if(process.argv.includes('--write'))writeFileSync(path,JSON.stringify(defaults,null,2)+'\n');
 else if(JSON.stringify(JSON.parse(readFileSync(path,'utf8')))!==JSON.stringify(defaults))throw Error('Native input defaults changed; regenerate the UI metadata from the pinned source.');

@@ -2396,5 +2396,15 @@
   "按住时暂停 Flick 和配套摇杆瞄准，取消剩余转角并交还原始摇杆；松开后恢复。若暂停时摇杆已在外圈，先回中再重新推杆。它与体感暂停独立，与按住启用互斥。": "Hold to pause Flick and companion stick aim, cancel the remaining turn, and restore the original stick mapping. Release to resume. If the stick was at the rim while paused, return it to center before pushing again. This is independent of gyro pause and mutually exclusive with hold to enable.",
   "计数/s": "counts/s",
   "最大移动速度控制满杆速度；响应值越大，小幅推杆越慢，1 为线性。游戏内转速还取决于游戏鼠标灵敏度。": "Maximum speed controls full-stick speed. Higher response values slow partial stick movement; 1 is linear. In-game turning speed also depends on the game mouse sensitivity.",
-  "摇杆推满时每秒发送的鼠标计数。调大移动更快；游戏内转速还取决于游戏鼠标灵敏度，小幅推杆的速度还取决于响应曲线。": "Mouse counts sent per second at full stick deflection. Higher values move faster. In-game turning speed also depends on the game mouse sensitivity, and partial stick speed depends on the response curve."
+  "摇杆推满时每秒发送的鼠标计数。调大移动更快；游戏内转速还取决于游戏鼠标灵敏度，小幅推杆的速度还取决于响应曲线。": "Mouse counts sent per second at full stick deflection. Higher values move faster. In-game turning speed also depends on the game mouse sensitivity, and partial stick speed depends on the response curve.",
+  "左摇杆斜向重叠角度": "Left stick diagonal overlap angle",
+  "右摇杆斜向重叠角度": "Right stick diagonal overlap angle",
+  "左摇杆方向区域预览": "Left stick direction regions",
+  "右摇杆方向区域预览": "Right stick direction regions",
+  "单方向": "Single direction",
+  "相邻双方向": "Two adjacent directions",
+  "恢复默认角度": "Restore default angle",
+  "重叠角度越大，同时触发相邻两方向的范围越宽。0° 只触发单方向，90° 时除正方向外均触发相邻两方向。默认约 36.87°。": "A larger overlap angle makes adjacent directions activate together over a wider region. At 0°, only one direction activates; at 90°, all angles except the cardinal axes activate two adjacent directions. The default is about 36.87°.",
+  "每个斜向同时触发两键的角度范围。调大更容易斜向移动，调小更容易保持单方向；恢复默认可回到原来的判定范围。": "The angular width where each diagonal activates two keys. Increase it for easier diagonal movement, or decrease it to stay on one direction. Restore the default to use the original regions.",
+  "摇杆斜向重叠角度必须在 0–90 度之间": "Stick diagonal overlap angles must be between 0 and 90 degrees"
 }

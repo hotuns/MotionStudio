@@ -1,10 +1,11 @@
-import {useState} from 'react';
+import {Fragment,useState} from 'react';
 import {Dialog, Range, Toggle} from './Controls';
 import {inputConfig, inputDeadzone, setInputDeadzone} from '../controller-input';
 import type {ControllerInputConfig, Profile, StickDirections} from '../types';
 import native from '../native-input-defaults.json';
 import styles from './MotionControls.module.css';
 import {SettingField,SettingLabel,SettingSection,settingStyles} from './SettingLayout';
+import {StickOverlapPreview} from './StickOverlapPreview';
 
 type Props = {profile: Profile; update: (change: (profile: Profile) => void) => void};
 
@@ -27,16 +28,30 @@ export function StickInputSettings({profile,update}:Props) {
 
 export function StickDirectionSettings({profile,update}:Props) {
   const c=inputConfig(profile);
+  const defaultOverlap=Number((90-2*Math.atan(native.stick_direction_ratio)*180/Math.PI).toFixed(2));
   return <SettingSection id="stick-directions" title="摇杆方向映射" summary="按轴阈值或八向重叠">
-    {(['lstick_directions','rstick_directions'] as const).map((key,index)=>
-      <SettingField key={key} label={index===0?'左摇杆方向判定':'右摇杆方向判定'} path={'input.'+key}>
+    {(['lstick_directions','rstick_directions'] as const).map((key,index)=>{
+      const overlapKey=index===0?'lstick_overlap_degrees':'rstick_overlap_degrees';
+      const degrees=c[overlapKey]??defaultOverlap;
+      return <Fragment key={key}>
+      <SettingField label={index===0?'左摇杆方向判定':'右摇杆方向判定'} path={'input.'+key}>
         <div className={settingStyles.row}><SettingLabel label={index===0?'左摇杆方向判定':'右摇杆方向判定'}/>
           <select aria-label={index===0?'左摇杆方向判定':'右摇杆方向判定'} value={c[key]??'axis_threshold'} onChange={event=>update(p=>{p.input={...inputConfig(p),[key]:event.target.value as StickDirections};})}>
             <option value="eight_way">八向重叠（适合 WASD）</option><option value="axis_threshold">按轴阈值</option>
           </select>
         </div>
-      </SettingField>)}
+      </SettingField>
+      {c[key]==='eight_way'&&<>
+        <Range label={index===0?'左摇杆斜向重叠角度':'右摇杆斜向重叠角度'} settingPath={'input.'+overlapKey}
+          value={degrees} min={0} max={90} step={0.01} unit="°"
+          onChange={value=>update(p=>{p.input={...inputConfig(p),[overlapKey]:value};})}/>
+        <StickOverlapPreview degrees={degrees} label={index===0?'左摇杆方向区域预览':'右摇杆方向区域预览'}
+          onReset={()=>update(p=>{p.input={...inputConfig(p),[overlapKey]:null};})}/>
+      </>}
+      </Fragment>;
+    })}
     <p className={styles.hint}>八向重叠：斜推同时触发相邻两键，例如 W+D；映射阈值按摇杆整体推离中心的幅度判断。按轴阈值：水平和垂直方向分别达到阈值才触发。</p>
+    {(c.lstick_directions==='eight_way'||c.rstick_directions==='eight_way')&&<p className={styles.hint}>重叠角度越大，同时触发相邻两方向的范围越宽。0° 只触发单方向，90° 时除正方向外均触发相邻两方向。默认约 36.87°。</p>}
   </SettingSection>;
 }
 

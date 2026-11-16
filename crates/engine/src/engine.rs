@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 
-use crate::controller_input::{NativeInput, SOURCE, TRIGGER_STAGE_PINS};
+use crate::controller_input::{NativeInput, StickDirections, SOURCE, TRIGGER_STAGE_PINS};
 const ACTIONS: &str = "studio.actions";
 const PAD: &str = "studio.pad";
 const GYRO: &str = "studio.gyro";
@@ -822,8 +822,14 @@ impl Engine {
             self.stick_mouse_graph = stick_mouse_graph(&profile);
         }
         let directions_changed = [
-            profile.input.lstick_directions != self.profile.input.lstick_directions,
-            profile.input.rstick_directions != self.profile.input.rstick_directions,
+            profile.input.lstick_directions != self.profile.input.lstick_directions
+                || (profile.input.lstick_directions == StickDirections::EightWay
+                    && profile.input.lstick_overlap_degrees
+                        != self.profile.input.lstick_overlap_degrees),
+            profile.input.rstick_directions != self.profile.input.rstick_directions
+                || (profile.input.rstick_directions == StickDirections::EightWay
+                    && profile.input.rstick_overlap_degrees
+                        != self.profile.input.rstick_overlap_degrees),
         ];
         let controls_changed = profile.actions != self.profile.actions
             || profile.stick_deadzone != self.profile.stick_deadzone
@@ -1041,9 +1047,13 @@ impl Engine {
                 self.profile.input.lstick_directions,
                 self.profile.input.rstick_directions,
             ][i];
+            let overlap = [
+                self.profile.input.lstick_overlap_degrees,
+                self.profile.input.rstick_overlap_degrees,
+            ][i];
             for (direction, value) in ["left", "right", "up", "down"]
                 .into_iter()
-                .zip(directions.values(value))
+                .zip(directions.values(value, overlap))
             {
                 self.signals.set_pin(
                     SOURCE,
@@ -1339,8 +1349,12 @@ impl Engine {
         } else {
             "right_stick"
         });
+        let overlap = [
+            base.input.lstick_overlap_degrees,
+            base.input.rstick_overlap_degrees,
+        ][index];
         let directions =
-            [base.input.lstick_directions, base.input.rstick_directions][index].values(value);
+            [base.input.lstick_directions, base.input.rstick_directions][index].values(value, overlap);
         match part {
             "left" => directions[0],
             "right" => directions[1],
