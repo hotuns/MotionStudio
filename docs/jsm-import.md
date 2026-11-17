@@ -37,7 +37,7 @@ ZRF = LMOUSE
 | `GYRO_TRACK_X/Y`、`GYRO_TRACKBALL` | 转为横向／纵向惯性体感按键。 |
 | 坐标与轴向 | LOCAL、PLAYER／PLAYER_TURN、WORLD／WORLD_TURN、默认俯仰偏航、本地横滚和标准／反转。玩家／世界模式需要加速度计。 |
 | 平滑和曲线 | 支持范围内的时间平滑、衰减平滑、One Euro、角度吸附、低速截止、减速刹车；六类 ACCEL_CURVE 及对应参数。算法或区间差异会提示。 |
-| 摇杆 | NO_MOUSE 的原生八向重叠判定和一个摇杆的 AIM／FLICK／FLICK_ONLY、方向绑定、统一／分侧死区与部分拨动参数。FLICK_ONLY 转为「仅拨动（关闭外圈扫动）」，FLICK_SNAP_MODE（NONE／4／8）和 FLICK_SNAP_STRENGTH 转为初始角度吸附。方向绑定在输入死区之外立即响应，斜推同时触发相邻两键；外死区和其他模式仍需核验。关闭体感时，导入的摇杆瞄准／拨动使用独立启用选项，不会因此开启体感。 |
+| 摇杆 | NO_MOUSE 的原生八向重叠判定和一个摇杆的 AIM／FLICK／FLICK_ONLY、方向绑定、统一／分侧死区与部分拨动参数。FLICK_ONLY 转为「仅拨动（关闭外圈转动）」，FLICK_SNAP_MODE（NONE／4／8）和 FLICK_SNAP_STRENGTH 转为初始角度吸附。方向绑定在输入死区之外立即响应，斜推同时触发相邻两键；外死区和其他模式仍需核验。关闭体感时，导入的摇杆瞄准／拨动使用独立启用选项，不会因此开启体感。 |
 | 扳机 | 左右轻拉和全拉、`TRIGGER_THRESHOLD`、`TRIGGER_SKIP_DELAY`、双段模式及完整标准虚拟手柄透传。 |
 | 标准 Xbox／DS4 布局 | 完整的标准按钮、左右摇杆和扳机会导入为显式手柄映射。部分或重排布局仍保留在导入报告，可在动作映射中手动重建。 |
 
