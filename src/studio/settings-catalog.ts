@@ -43,7 +43,7 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('motion','motion-direction-stability','gyro.motion.',[['angle_snap','水平／垂直吸附角'], ['angle_snap_ease','柔和进入角度吸附'], ['drift_correction','使用重力修正姿态漂移']]),
   ...group('motion','motion-filters','gyro.',[['timestamp_source','采样时钟'], ['motion.custom_filters','自定义滤波']]),
   ...group('motion','motion-calibration','gyro.',[
-    ['output','体感与 Flick 输出'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
+    ['output','体感与拨动输出'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),
   ...group('sticks','stick-input','input.',[['deadzone_left','左摇杆输入死区'], ['deadzone_right','右摇杆输入死区']]),
   ...group('sticks','stick-directions','input.',[['lstick_directions','左摇杆方向判定'], ['lstick_overlap_degrees','左摇杆斜向重叠角度'], ['rstick_directions','右摇杆方向判定'], ['rstick_overlap_degrees','右摇杆斜向重叠角度']]),
@@ -52,14 +52,15 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('sticks','stick-input','', [['stick_rebound_ms','防回弹窗口','启用摇杆防回弹']]),
   ...group('sticks','stick-mouse','stick_mouse.',[['enabled','启用摇杆鼠标'], ['stick','摇杆鼠标使用的摇杆'], ['speed','最大移动速度'], ['exponent','摇杆鼠标响应']]),
   ...group('sticks','flick-main','gyro.motion.flick.',[
-    ['enabled','启用 Flick Stick'], ['smooth_ms','180° 基准释放时间','转角释放时间 转身完成时间'], ['time_exponent','按转角调整时间','Flick 时间指数 FLICK_TIME_EXPONENT'], ['release_ease','转角缓出强度'], ['stick','Flick 使用的摇杆'], ['deadzone','快推转身阈值'],
+    ['only','仅拨动（关闭外圈扫动）','FLICK_ONLY'], ['snap_mode','拨动角度吸附','FLICK_SNAP_MODE'], ['snap_strength','拨动角度吸附强度','FLICK_SNAP_STRENGTH'],
+    ['enabled','启用拨动与扫动'], ['smooth_ms','180° 基准释放时间','转角释放时间 转身完成时间'], ['time_exponent','按转角调整时间','拨动时间指数 FLICK_TIME_EXPONENT'], ['release_ease','转角缓出强度'], ['stick','拨动使用的摇杆'], ['deadzone','拨动转身阈值'],
   ]),
   ...group('sticks','flick-shared','gyro.motion.flick.',[
     ['standalone','关闭体感时也启用'],
-    ['enable_input','按住启用（不设置则常开）'], ['pause_input','按住暂停 Flick','暂停摇杆瞄准'], ['suppress','原始摇杆输出'],
+    ['enable_input','按住启用（不设置则常开）'], ['pause_input','按住暂停拨动','暂停摇杆瞄准'], ['suppress','原始摇杆输出'],
   ]),
-  ...group('sticks','flick-tracking','gyro.motion.flick.',[['release_ratio','追踪下限比例'], ['disengage_ms','Flick 退出延时'], ['stabilise_ms','绕圈方向稳定']]),
-  ...group('sticks','flick-trigger','gyro.motion.flick.',[['forward_deadzone','正前方死角'], ['speed_gate_ms','快速推杆判定时间'], ['slow_lock','慢推锁定为连续瞄准']]),
+  ...group('sticks','flick-tracking','gyro.motion.flick.',[['release_ratio','追踪下限比例'], ['disengage_ms','拨动退出延时'], ['stabilise_ms','扫动方向稳定']]),
+  ...group('sticks','flick-trigger','gyro.motion.flick.',[['forward_deadzone','正前方死角'], ['speed_gate_ms','拨动判定时间'], ['slow_lock','慢推锁定为连续瞄准']]),
   ...group('sticks','stick-aim','gyro.motion.flick.',[['stick_aim','启用配套摇杆瞄准'], ['aim_sensitivity','摇杆瞄准倍率'], ['max_dps','连续瞄准基础转速'], ['vertical_ratio','摇杆纵向比例']]),
   ...group('triggers','trigger-stages','trigger_stages.',[
     ['left_mode','左扳机全拉模式'], ['right_mode','右扳机全拉模式'], ['soft_threshold','轻拉阈值','随扳机移动触发轻拉'], ['skip_delay_ms','快速全拉时间窗'],

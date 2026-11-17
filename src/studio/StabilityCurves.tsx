@@ -89,7 +89,7 @@ export function FlickReleaseCurve({strength}: {strength: number}) {
 
   return <>
     <div className={styles.curveLegend}><span>匀速参考</span><span>当前释放曲线</span></div>
-    <ResponseCurve title="Flick 转角释放" points={points} xLabel="时间进度（%）" yLabel="已完成转角（%）"/>
+    <ResponseCurve title="拨动转角释放" points={points} xLabel="时间进度（%）" yLabel="已完成转角（%）"/>
     {failed && <p role="status" className="studio-muted">曲线暂未更新，请检查当前参数。</p>}
   </>;
 }

@@ -222,9 +222,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/aim.rs",
       "upstreamSha256": "481997db60aea3944217a537c89f4a238225b59706912062d273def7851aa299",
-      "vendoredSha256": "5737e1a97dec499a76b3c3c82337118d9b45ad962bd96c9dfa4b4b1acafe6c04",
+      "vendoredSha256": "f64e0229d837d5a3043cde1f1fb650864c5a71ba22564f86051698b0f4a3e4a3",
       "modified": true,
-      "notes": "Headless gyro sample timing with the original per-sample math and filter order. Both Flick sites now call the shared original easing expression in eval/curves.rs. Reuse flick_time_scale at both existing time-exponent call sites without changing JSM timing behavior."
+      "notes": "Headless gyro sample timing with the original per-sample math and filter order. Both Flick sites now call the shared original easing expression in eval/curves.rs. Reuse flick_time_scale at both existing time-exponent call sites without changing JSM timing behavior. Extract unchanged initial flick snapping and FLICK_ONLY rotation decision for shared JSM/RWS use."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/analog.rs",
@@ -297,9 +297,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/mod.rs",
       "upstreamSha256": "e317c5c110afcdbaa630e0ea9006b0c3bc3a0a944495997e5fe3afdd2907797e",
-      "vendoredSha256": "d1e18804370b85091c4ec863d1e69bf86e3506d720bd48472dcae3c2c3ac6427",
+      "vendoredSha256": "66eef6c884c9592a1ec0109fa40cb39d420b1f2bffd83c63b30e1f74bee837d9",
       "modified": true,
-      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point, shared NoMouse stick direction predicate and its configurable-ratio entry."
+      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point, shared NoMouse stick direction predicate and its configurable-ratio entry. Expose native aim defaults and internal shared flick snapping/mode helpers."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/motion.rs",
@@ -358,9 +358,9 @@
     {
       "path": "crates/engine/src/eval/modules/mod.rs",
       "upstreamSha256": "09db165887dde2c343b4b8f461af4f22acb0c747aa378cec8d77615aa8d7e2ce",
-      "vendoredSha256": "462ddff38e47ad805ff73fa7091f558da9c29e5ef8c3219ab1739fb55e060243",
+      "vendoredSha256": "6c33c1ca7a21a4a46e8c9fd086102fe9b219efde4187d5e90489f5074d2398e2",
       "modified": true,
-      "notes": "Compile JSM Config and expose its parser, trigger-only entry point and shared NoMouse direction predicate, including the configurable-ratio entry, in the headless evaluator."
+      "notes": "Compile JSM Config and expose its parser, trigger-only entry point and shared NoMouse direction predicate, including the configurable-ratio entry, in the headless evaluator. Re-export native JSM aim defaults to the Studio adapter."
     },
     {
       "path": "crates/engine/src/eval/modules/remapper.rs",
@@ -377,9 +377,9 @@
     {
       "path": "crates/engine/src/eval/modules/rws.rs",
       "upstreamSha256": "fd7e3f0d1a07eaff77c40e24bdde560fc7a43b69e6ccfb549a467e2ccf393c96",
-      "vendoredSha256": "61e18bf9fa2f519a9700e0f9b101a1fe2dd2d628d49134303fc3628576313972",
+      "vendoredSha256": "a3862d401920e47ed69987b9205864aaa3564feddc03bd8d7b43dae1fe82995d",
       "modified": true,
-      "notes": "Add optional flick_release_ease (default 0 for upstream callers, range 0–1) for the initial Flick. Strength 0.5 reproduces JSM quadratic easing. Preserve total angle and duration with two cumulative-progress state slots. Optional flick_input_dt lets Studio observe FIFO gestures between output ticks; the default keeps the original single-clock behavior. Optional flick_release_ratio exposes the tracking threshold in the native state machine while preserving the original default for callers that omit it. Optional flick_disengage_ms exposes the sustained release hold (0–60 ms). Callers that omit it keep 60 ms. Optional flick_time_exponent (0–2, default 0) scales initial release duration relative to 180 degrees using the shared JSM helper; tracking/catch-up timing is unchanged. Immediate retriggers discard stale initial payout."
+      "notes": "Add optional flick_release_ease (default 0 for upstream callers, range 0–1) for the initial Flick. Strength 0.5 reproduces JSM quadratic easing. Preserve total angle and duration with two cumulative-progress state slots. Optional flick_input_dt lets Studio observe FIFO gestures between output ticks; the default keeps the original single-clock behavior. Optional flick_release_ratio exposes the tracking threshold in the native state machine while preserving the original default for callers that omit it. Optional flick_disengage_ms exposes the sustained release hold (0–60 ms). Callers that omit it keep 60 ms. Optional flick_time_exponent (0–2, default 0) scales initial release duration relative to 180 degrees using the shared JSM helper; tracking/catch-up timing is unchanged. Immediate retriggers discard stale initial payout. Accept JSM initial-angle snapping and flick-only tracking suppression; retain initial payout, clocks and calibration."
     },
     {
       "path": "crates/engine/src/eval/modules/shared.rs",

@@ -6,6 +6,7 @@ import { StudioIcon, type StudioIconName } from './StudioIcon';
 import type { StudioPage } from './StudioShell';
 import type { GameTab } from './game-tabs';
 import styles from './StudioOverview.module.css';
+import type {ComponentPlan} from '../component-setup';
 
 type Props = {
   profile?: Profile;
@@ -15,6 +16,8 @@ type Props = {
   guideStep: GuideStep;
   onGuideStepChange: (step: GuideStep) => void;
   onNavigate: (page: StudioPage, tab?: GameTab) => void;
+  componentPlan: ComponentPlan;
+  onOpenComponents: () => void;
 };
 
 const tools: {page: StudioPage; tab?: GameTab; icon: StudioIconName; title: string; description: string}[] = [
@@ -26,7 +29,7 @@ const tools: {page: StudioPage; tab?: GameTab; icon: StudioIconName; title: stri
   {page:'settings', icon:'settings', title:'设置与组件', description:'软件偏好、驱动与输出'},
 ];
 
-export function StudioOverview({ profile, device, status, deviceCount, guideStep, onGuideStepChange, onNavigate }: Props) {
+export function StudioOverview({ profile, device, status, deviceCount, guideStep, onGuideStepChange, onNavigate, componentPlan, onOpenComponents }: Props) {
   const [guideOpen, setGuideOpen] = useState(false);
   const guideButton = useRef<HTMLButtonElement>(null);
   const usableDevice = device?.gamepad && device.origin !== 'virtual' && !device.open_error;
@@ -150,7 +153,8 @@ export function StudioOverview({ profile, device, status, deviceCount, guideStep
     <p className={styles.purpose}>将手柄操作转换为键盘、鼠标或虚拟手柄输入，支持体感瞄准。</p>
     {guideOpen && <QuickStartGuide step={guideStep} onStepChange={onGuideStepChange}
       device={device} live={live} profile={profile} onClose={closeGuide}
-      onFinish={() => { onGuideStepChange('input'); closeGuide(); }}
+      onFinish={() => { onGuideStepChange('components'); closeGuide(); }}
+      componentPlan={componentPlan} onOpenComponents={()=>{closeGuide();onOpenComponents();}}
       onOpenDevices={() => openGuideDestination('controllerStatus')}
       onOpenProfiles={() => openGuideDestination('profiles')}
       onOpenActions={() => openGuideDestination('games', 'actions')} />}

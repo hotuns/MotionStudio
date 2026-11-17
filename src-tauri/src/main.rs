@@ -705,8 +705,17 @@ async fn restore_backup(app: tauri::AppHandle, state: State<'_, AppState>, id: S
     .await
 }
 #[tauri::command]
-async fn component_status(app: tauri::AppHandle) -> Result<components::ComponentsStatus, String> {
-    background(move || components::get_status(&app)).await
+async fn component_status(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<components::ComponentsStatus, String> {
+    let state = state.inner().clone();
+    background(move || {
+        let _lock = state.operations.lock().map_err(text)?;
+        let visibility = state.client.snapshot.lock().map_err(text)?.status.visibility.clone();
+        components::get_status(&app, &visibility)
+    })
+    .await
 }
 #[tauri::command]
 async fn component_action(
@@ -739,10 +748,15 @@ async fn install_component(
     state: State<'_, AppState>,
     kind: String,
 ) -> Result<installers::InstallResult, String> {
-    if kind == "hidmaestro" && active(state.inner()) {
-        return Err("请先停止映射或观察，再安装 HIDMaestro 驱动".into());
-    }
-    background(move || installers::install(&app, &kind)).await
+    let state = state.inner().clone();
+    background(move || {
+        let _lock = state.operations.lock().map_err(text)?;
+        if active(&state) {
+            return Err("请先停止映射或观察，再安装组件。".into());
+        }
+        installers::install(&app, &kind)
+    })
+    .await
 }
 #[tauri::command]
 async fn open_location(state: State<'_, AppState>, kind: String) -> Result<(), String> {
@@ -755,6 +769,7 @@ async fn open_location(state: State<'_, AppState>, kind: String) -> Result<(), S
                 .map_err(text)
         }
         "releases" => open::that("https://github.com/hotuns/MotionStudio/releases").map_err(text),
+        "usbip" => open::that("https://github.com/vadimgrn/usbip-win2#readme").map_err(text),
         "hidhide" | "gamepads" => components::open_tool(&kind),
         _ => Err("未知位置".into()),
     })

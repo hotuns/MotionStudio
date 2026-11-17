@@ -1,4 +1,5 @@
 use crate::runtime;
+use motion_core::visibility::{policy::DriverState, VisibilityStatus};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -73,8 +74,10 @@ pub struct ComponentsStatus {
     pub hidhide: DriverInfo,
     pub vigem: DriverInfo,
     pub hidmaestro: DriverInfo,
+    pub usbip: DriverInfo,
     pub cli_available: bool,
     pub control_available: bool,
+    pub hidhide_session: bool,
     pub cloak_enabled: bool,
     pub inverse: bool,
     pub engine_allowed: bool,
@@ -266,6 +269,9 @@ fn save_owned(app: &AppHandle, owned: &Owned) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 fn cli_path() -> Option<PathBuf> {
+    tool_path("HidHideCLI.exe")
+}
+fn tool_path(executable: &str) -> Option<PathBuf> {
     for env in ["ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"] {
         if let Some(root) = std::env::var_os(env) {
             for vendor in [
@@ -273,11 +279,12 @@ fn cli_path() -> Option<PathBuf> {
                 "Nefarius Software Solutions e.U.",
                 "Nefarius Software Solutions e.U",
             ] {
-                for child in ["HidHideCLI.exe", "x64/HidHideCLI.exe", "x86/HidHideCLI.exe"] {
+                for folder in ["", "x64", "x86"] {
                     let path = PathBuf::from(&root)
                         .join(vendor)
                         .join("HidHide")
-                        .join(child);
+                        .join(folder)
+                        .join(executable);
                     if path.is_file() {
                         return Some(path);
                     }
@@ -471,20 +478,136 @@ pub(super) fn driver(_: &str) -> DriverInfo {
     }
 }
 
-fn status_inner(app: &AppHandle) -> Result<ComponentsStatus, String> {
+enum HideInspection {
+    State(DriverState),
+    InUse,
+    Failed { code: Option<u32>, message: String },
+}
+fn inspect_hidhide() -> HideInspection {
+    #[cfg(windows)]
+    {
+        match motion_core::visibility::inspect() {
+            Ok(Some(state)) => HideInspection::State(state),
+            Ok(None) => HideInspection::InUse,
+            Err(error) => HideInspection::Failed {
+                code: error.code,
+                message: error.message,
+            },
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        HideInspection::Failed {
+            code: None,
+            message: "HidHide requires Windows".into(),
+        }
+    }
+}
+struct HideHealth {
+    driver: DriverInfo,
+    policy: Option<DriverState>,
+    session: bool,
+}
+// Settings and setup use this one health result. CLI presence is only relevant
+// to the optional manual controls, never to automatic mapping readiness.
+fn hidhide_health(
+    service: DriverInfo,
+    visibility: Option<&VisibilityStatus>,
+    read: impl FnOnce() -> HideInspection,
+) -> HideHealth {
+    let report = |status: &str, error: Option<String>, policy, session| HideHealth {
+        driver: DriverInfo {
+            status: status.into(),
+            error,
+        },
+        policy,
+        session,
+    };
+    if let Some(session) = visibility.filter(|v| v.requested || v.active) {
+        return report(
+            if session.error.is_some() {
+                "unknown"
+            } else if session.active {
+                "running"
+            } else {
+                "pending"
+            },
+            session.error.clone(),
+            None,
+            true,
+        );
+    }
+    if matches!(service.status.as_str(), "missing" | "unsupported") {
+        return HideHealth {
+            driver: service,
+            policy: None,
+            session: false,
+        };
+    }
+    match read() {
+        HideInspection::State(state) => {
+            let error = state
+                .inverse
+                .then(|| "HidHide 正在使用反向应用列表，请在官方管理工具中恢复普通模式。".into());
+            report(
+                if state.inverse {
+                    "configuration"
+                } else {
+                    "running"
+                },
+                error,
+                Some(state),
+                false,
+            )
+        }
+        HideInspection::InUse => report(
+            "busy",
+            Some("隐藏会话正在运行或恢复，请稍后重新检测。".into()),
+            None,
+            true,
+        ),
+        HideInspection::Failed { code, message } => {
+            let (status, detail) = match code {
+                Some(32 | 33) => ("busy", "HidHide 正被其他程序占用，请关闭官方配置工具后重试。".into()),
+                Some(5) => ("permission_denied", "Windows 拒绝访问 HidHide 驱动，请检查系统权限或修复驱动安装。".into()),
+                Some(2 | 3) if service.status == "stopped" => ("stopped", "HidHide 已安装但驱动尚未运行，请重启 Windows 后重新检测。".into()),
+                Some(2 | 3) => ("control_unavailable", "HidHide 已安装但控制接口不可用，请重启 Windows 后重新检测；仍异常时修复驱动安装。".into()),
+                _ => ("unknown", format!("HidHide 配置读取失败：{message}")),
+            };
+            report(status, Some(detail), None, false)
+        }
+    }
+}
+fn status_inner(
+    app: &AppHandle,
+    visibility: Option<&VisibilityStatus>,
+) -> Result<ComponentsStatus, String> {
     let engine = application_path(&runtime::engine_path(app)?.to_string_lossy());
     let cli = cli_path();
     let owned = load_owned(app)?;
+    let health = hidhide_health(driver("HidHide"), visibility, inspect_hidhide);
     let mut result = ComponentsStatus {
         supported: cfg!(windows),
-        hidhide: driver("HidHide"),
+        hidhide: health.driver,
         vigem: driver("ViGEmBus"),
         hidmaestro: {
             let (status, error) = motion_core::hidmaestro::driver_status();
             DriverInfo { status, error }
         },
+        usbip: DriverInfo {
+            status: if !cfg!(windows) {
+                "unsupported"
+            } else if motion_core::dualsense::host_controller_available() {
+                "running"
+            } else {
+                "unavailable"
+            }
+            .into(),
+            error: None,
+        },
         cli_available: cli.is_some(),
-        control_available: false,
+        control_available: health.policy.is_some(),
+        hidhide_session: health.session,
         cloak_enabled: false,
         inverse: false,
         engine_allowed: false,
@@ -494,49 +617,67 @@ fn status_inner(app: &AppHandle) -> Result<ComponentsStatus, String> {
         devices: vec![],
         error: None,
     };
-    if let Some(cli) = cli {
-        match snapshot(&cli) {
-            Err(e) => result.error = Some(e),
-            Ok(s) => {
-                result.control_available = true;
-                result.cloak_enabled = s.cloak;
-                result.inverse = s.inverse;
-                result.engine_allowed = !s.inverse && has_application(&s.apps, &engine);
-                result.hidden_count = s.hidden.len();
-                for group in &s.groups {
-                    for d in group.devices.iter().filter(|d| physical(d)) {
-                        result.devices.push(HidHideDevice {
-                            id: d.device_instance_path.clone(),
-                            name: group.friendly_name.clone(),
-                            description: if d.product.is_empty() {
-                                d.description.clone()
-                            } else {
-                                d.product.clone()
-                            },
-                            listed: has(&s.hidden, &d.device_instance_path)
-                                || (!d.xusb_device_instance_path.is_empty()
-                                    && has(&s.hidden, &d.xusb_device_instance_path))
-                                || (!d.base_container_device_instance_path.is_empty()
-                                    && has(&s.hidden, &d.base_container_device_instance_path)),
-                            managed: owned.groups.iter().any(|(id, paths)| {
-                                id.eq_ignore_ascii_case(&d.device_instance_path)
-                                    && paths
-                                        .iter()
-                                        .any(|p| has(&s.hidden, p) && has(&owned.added_devices, p))
-                            }),
-                            xinput_available: !d.xusb_device_instance_path.is_empty(),
-                            shared_functions: d.base_container_device_count,
-                        });
-                    }
-                }
+    if let Some(s) = health.policy {
+        result.cloak_enabled = s.active;
+        result.inverse = s.inverse;
+        #[cfg(windows)]
+        {
+            result.engine_allowed = !s.inverse
+                && motion_core::visibility::native_image_path(Path::new(&engine))
+                    .is_ok_and(|path| has(&s.apps, &path));
+        }
+        result.hidden_count = s.hidden.len();
+        // Manual inventory is independent of driver access. The native
+        // handle and lease guard have already been released here.
+        let groups = if cli.is_some() {
+            super::hid_inventory::enumerate().and_then(|json| {
+                serde_json::from_str::<Vec<InventoryGroup>>(&json).map_err(|e| e.to_string())
+            })
+        } else {
+            Ok(Vec::new())
+        };
+        let groups = match groups {
+            Ok(groups) => groups,
+            Err(error) => {
+                result.error = Some(error);
+                Vec::new()
+            }
+        };
+        for group in &groups {
+            for d in group.devices.iter().filter(|d| physical(d)) {
+                result.devices.push(HidHideDevice {
+                    id: d.device_instance_path.clone(),
+                    name: group.friendly_name.clone(),
+                    description: if d.product.is_empty() {
+                        d.description.clone()
+                    } else {
+                        d.product.clone()
+                    },
+                    listed: has(&s.hidden, &d.device_instance_path)
+                        || (!d.xusb_device_instance_path.is_empty()
+                            && has(&s.hidden, &d.xusb_device_instance_path))
+                        || (!d.base_container_device_instance_path.is_empty()
+                            && has(&s.hidden, &d.base_container_device_instance_path)),
+                    managed: owned.groups.iter().any(|(id, paths)| {
+                        id.eq_ignore_ascii_case(&d.device_instance_path)
+                            && paths
+                                .iter()
+                                .any(|p| has(&s.hidden, p) && has(&owned.added_devices, p))
+                    }),
+                    xinput_available: !d.xusb_device_instance_path.is_empty(),
+                    shared_functions: d.base_container_device_count,
+                });
             }
         }
     }
     Ok(result)
 }
-pub fn get_status(app: &AppHandle) -> Result<ComponentsStatus, String> {
+pub fn get_status(
+    app: &AppHandle,
+    visibility: &VisibilityStatus,
+) -> Result<ComponentsStatus, String> {
     let _gate = GATE.lock().map_err(|_| "Component control lock failed")?;
-    status_inner(app)
+    status_inner(app, Some(visibility))
 }
 pub fn open_tool(kind: &str) -> Result<(), String> {
     if !cfg!(windows) {
@@ -544,16 +685,7 @@ pub fn open_tool(kind: &str) -> Result<(), String> {
     }
     let mut command = match kind {
         "hidhide" => {
-            let cli = cli_path().ok_or("HidHide management tools were not found")?;
-            let folder = cli.parent().ok_or("Invalid HidHide location")?;
-            let candidates = [
-                folder.join("HidHideClient.exe"),
-                folder.join("x64/HidHideClient.exe"),
-                folder.parent().unwrap_or(folder).join("HidHideClient.exe"),
-            ];
-            let path = candidates.into_iter().find(|p| p.is_file()).ok_or(
-                "HidHide Configuration Client was not found. Repair the official installation.",
-            )?;
+            let path = tool_path("HidHideClient.exe").ok_or("未找到 HidHide 官方管理工具。自动隐藏不需要此工具；请直接启动映射，由软件管理隐藏与恢复。")?;
             Command::new(path)
         }
         "gamepads" => {
@@ -580,7 +712,7 @@ pub fn manage(
     let _gate = GATE.lock().map_err(|_| "Component control lock failed")?;
     let mut owned = load_owned(app)?;
     if action == "restore" && owned.groups.is_empty() && owned.added_devices.is_empty() {
-        return status_inner(app);
+        return status_inner(app, None);
     }
     let cli = cli_path().ok_or("Install HidHide first, then refresh")?;
     let before = snapshot(&cli)?;
@@ -655,14 +787,88 @@ pub fn manage(
         }
         _ => return Err("Unknown component control action".into()),
     }
-    status_inner(app)
+    status_inner(app, None)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn service(status: &str) -> DriverInfo {
+        DriverInfo {
+            status: status.into(),
+            error: None,
+        }
+    }
     #[test]
-    fn read_only_windows_driver_probe() {
+    fn native_hidhide_readiness_does_not_require_tools_or_prior_rules() {
+        let health = hidhide_health(service("running"), None, || {
+            HideInspection::State(DriverState::default())
+        });
+        assert_eq!(health.driver.status, "running");
+        assert!(health.policy.is_some());
+        assert!(!health.session);
+    }
+    #[test]
+    fn hidhide_detection_does_not_open_control_during_mapping() {
+        let mut visibility = VisibilityStatus {
+            requested: true,
+            active: true,
+            ..Default::default()
+        };
+        let health = hidhide_health(service("running"), Some(&visibility), || {
+            panic!("must reuse the active lease")
+        });
+        assert_eq!(health.driver.status, "running");
+        assert!(health.session && health.policy.is_none());
+        visibility.active = false;
+        assert_eq!(
+            hidhide_health(service("running"), Some(&visibility), || panic!())
+                .driver
+                .status,
+            "pending"
+        );
+        visibility.error = Some("read failure".into());
+        let failed = hidhide_health(service("running"), Some(&visibility), || panic!());
+        assert_eq!(failed.driver.status, "unknown");
+        assert_eq!(failed.driver.error.as_deref(), Some("read failure"));
+    }
+    #[test]
+    fn hidhide_service_presence_cannot_mask_access_or_policy_failures() {
+        for (code, expected) in [
+            (32, "busy"),
+            (5, "permission_denied"),
+            (2, "control_unavailable"),
+            (1234, "unknown"),
+        ] {
+            let health = hidhide_health(service("running"), None, || HideInspection::Failed {
+                code: Some(code),
+                message: "probe failed".into(),
+            });
+            assert_eq!(health.driver.status, expected);
+            assert!(health.driver.error.is_some() && health.policy.is_none());
+        }
+        let inverse = hidhide_health(service("running"), None, || {
+            HideInspection::State(DriverState {
+                inverse: true,
+                ..Default::default()
+            })
+        });
+        assert_eq!(inverse.driver.status, "configuration");
+        let busy = hidhide_health(service("running"), None, || HideInspection::InUse);
+        assert_eq!(busy.driver.status, "busy");
+        let missing = hidhide_health(service("missing"), None, || {
+            panic!("must not invoke control or CLI")
+        });
+        assert_eq!(missing.driver.status, "missing");
+        let stopped = hidhide_health(service("stopped"), None, || HideInspection::Failed {
+            code: Some(2),
+            message: "absent".into(),
+        });
+        assert_eq!(stopped.driver.status, "stopped");
+    }
+    #[test]
+    #[ignore = "manual system integration only; CLI may register itself in the allow list"]
+    fn manual_windows_driver_and_cli_probe() {
         for name in ["HidHide", "ViGEmBus"] {
             let result = driver(name);
             eprintln!("{name}: {}", result.status);
@@ -672,10 +878,10 @@ mod tests {
         if let Some(path) = cli_path() {
             match snapshot(&path) {
                 Ok(s) => eprintln!(
-                    "HidHide CLI read-only probe: {} device groups",
+                    "HidHide CLI manual probe: {} device groups",
                     s.groups.len()
                 ),
-                Err(e) => eprintln!("HidHide CLI read-only probe unavailable: {e}"),
+                Err(e) => eprintln!("HidHide CLI manual probe unavailable: {e}"),
             }
         }
     }

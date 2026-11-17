@@ -24,6 +24,28 @@ fn imported_flick_preserves_jsm_timing_and_ignores_stick_aim_sensitivity() {
 }
 
 #[test]
+fn imported_flick_only_and_snapping_survive_as_editable_studio_settings() {
+    for (mode, expected) in [
+        ("NONE", motion_core::motion_config::FlickSnap::None),
+        ("4", motion_core::motion_config::FlickSnap::Four),
+        ("8", motion_core::motion_config::FlickSnap::Eight),
+    ] {
+        let p = convert(&format!(
+            "GYRO_SENS=2\nRIGHT_STICK_MODE=FLICK_ONLY\nFLICK_SNAP_MODE={mode}\nFLICK_SNAP_STRENGTH=0.75"
+        ));
+        assert_eq!(p.skipped, 0);
+        let restored = parse_profile(&toml::to_string_pretty(&p.profile).unwrap()).unwrap();
+        assert!(restored.gyro.motion.flick.enabled);
+        assert!(restored.gyro.motion.flick.only);
+        assert_eq!(restored.gyro.motion.flick.snap_mode, expected);
+        assert_eq!(restored.gyro.motion.flick.snap_strength, 0.75);
+    }
+    let p = convert("RIGHT_STICK_MODE=FLICK_ONLY\nRIGHT_STICK_MODE=FLICK");
+    assert!(p.profile.gyro.motion.flick.enabled);
+    assert!(!p.profile.gyro.motion.flick.only);
+}
+
+#[test]
 fn per_side_stick_deadzone_commands_feed_native_source_settings() {
     let p = convert("LEFT_STICK_DEADZONE_INNER = 0.18\nRIGHT_STICK_DEADZONE_INNER = 0.23");
     assert_eq!(p.profile.input.deadzone_left, Some(0.18));

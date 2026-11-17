@@ -42,10 +42,11 @@ export async function main(args = process.argv.slice(2)) {
   if (args.includes('--help')) {
     console.log('npm run release:local                  Build, sign, verify, and publish\n'
       + 'npm run release:local -- --check        Check local tools, signing key, and GitHub access only\n'
+      + 'npm run release:local -- --skip-tests   Publish without running regression tests (explicit maintainer choice)\n'
       + 'npm run release:local -- --publish-only Resume uploading the verified build from this commit');
     return;
   }
-  if (args.length > 1 || args.some(arg => !['--check', '--publish-only'].includes(arg))) throw new Error('Unknown option; use --help');
+  if (args.length > 1 || args.some(arg => !['--check', '--publish-only', '--skip-tests'].includes(arg))) throw new Error('Unknown option; use --help');
   if (process.platform !== 'win32') throw new Error('Build Windows releases on Windows');
   const config = readReleaseConfig(root);
   if (!config.notes) throw new Error('Write docs/releases/' + config.tag + '.md first');
@@ -81,7 +82,8 @@ export async function main(args = process.argv.slice(2)) {
     }
     console.log('Building ' + config.tag + ' from ' + commit + ' using the existing local Cargo cache.');
     runNode([npmCli, 'ci']);
-    runNode(['scripts/check-mapping.mjs']);
+    if (args.includes('--skip-tests')) console.log('Regression tests skipped by explicit maintainer choice; build and signature checks remain required.');
+    else runNode(['scripts/check-mapping.mjs']);
     // The Windows desktop dependency build can crash in parallel motion-core
     // code generation. Keep its optimization level and serialize just that
     // crate's codegen; the separately built input engine keeps its own settings.

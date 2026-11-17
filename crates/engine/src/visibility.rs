@@ -11,6 +11,10 @@ pub struct VisibilityStatus {
 
 pub mod policy;
 #[cfg(windows)]
+mod control;
+#[cfg(windows)]
+pub use control::{inspect, native_image_path, InspectionError};
+#[cfg(windows)]
 mod session;
 #[cfg(windows)]
 mod topology;

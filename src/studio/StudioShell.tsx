@@ -71,6 +71,7 @@ type Props = {
   languageDisabled:boolean;
   onLanguage:(language:Language)=>void;
   updateVersion?: string;
+  setupNotice?: ReactNode;
 };
 
 export function StudioShell(props: Props) {
@@ -236,6 +237,7 @@ export function StudioShell(props: Props) {
             </div>
             <button type="button" className="primary-btn" onClick={openUpdates}>查看更新<StudioIcon name="arrow" size={16}/></button>
           </aside>}
+          {props.setupNotice}
         </header>
         <div className={styles.scrollArea} ref={scrollArea} data-pad-scroll>
           <main className={styles.main} id="studio-workspace" data-pad-zone="content">

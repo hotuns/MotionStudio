@@ -9,13 +9,17 @@ use anyhow::{ensure, Result};
 use flexinput_virtual::{composite_device::CompositeDevice, VirtualDevice};
 
 const KEY: &str = "motion-studio.dualsense";
+/// Read-only presence check; does not open or attach a virtual USB device.
+pub fn host_controller_available() -> bool {
+    flexinput_usbip::vhci::is_available()
+}
 pub fn probe() -> Result<()> {
     ensure!(
         std::env::var_os("MOTION_STUDIO_DISABLE_PHYSICAL").is_none()
             && std::env::var("SDL_JOYSTICK_HIDAPI").as_deref() != Ok("0"),
         "Native output is disabled for this session"
     );
-    ensure!(flexinput_usbip::vhci::is_available(), "DualSense audio output requires the usbip-win2 virtual USB host controller. Install it before starting this profile.");
+    ensure!(host_controller_available(), "DualSense audio output requires the usbip-win2 virtual USB host controller. Install it before starting this profile.");
     Ok(())
 }
 pub struct DualSenseSink {

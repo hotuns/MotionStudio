@@ -6,7 +6,7 @@ virtual_gamepad = "none"
 enabled = true
 output = "mouse"
 activation = "touch1"
-counts_per_degree = 12.0
+counts_per_degree = 40.0
 sensitivity = 1.0
 
 [touchpad]

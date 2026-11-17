@@ -65,6 +65,24 @@ pub enum SnapMode {
     Eight,
 }
 
+/// Native initial flick snapping, shared with the headless RWS adapter.
+pub(crate) fn snap_flick_angle(angle: f32, mode: SnapMode, strength: f32) -> f32 {
+    use std::f32::consts::PI;
+    if mode == SnapMode::None { return angle; }
+    let interval = match mode {
+        SnapMode::Four => PI / 2.0,
+        SnapMode::Eight => PI / 4.0,
+        SnapMode::None => PI,
+    };
+    let snapped = (angle / interval).round() * interval;
+    angle * (1.0 - strength) + snapped * strength
+}
+
+/// FLICK_ONLY keeps the initial turn but excludes outer-ring rotation.
+pub(crate) fn flick_rotates(mode: StickMode) -> bool {
+    mode != StickMode::FlickOnly
+}
+
 /// What turns the gyro off (or on): `GYRO_OFF` / `GYRO_ON`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct GyroButton {
@@ -836,16 +854,7 @@ impl Aim {
             if !self.sticks[side].flick.flicking {
                 self.sticks[side].flick.flicking = true;
                 if mode != StickMode::RotateOnly {
-                    let mut angle = angle;
-                    if s.flick_snap != SnapMode::None {
-                        let interval = match s.flick_snap {
-                            SnapMode::Four => PI / 2.0,
-                            SnapMode::Eight => PI / 4.0,
-                            SnapMode::None => PI,
-                        };
-                        let snapped = (angle / interval).round() * interval;
-                        angle = angle * (1.0 - s.flick_snap_strength) + snapped * s.flick_snap_strength;
-                    }
+                    let mut angle = snap_flick_angle(angle, s.flick_snap, s.flick_snap_strength);
                     if angle.abs() * (180.0 / PI) < s.flick_deadzone_angle {
                         angle = 0.0;
                     }
@@ -857,7 +866,7 @@ impl Aim {
                     f.samples.fill(0.0);
                     f.front = 0;
                 }
-            } else if mode != StickMode::FlickOnly {
+            } else if flick_rotates(mode) {
                 // Already flicking: the stick's turn drags the camera with it.
                 let last_angle = (-st.prev_x).atan2(st.prev_y);
                 let mut change = angle - last_angle;

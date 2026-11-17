@@ -928,6 +928,19 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                     g.motion.flick.forward_deadzone = scalar(v)?;
                     None
                 }
+                "FLICK_SNAP_MODE" => {
+                    g.motion.flick.snap_mode = match v {
+                        "NONE" => crate::motion_config::FlickSnap::None,
+                        "4" => crate::motion_config::FlickSnap::Four,
+                        "8" => crate::motion_config::FlickSnap::Eight,
+                        _ => bail!("拨动角度吸附仅支持 NONE、4 或 8"),
+                    };
+                    None
+                }
+                "FLICK_SNAP_STRENGTH" => {
+                    g.motion.flick.snap_strength = scalar(v)?;
+                    None
+                }
                 "FLICK_THRESHOLD" => {
                     g.motion.flick.deadzone = scalar(v)?;
                     None
@@ -1179,12 +1192,12 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "LEFT_STICK" | "RIGHT_STICK" if p.virtual_gamepad != GamepadTarget::None => {
                     return Ok(None)
                 }
-                "AIM" | "FLICK" if !chosen => {}
-                "AIM" | "FLICK" => bail!("当前只能把一个摇杆用于瞄准／Flick，请手动选择"),
+                "AIM" | "FLICK" | "FLICK_ONLY" if !chosen => {}
+                "AIM" | "FLICK" | "FLICK_ONLY" => bail!("当前只能把一个摇杆用于瞄准／拨动，请手动选择"),
                 _ => bail!("该摇杆模式暂不能迁移"),
             }
             if gyro_blocked {
-                bail!("体感存在无法等价迁移的关键项，请核验摇杆瞄准／Flick 设置");
+                bail!("体感存在无法等价迁移的关键项，请核验摇杆瞄准／拨动设置");
             }
             let f = &mut p.gyro.motion.flick;
             f.standalone = !p.gyro.enabled;
@@ -1193,7 +1206,8 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             } else {
                 Stick::Right
             };
-            f.enabled = s.value == "FLICK";
+            f.enabled = matches!(s.value.as_str(), "FLICK" | "FLICK_ONLY");
+            f.only = s.value == "FLICK_ONLY";
             if f.enabled {
                 f.release_ease = 0.5;
             }
@@ -1207,10 +1221,10 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 f.vertical_ratio = vertical / horizontal;
             }
             Ok(Some(
-                "已转换为摇杆瞄准／Flick；摇杆加速度、门限和独立轴设置需核验",
+                "已转换为摇杆瞄准／拨动；摇杆加速度、门限和独立轴设置需核验",
             ))
         });
-        if lines[s.index].status != "skipped" && matches!(s.value.as_str(), "AIM" | "FLICK") {
+        if lines[s.index].status != "skipped" && matches!(s.value.as_str(), "AIM" | "FLICK" | "FLICK_ONLY") {
             chosen = true;
         }
     }

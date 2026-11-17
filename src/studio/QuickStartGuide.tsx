@@ -3,8 +3,9 @@ import Controller from './Controller';
 import { Dialog, gamepadNames } from './Controls';
 import { StudioIcon, type StudioIconName } from './StudioIcon';
 import styles from './QuickStartGuide.module.css';
+import {componentNames,type ComponentPlan} from '../component-setup';
 
-export type GuideStep = 'input' | 'profile' | 'mapping';
+export type GuideStep = 'components' | 'input' | 'profile' | 'mapping';
 
 type Props = {
   step: GuideStep;
@@ -17,9 +18,12 @@ type Props = {
   onOpenDevices: () => void;
   onOpenProfiles: () => void;
   onOpenActions: () => void;
+  componentPlan: ComponentPlan;
+  onOpenComponents: () => void;
 };
 
 const steps: ReadonlyArray<{ id: GuideStep; title: string; icon: StudioIconName }> = [
+  { id: 'components', title: '准备组件', icon: 'settings' },
   { id: 'input', title: '检查手柄输入', icon: 'controllerStatus' },
   { id: 'profile', title: '选择游戏配置', icon: 'profiles' },
   { id: 'mapping', title: '启动映射', icon: 'play' },
@@ -27,7 +31,7 @@ const steps: ReadonlyArray<{ id: GuideStep; title: string; icon: StudioIconName 
 
 export function QuickStartGuide({
   step, onStepChange, device, live, profile, onClose, onFinish,
-  onOpenDevices, onOpenProfiles, onOpenActions,
+  onOpenDevices, onOpenProfiles, onOpenActions, componentPlan, onOpenComponents,
 }: Props) {
   const index = steps.findIndex(item => item.id === step);
   const previous = steps[index - 1];
@@ -57,6 +61,15 @@ export function QuickStartGuide({
         </button>
       </li>)}
     </ol>
+
+    {step === 'components' && <section className={styles.content} aria-label="准备组件">
+      <div className={styles.readiness} role="status"><StudioIcon name="settings" size={21}/><div>
+        <strong>{componentPlan.ready?'所需组件已就绪':'先准备组件，再开始映射'}</strong>
+        <span translate="no">{componentPlan.items.map(item=>componentNames[item.kind]).join(' · ')}</span>
+      </div></div>
+      <p>安装指引会按当前输出方式列出所需组件，显示安装状态，并提供安装入口。</p>
+      <button type="button" className="primary-btn" onClick={onOpenComponents}>组件安装指引<StudioIcon name="arrow" size={14}/></button>
+    </section>}
 
     {step === 'input' && <section className={styles.content} aria-label="检查手柄输入">
       <div className={styles.readiness} role="status">
@@ -94,7 +107,7 @@ export function QuickStartGuide({
     </section>}
 
     {step === 'mapping' && <section className={styles.content} aria-label="启动映射">
-      <p>确认手柄和配置后，点击顶栏的「启动映射」，再进入游戏。</p>
+      <p>确认组件、手柄和配置后，点击顶栏的「启动映射」，再进入游戏。</p>
       <div className={styles.shortcut}>
         <kbd>F12</kbd><span>停止映射</span>
       </div>

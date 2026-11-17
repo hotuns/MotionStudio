@@ -1,4 +1,5 @@
 import {Range, Toggle} from './Controls';
+import {applyJsmResponse,isJsmResponse} from '../motion-presets';
 import type {Device, Gyro, Profile} from '../types';
 import styles from './MotionControls.module.css';
 import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice, type GameCalibrationProps} from './AdvancedMotion';
@@ -8,7 +9,7 @@ import {GyroBindingInput} from './GyroBindingInput';
 import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
 
 type Update=(update:(profile:Profile)=>void)=>void;
-const smoothingPresets=[['跟手',0],['均衡',16],['更稳',32]] as const;
+const smoothingPresets=[['JSM 线性',0],['均衡',16],['更稳',32]] as const;
 
 export function MotionSettings({profile,profileId,update,device,recording,canRecord,onRecord,
   onCancelRecording,onOpenDevice,onPreviewOutput,status,onMotionAction,deviceNoise}: {
@@ -29,7 +30,7 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
   const activation=gyro.activation==='always'?'always':gyro.activation_mode;
   const bindingLocked=!!recording||!!status?.binding_capture||!!status?.motion?.measuring;
   const split=(device?.touchpads??0)>=2;
-  const preset=gyro.motion.smoothing==='ema'?smoothingPresets.find(([,ms])=>ms===gyro.smoothing_ms):undefined;
+  const preset=gyro.motion.smoothing==='ema'?smoothingPresets.find(([,ms])=>ms===gyro.smoothing_ms&&(ms!==0||isJsmResponse(gyro))):undefined;
 
   return <div className={settingStyles.page}>
     <SettingSection id="motion-main" title="体感瞄准" defaultOpen summary={gyro.enabled?<>{gyro.sensitivity}×</>:'关闭'}>
@@ -65,8 +66,9 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
           onChange={value=>setGyro('vertical_ratio',value)}/>
         <div className={settingStyles.row}><span>防抖预设</span><div className={styles.activationModes} role="group" aria-label="防抖预设">
           {smoothingPresets.map(([label,ms])=><button key={ms} type="button" className="secondary-btn" aria-pressed={preset?.[1]===ms}
-            onClick={()=>update(draft=>{draft.gyro.motion.smoothing='ema';draft.gyro.smoothing_ms=ms;})}>{label}</button>)}
+            onClick={()=>update(draft=>{if(ms===0)applyJsmResponse(draft.gyro);else{draft.gyro.motion.smoothing='ema';draft.gyro.smoothing_ms=ms;}})}>{label}</button>)}
         </div></div>
+        <p className={styles.hint}>JSM 线性：加速倍率 1×，关闭额外平滑、低速抑制、吸附与刹车。保留当前灵敏度、坐标、转角校准和自定义滤波。</p>
       </>}
       <div className="studio-actions"><button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button></div>
     </SettingSection>

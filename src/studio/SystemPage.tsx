@@ -5,16 +5,7 @@ import { gamepadNames } from './Controls';
 import {VirtualOutputStatus} from './VirtualOutputStatus';
 import styles from './SettingsPage.module.css';
 import {SettingField, SettingLabel} from './SettingLayout';
-
-const driverNames: Record<string, string> = {
-  running: '已就绪',
-  missing: '未安装',
-  stopped: '已安装 · 待启动',
-  unknown: '状态未知',
-  unsupported: '不支持',
-  partial: '安装不完整',
-  incompatible: '版本不匹配',
-};
+import {componentNames,componentStateNames} from '../component-setup';
 
 export type ComponentAction = 'allow' | 'hide' | 'show' | 'restore';
 type Props = {
@@ -26,6 +17,8 @@ type Props = {
   busy: boolean;
   onRefresh: () => void;
   onInstall: (kind: 'hidhide' | 'vigem' | 'hidmaestro') => void;
+  onSetup: () => void;
+  installationBlocked: boolean;
   backend: OutputBackend;
   outputActive: boolean;
   onBackend: (backend: OutputBackend) => void;
@@ -119,23 +112,24 @@ export function SystemPage(props: Props) {
     <section className={styles.section}>
       <div className={styles.heading}>
         <div><h2>系统组件</h2><p>检查 HID 输出、设备隐藏和兼容模式所需的驱动。</p></div>
-        <button type="button" className="secondary-btn" disabled={busy} onClick={props.onRefresh}>重新检测</button>
+        <div className={styles.actions}><button type="button" className="primary-btn" disabled={busy} onClick={props.onSetup}>组件安装指引</button>
+          <button type="button" className="secondary-btn" disabled={busy} onClick={props.onRefresh}>重新检测</button></div>
       </div>
-      <div className={styles.drivers}>{(['hidmaestro', 'hidhide', 'vigem'] as const).map(kind => {
+      <div className={styles.drivers}>{(['hidmaestro', 'hidhide', 'vigem', 'usbip'] as const).map(kind => {
         const state = components?.[kind];
         const hidhide = kind === 'hidhide';
         return <div className={styles.driver} key={kind}>
           <div className={styles.driverInfo}>
-            <div className={styles.driverTitle}><h3>{kind === 'hidmaestro' ? 'HIDMaestro' : hidhide ? 'HidHide' : 'ViGEmBus'}</h3>
-              <span className={styles.badge} data-ready={state?.status === 'running'}>{state ? driverNames[state.status] ?? state.status : '等待检测'}</span></div>
-            <p>{kind === 'hidmaestro' ? '提供虚拟键盘、鼠标、Xbox 360 和 DualShock 4。安装时会在本机生成签名证书，Windows 会请求管理员授权。' : hidhide ? '向游戏隐藏实体手柄，减少重复输入。' : '安装此驱动后可使用 ViGEm 虚拟手柄。'}</p>
+            <div className={styles.driverTitle}><h3>{componentNames[kind]}</h3>
+              <span className={styles.badge} data-ready={state?.status === 'running'}>{state ? componentStateNames[state.status] ?? state.status : '等待检测'}</span></div>
+            <p>{kind === 'usbip'?'创建支持 USB 音频与高清触觉的虚拟 DualSense。':kind === 'hidmaestro' ? '提供虚拟键盘、鼠标、Xbox 360 和 DualShock 4。安装时会在本机生成签名证书，Windows 会请求管理员授权。' : hidhide ? '安装后由软件自动管理：开始映射时隐藏实体手柄，停止后恢复，无需手动配置。' : '安装此驱动后可使用 ViGEm 虚拟手柄。'}</p>
             {state?.error && <p className={styles.error} role="alert">{state.error}</p>}
           </div>
           <div className={styles.actions}>
-            {state?.status === 'missing' && <button type="button" className="primary-btn" disabled={busy || props.outputActive} onClick={() => props.onInstall(kind)}>安装内置组件</button>}
-            <button type="button" className="secondary-btn" onClick={() => hidhide?props.onOpen('hidhide'):setShowOutput(true)}>
-              {hidhide ? '官方管理工具' : '检查虚拟手柄'}
-            </button>
+            {kind!=='usbip'&&state?.status === 'missing' && <button type="button" className="primary-btn" disabled={busy || props.outputActive || props.installationBlocked} onClick={() => props.onInstall(kind)}>安装内置组件</button>}
+            {!hidhide&&<button type="button" className="secondary-btn" onClick={() => kind==='usbip'?props.onOpen('usbip'):setShowOutput(true)}>
+              {kind==='usbip'?'打开官方安装说明':'检查虚拟手柄'}
+            </button>}
           </div>
         </div>;
       })}</div>
@@ -199,23 +193,26 @@ export function SystemPage(props: Props) {
       <div className={styles.detailsBody}>
         <div className={styles.heading}>
           <p>管理由 Motion Studio 添加的 HidHide 规则。</p>
-          <button type="button" className="secondary-btn" disabled={busy || automaticBusy || !components?.controlAvailable} onClick={() => props.onComponent('allow')}>
+          <button type="button" className="secondary-btn" disabled={busy || automaticBusy || !components?.controlAvailable || !components?.cliAvailable} onClick={() => props.onComponent('allow')}>
             {components?.engineAllowed ? '重新确认引擎权限' : '允许引擎读取手柄'}
           </button>
         </div>
+        <p>自动隐藏不依赖官方管理工具。此处仅供手动维护已有规则。</p>
+        <button type="button" className="secondary-btn" disabled={busy||automaticBusy} onClick={()=>props.onOpen('hidhide')}>官方管理工具</button>
+        {components?.hidhide.status==='running'&&!components.cliAvailable&&<p>未检测到手动管理工具，自动隐藏仍可正常使用。</p>}
         <p>开始映射时隐藏所选实体手柄及可确认的 XInput 伴随接口，保留虚拟输出可见。断线等待和配置切换期间保持隐藏；停止、F12 或退出后恢复本次新增的规则。</p>
         {automaticBusy && <p className={styles.notice}>自动隐藏会话运行期间，请先停止映射，再手动修改隐藏规则。</p>}
         {components?.devices.map(device => <div className="studio-device-rule" key={device.id}>
           <div><strong>{device.name || device.description}</strong>
             <span className="studio-muted">{device.listed ? '已在隐藏列表' : '当前可见'}{visibility?.hidden_paths.some(path=>path.toUpperCase()===device.id.toUpperCase()) ? ' · 自动会话管理' : device.managed ? ' · 本应用管理' : ''}</span></div>
           {device.managed
-            ? <button type="button" className="secondary-btn" disabled={busy || automaticBusy} onClick={() => props.onComponent('show', device.id)}>恢复可见</button>
-            : <button type="button" className="secondary-btn" disabled={busy || automaticBusy || device.listed || components.inverse}
+            ? <button type="button" className="secondary-btn" disabled={busy || automaticBusy || !components?.cliAvailable} onClick={() => props.onComponent('show', device.id)}>恢复可见</button>
+            : <button type="button" className="secondary-btn" disabled={busy || automaticBusy || !components?.cliAvailable || device.listed || components.inverse}
                 onClick={() => props.onComponent('hide', device.id, device.xinputAvailable)}>
                 {device.listed ? '其他规则管理' : '隐藏游戏接口'}
               </button>}
         </div>)}
-        {!components?.devices.length && <p>安装 HidHide 并连接手柄后，可以选择要隐藏的接口。</p>}
+        {!components?.devices.length&&components?.cliAvailable&&!automaticBusy&&<p>连接手柄后可查看手动规则；日常使用无需在这里选择设备。</p>}
         <div className={styles.actions}>
           <button type="button" className="secondary-btn" disabled={busy || props.outputActive || !!visibility?.requested || (!components?.managedCount && !visibility?.error && !visibility?.active)} onClick={() => props.onComponent('restore')}>恢复本应用的隐藏规则</button>
         </div>

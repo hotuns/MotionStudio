@@ -352,6 +352,17 @@ pub(crate) fn compute_rws(
     let flick_time_exponent = pf("flick_time_exponent", 0.0).clamp(0.0, 2.0);
     let flick_release_ease = pf("flick_release_ease", 0.0).clamp(0.0, crate::eval::MAX_FLICK_RELEASE_EASE);
     let flick_fwd_dz = pf("flick_fwd_dz_deg", 0.0).clamp(0.0, 180.0);
+    let flick_snap = match ps("flick_snap_mode", "none").as_str() {
+        "four" => super::jsm::JsmFlickSnap::Four,
+        "eight" => super::jsm::JsmFlickSnap::Eight,
+        _ => super::jsm::JsmFlickSnap::None,
+    };
+    let flick_snap_strength = pf("flick_snap_strength", 1.0).clamp(0.0, 1.0);
+    let rotation = super::jsm::flick_rotates(
+        if params.get("flick_only").and_then(Value::as_bool).unwrap_or(false) {
+            super::jsm::JsmStickMode::FlickOnly
+        } else { super::jsm::JsmStickMode::Flick }
+    );
     let flick_stab_s = pf("flick_stabilise_ms", 0.0).clamp(0.0, 1000.0) / 1000.0;
     let flick_output = rws_flick_mode(params);
     // Speed gate: how fast a push must reach the flick zone to flick (0 = off),
@@ -451,7 +462,7 @@ pub(crate) fn compute_rws(
     let allow_flick = !(gated && slow_lock && state.aux_f32[GST] == GST_STEERING);
 
     let flick_deg = if flick_on && !measuring {
-        compute_flick(inputs, state, flick_deadzone, flick_release_ratio, flick_disengage_s, flick_smooth_ms, flick_time_exponent, flick_release_ease, flick_fwd_dz, flick_stab_s, allow_flick, dt, flick_input_dt, observe_only)
+        compute_flick(inputs, state, flick_deadzone, flick_release_ratio, flick_disengage_s, flick_smooth_ms, flick_time_exponent, flick_release_ease, flick_fwd_dz, flick_stab_s, flick_snap, flick_snap_strength, rotation, allow_flick, dt, flick_input_dt, observe_only)
     } else {
         reset_flick(state);
         0.0
@@ -650,6 +661,9 @@ fn compute_flick(
     release_ease: f32,
     fwd_dz_deg: f32,
     stab_s: f32,
+    snap_mode: super::jsm::JsmFlickSnap,
+    snap_strength: f32,
+    rotation: bool,
     allow_engage: bool,
     dt: f32,
     input_dt: f32,
@@ -657,6 +671,13 @@ fn compute_flick(
 ) -> f32 {
     while state.aux_f32.len() <= FLK_TOTAL_S {
         state.aux_f32.push(0.0);
+    }
+    if !rotation {
+        // A mode change must not release an old sweep's stabiliser tail.
+        state.aux_f32[FLK_TRACK_PENDING] = 0.0;
+        state.aux_f32[FLK_STAB_RAW] = 0.0;
+        state.aux_f32[FLK_STAB_OUT] = 0.0;
+        state.rws_flick_stab = None;
     }
     let stick = match inputs.get(1).and_then(|s| *s) {
         Some(Signal::Vec2(v)) => v,
@@ -705,6 +726,7 @@ fn compute_flick(
             if dipped && d.abs() > std::f32::consts::FRAC_PI_2 {
                 d = 0.0;
             }
+            if !rotation { d = 0.0; }
             if stab_s > 0.0 {
                 state.aux_f32[FLK_STAB_RAW] += d;
             } else {
@@ -719,7 +741,7 @@ fn compute_flick(
             state.aux_f32[FLK_STAB_RAW] = 0.0;
             state.aux_f32[FLK_STAB_OUT] = 0.0;
             state.rws_flick_stab = None;
-            let flick_deg = angle.to_degrees();
+            let flick_deg = super::jsm::snap_flick_angle(angle, snap_mode, snap_strength).to_degrees();
             // Inside the forward deadzone: engaged and tracking, but no snap.
             let flick_deg = if flick_deg.abs() <= fwd_dz_deg { 0.0 } else { flick_deg };
             // Latch the JSM duration multiplier at initial engagement only.
@@ -756,7 +778,7 @@ fn compute_flick(
     // Stabilised tracking: filter the tracked heading every tick while engaged
     // (also between stick polls, so the filter settles onto a held heading) and
     // turn by its change.
-    if !observe_only && stab_s > 0.0 && state.aux_f32[FLK_ENGAGED] > 0.5 {
+    if rotation && !observe_only && stab_s > 0.0 && state.aux_f32[FLK_ENGAGED] > 0.5 {
         let raw = state.aux_f32[FLK_STAB_RAW];
         let filt = state.rws_flick_stab.get_or_insert_with(Default::default);
         let out = filt.filter(raw, dt, 1.0 / (std::f32::consts::TAU * stab_s));

@@ -18,6 +18,7 @@ choices!(Stick, Right, Left);
 choices!(AimOutput, Mouse, RightStick, Both);
 choices!(Suppress, Full, Deadzone, Off);
 choices!(BindingMode, Hold, Toggle, Turbo);
+choices!(FlickSnap, None, Four, Eight);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -73,7 +74,7 @@ impl Default for MotionConfig {
             one_euro_cutoff: 6.0,
             one_euro_beta: 0.3,
             angle_snap: 0.0,
-            angle_snap_ease: true,
+            angle_snap_ease: false,
             brake_strength: 0.0,
             brake_threshold: 25.0,
             cutoff_dps: 0.0,
@@ -150,6 +151,9 @@ impl Default for Rotation {
 #[serde(default, deny_unknown_fields)]
 pub struct Flick {
     pub enabled: bool,
+    pub only: bool,
+    pub snap_mode: FlickSnap,
+    pub snap_strength: f32,
     pub standalone: bool,
     pub stick: Stick,
     #[serde(rename = "output", skip_serializing)]
@@ -176,6 +180,9 @@ impl Default for Flick {
     fn default() -> Self {
         Self {
             enabled: false,
+            only: false,
+            snap_mode: FlickSnap::None,
+            snap_strength: 1.0,
             standalone: false,
             stick: Stick::Right,
             _legacy_output: serde::de::IgnoredAny,
@@ -372,7 +379,7 @@ impl MotionConfig {
             }
         }
         if self.flick.pause_input.is_some() && self.flick.enable_input.is_some() {
-            bail!("Flick 的按住开启和按住暂停不能同时设置");
+            bail!("拨动的按住开启和按住暂停不能同时设置");
         }
         for angle in self.hold_angles {
             range("握持角度", angle, -180.0, 180.0)?;
@@ -405,20 +412,21 @@ impl MotionConfig {
             ("相对回归时间", self.rotation.return_ms, 0., 5000.),
             ("接管速度", self.rotation.takeover_dps, 0., 2000.),
             ("外圈交还阈值", self.rotation.outer, 0.05, 1.),
-            ("Flick 死区", self.flick.deadzone, 0.05, 0.99),
-            ("Flick 追踪下限比例", self.flick.release_ratio, 0., 1.),
-            ("Flick 退出延时", self.flick.disengage_ms, 0., 60.),
-            ("Flick 时间", self.flick.smooth_ms, 0., 2000.),
-            ("Flick 时间指数", self.flick.time_exponent, 0., 2.),
+            ("拨动死区", self.flick.deadzone, 0.05, 0.99),
+            ("拨动追踪下限比例", self.flick.release_ratio, 0., 1.),
+            ("拨动退出延时", self.flick.disengage_ms, 0., 60.),
+            ("拨动时间", self.flick.smooth_ms, 0., 2000.),
+            ("拨动时间指数", self.flick.time_exponent, 0., 2.),
+            ("拨动角度吸附强度", self.flick.snap_strength, 0., 1.),
             (
-                "Flick 缓出强度",
+                "拨动缓出强度",
                 self.flick.release_ease,
                 0.,
                 flexinput_engine::eval::MAX_FLICK_RELEASE_EASE,
             ),
             ("正前方死角", self.flick.forward_deadzone, 0., 180.),
-            ("Flick 稳定", self.flick.stabilise_ms, 0., 1000.),
-            ("快推判定时间", self.flick.speed_gate_ms, 0., 2000.),
+            ("拨动稳定", self.flick.stabilise_ms, 0., 1000.),
+            ("拨动判定时间", self.flick.speed_gate_ms, 0., 2000.),
             ("摇杆瞄准倍率", self.flick.aim_sensitivity, 0.01, 100.),
             ("摇杆最大转速", self.flick.max_dps, 1., 4000.),
             ("摇杆纵向比例", self.flick.vertical_ratio, 0.01, 10.),
@@ -429,7 +437,7 @@ impl MotionConfig {
             && (self.flick.enabled || self.flick.stick_aim)
             && self.rotation.stick == self.flick.stick
         {
-            bail!("体感旋转与 Flick／摇杆瞄准不能同时使用同一摇杆");
+            bail!("体感旋转与拨动／摇杆瞄准不能同时使用同一摇杆");
         }
         if self.mode != MotionMode::Pointer && self.edge.mode != EdgeMode::Off {
             bail!("边缘转向需要选择角速度瞄准模式");

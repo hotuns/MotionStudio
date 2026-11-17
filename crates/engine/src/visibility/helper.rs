@@ -1,4 +1,5 @@
 use super::*;
+use crate::visibility::control::{self, Gate};
 use flexinput_hidmaestro::hidhide::HidHide;
 use policy::{Driver, DriverState, Journal, Record};
 use std::{fs, io::Read};
@@ -51,13 +52,7 @@ impl RealDriver {
 }
 impl Driver for RealDriver {
     fn read(&mut self) -> Result<DriverState> {
-        let state = self.0.checked_state().map_err(anyhow::Error::msg)?;
-        Ok(DriverState {
-            active: state.active,
-            inverse: state.inverse,
-            hidden: state.blacklist,
-            apps: state.whitelist,
-        })
+        control::read_state(&self.0).map_err(anyhow::Error::msg)
     }
     fn set_hidden(&mut self, paths: &[String]) -> Result<()> {
         ensure!(self.0.set_blacklist(paths), "HidHide 拒绝更新实体隐藏规则");
@@ -72,35 +67,6 @@ impl Driver for RealDriver {
         Ok(())
     }
 }
-struct Gate(HANDLE);
-impl Gate {
-    fn acquire() -> Result<Self> {
-        let name: Vec<u16> = "Local\\MotionStudio.HidHide.MappingLease"
-            .encode_utf16()
-            .chain([0])
-            .collect();
-        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
-        ensure!(!handle.is_null(), "无法取得隐藏规则控制权");
-        match unsafe { WaitForSingleObject(handle, 1500) } {
-            WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self(handle)),
-            _ => {
-                unsafe {
-                    CloseHandle(handle);
-                }
-                bail!("另一隐藏会话仍在运行或恢复，请稍后重试")
-            }
-        }
-    }
-}
-impl Drop for Gate {
-    fn drop(&mut self) {
-        unsafe {
-            ReleaseMutex(self.0);
-            CloseHandle(self.0);
-        }
-    }
-}
-
 fn image(process: HANDLE) -> Result<String> {
     let mut buffer = vec![0u16; 32768];
     let mut length = buffer.len() as u32;

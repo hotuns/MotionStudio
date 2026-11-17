@@ -38,6 +38,9 @@ pub use analog::{
     TriggerStages as JsmTriggerStages, NOISE_FLOOR as JSM_TRIGGER_REST,
 };
 pub use aim::JsmGyroClock;
+pub use aim::Settings as JsmAimSettings;
+pub(crate) use aim::{snap_flick_angle, flick_rotates, SnapMode as JsmFlickSnap};
+pub(crate) use analog::StickMode as JsmStickMode;
 pub use cc as jsm_motion_curves;
 pub use parse::tab_name as jsm_tab_name;
 // RWS Aim's 360° sweep follows a circled flick stick the same way.

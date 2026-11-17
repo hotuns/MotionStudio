@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -15,6 +15,9 @@ import { ProfileLibrary } from './studio/ProfileLibrary';
 import { ProfileShareDialog } from './studio/ProfileShareDialog';
 import type { CommunityProfile, SharedSource } from './profile-sharing';
 import { SystemPage, type ComponentAction } from './studio/SystemPage';
+import {ComponentSetup,ComponentSetupNotice} from './studio/ComponentSetup';
+import {useComponentStatus} from './studio/component-status';
+import {componentPlan,type InstallableComponent} from './component-setup';
 import {ControllerOverlaySettings} from './studio/ControllerOverlaySettings';
 import { SoftwareUpdate } from './studio/SoftwareUpdate';
 import { useStudioUpdate } from './studio/software-update';
@@ -31,7 +34,7 @@ import {PadInputCaptureContext, type PadPickerRequest} from './studio/PadInputPi
 import {editingProfile,updateLayer,restoreLayerSetting} from './layers';
 import type {SettingRequest} from './studio/settings-catalog';
 import {useLanguage,setLanguage,getLanguage,t} from './i18n';
-import { chordParts,inputLabel,outputLabel, type Action, type ComponentStatus, type Entry, type Profile, type Settings, type Snapshot, type Workspace } from './types';
+import { chordParts,inputLabel,outputLabel, type Action, type Entry, type Profile, type Settings, type Snapshot, type Workspace } from './types';
 import { padBindingCandidates, padInputNeutral, heldPadInputs, recordedSticks, type GamepadBindingRecording, type GyroBindingField, type GyroBindingRecording } from './pad-capture';
 import dialogStyles from './studio/CreateProfileDialog.module.css';
 
@@ -88,7 +91,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [draft, setDraft] = useState<Entry | null>(null);
   const [page, setPage] = useState<StudioPage>('overview');
-  const [guideStep, setGuideStep] = useState<GuideStep>('input');
+  const [guideStep, setGuideStep] = useState<GuideStep>('components');
   const [revealDeviceCalibration, setRevealDeviceCalibration] = useState(false);
   const [gameTab, setGameTab] = useState<GameTab>('actions');
   const [editingLayer,setEditingLayer]=useState('');
@@ -108,7 +111,11 @@ export default function App() {
   const [bindingWindowId,setBindingWindowId] = useState<string|null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [capture, setCapture] = useState<ActiveCapture | null>(null);
-  const [components, setComponents] = useState<ComponentStatus | null>(null);
+  const [componentSetupOpen,setComponentSetupOpen]=useState(false);
+  const [componentRebootRequired,setComponentRebootRequired]=useState(false);
+  const [installingComponent,setInstallingComponent]=useState<InstallableComponent|null>(null);
+  const [componentResult,setComponentResult]=useState<{message:string;error:boolean}|null>(null);
+  const componentPrompted=useRef(localStorage.getItem('motion-studio-component-guide-v1')==='seen');
   const [deleting, setDeleting] = useState<Entry | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState<Entry | null>(null);
   const [help, setHelp] = useState(false);
@@ -143,6 +150,9 @@ export default function App() {
   const inFlight = useRef(false);
 
   const native = '__TAURI_INTERNALS__' in window;
+  const {components,checking:checkingComponents,error:componentError,refresh:refreshComponents}=useComponentStatus(native,page==='settings');
+  const setupPlan=useMemo(()=>componentPlan(workspace?.settings??{output_backend:'hid_maestro',auto_hide:true},draft?.profile.virtual_gamepad,components),
+    [workspace?.settings,draft?.profile.virtual_gamepad,components]);
   const studioUpdate = useStudioUpdate(native);
   const entries = workspace?.profiles ?? [];
   const saved = entries.find(entry => entry.id === draft?.id);
@@ -323,14 +333,12 @@ export default function App() {
     return () => { disposed = true; };
   }, [native, notify, revision, runningProfile]);
 
-  useEffect(() => {
-    if (page !== 'settings' || !native) return;
-    let disposed = false;
-    void invoke<ComponentStatus>('component_status').then(data => {
-      if (!disposed) setComponents(data);
-    }).catch(error => { if (!disposed) notify(String(error), true); });
-    return () => { disposed = true; };
-  }, [native, notify, page]);
+  useEffect(()=>{
+    if(!native||!workspace||!setupPlan.blocking.length||componentPrompted.current||active||busy||captureActive||creating||editor||batch||importingJsm||sharedImport||deleting||help||componentSetupOpen)return;
+    if(document.querySelector('dialog[open]'))return;
+    componentPrompted.current=true;
+    setComponentSetupOpen(true);
+  },[native,workspace,setupPlan,active,busy,captureActive,creating,editor,batch,importingJsm,sharedImport,deleting,help,componentSetupOpen]);
 
   const update = useCallback((change: (profile: Profile) => void) => {
     if(measuringRef.current)return;
@@ -528,6 +536,14 @@ export default function App() {
 
   async function startMapping(emit: boolean) {
     if (!draft) return false;
+    if (emit) {
+      let current=components;
+      if(!current||setupPlan.issues.length)current=await refreshComponents().catch(()=>null);
+      if(componentRebootRequired||componentPlan(workspace!.settings,draft.profile.virtual_gamepad,current).blocking.length) {
+        setComponentSetupOpen(true);
+        return false;
+      }
+    }
     if (emit && hasUnboundActions(draft.profile)) throw new Error('请先给待绑定的动作设置手柄输入。');
     if (!devicePath) {
       navigate('controllerStatus');
@@ -774,8 +790,39 @@ export default function App() {
     if (path) await invoke('export_diagnostics', { path });
   }
 
-  async function refreshComponents() {
-    setComponents(await invoke<ComponentStatus>('component_status'));
+  function closeComponentSetup() {
+    componentPrompted.current=true;
+    localStorage.setItem('motion-studio-component-guide-v1','seen');
+    setComponentSetupOpen(false);
+  }
+  function installComponent(kind:InstallableComponent) {
+    installComponents([kind]);
+  }
+  function installComponents(kinds:InstallableComponent[]) {
+    if(active||checkingComponents||!kinds.length)return;
+    void run(async()=>{
+      setComponentResult(null);
+      let needsRestart=componentRebootRequired;
+      try {
+        for(const kind of kinds) {
+          // Recheck each item: a previous installer or another app may have
+          // completed it already. Never install based on a stale missing state.
+          const before=await refreshComponents();
+          if(before[kind]?.status!=='missing')continue;
+          setInstallingComponent(kind);
+          const result=await invoke<{cancelled:boolean;rebootRequired:boolean}>('install_component',{kind});
+          if(result.rebootRequired){needsRestart=true;setComponentRebootRequired(true);}
+          const after=await refreshComponents();
+          if(result.cancelled){setComponentResult({message:'已取消安装',error:false});notify('已取消安装');return;}
+          if(after[kind]?.status==='missing'&&!result.rebootRequired)throw new Error('安装已结束，但尚未检测到组件。请重新检测，或查看数据目录中的安装日志。');
+        }
+        const message=needsRestart?'安装完成，请重启 Windows 后使用':'组件安装步骤已完成，检测结果已更新。';
+        setComponentResult({message,error:false});notify(message);
+      } catch(error) {
+        await refreshComponents().catch(()=>{});
+        setComponentResult({message:String(error),error:true});throw error;
+      } finally {setInstallingComponent(null);}
+    });
   }
 
   function openLocation(kind: string) { void run(() => invoke('open_location', { kind })); }
@@ -807,6 +854,9 @@ export default function App() {
     split:(device?.touchpads??0)>=2, recording:controlRecording,
     start:request=>beginCapture({kind:'pad',index:null,wholeStick:false,...request}), cancel:cancelControlCapture}}>
     <StudioShell page={page} gameTab={gameTab} onNavigate={navigate} onGameTab={tab=>navigate('games',tab)}
+      setupNotice={native&&workspace&&<ComponentSetupNotice plan={setupPlan} checking={checkingComponents} error={componentError}
+        rebootRequired={componentRebootRequired} blocked={busy||captureActive||calibrating||!!status?.motion?.measuring}
+        onOpen={()=>setComponentSetupOpen(true)}/>}
       settingsBlocked={locked||captureActive||!!status?.motion?.measuring||!!editor||!!batch||!!bindingWindowId||!draft}
       onSetting={target=>{
         if(locked||captureActive||measuringRef.current||!draft)return;
@@ -844,7 +894,8 @@ export default function App() {
       {(status?.reload_error || snapshot?.policy_error) && <div className="studio-note studio-error" role="alert">{status?.reload_error || snapshot?.policy_error}</div>}
 
       {page === 'overview' && <StudioOverview profile={draft?.profile} status={status} device={device} deviceCount={deviceCount}
-        guideStep={guideStep} onGuideStepChange={setGuideStep} onNavigate={navigate} />}
+        guideStep={guideStep} onGuideStepChange={setGuideStep} onNavigate={navigate} componentPlan={setupPlan}
+        onOpenComponents={()=>setComponentSetupOpen(true)} />}
       {!native && <p className="studio-note">请在 Motion Studio 桌面应用中连接引擎和设备。</p>}
       {native && !workspace && page !== 'overview' && <p className="studio-note">正在打开工作区… <button type="button" className="secondary-btn" onClick={() => void run(() => refresh())}>重试</button></p>}
 
@@ -936,16 +987,19 @@ export default function App() {
         onAutoHide={enabled => void run(() => changeSettings({auto_hide: enabled}), '自动隐藏设置已保存，下次开始映射时生效')}
         onBackend={backend => void run(() => changeSettings({output_backend: backend}), '输出后端已保存，下次开始映射时生效')}
         busy={busy} onRefresh={() => void run(refreshComponents)} onOpen={openLocation} onComponent={componentAction}
-        onInstall={kind => void run(async () => {
-          const result = await invoke<{ cancelled: boolean; rebootRequired: boolean }>('install_component', { kind });
-          await refreshComponents();
-          notify(result.cancelled ? '已取消安装' : result.rebootRequired ? '安装完成，请重启 Windows 后使用' : kind === 'hidmaestro' ? 'HIDMaestro 驱动已安装' : '安装向导已完成');
-        })}
+        onInstall={installComponent} onSetup={()=>setComponentSetupOpen(true)} installationBlocked={checkingComponents}
         onGameConfig={()=>navigate('games')}
         onRecover={() => void run(() => invoke('engine_action', { action: 'recover' }), '引擎已重启，请手动启用输出')}
         onRestore={() => void run(async () => { await invoke('restore_backup', { id: 'settings' }); await refresh(); }, '已恢复设置备份')}
         onDiagnostics={() => void run(exportDiagnostics)} onDevices={() => navigate('controllerStatus')} />}
     </StudioShell>
+
+    {componentSetupOpen&&<ComponentSetup plan={setupPlan} checking={checkingComponents} error={componentError}
+      rebootRequired={componentRebootRequired} profileName={draft?.profile.name} busy={busy} outputActive={active}
+      installing={installingComponent} result={componentResult} onInstall={installComponent} onRefresh={()=>void run(refreshComponents)}
+      onInstallAll={()=>installComponents(setupPlan.installable)}
+      onClose={closeComponentSetup} onStop={stop} onUsbip={()=>openLocation('usbip')}
+      onSettings={()=>{closeComponentSetup();navigate('settings');}}/>}
 
     {importingJsm&&<ImportJsm onClose={()=>setImportingJsm(false)} onImported={async entry=>{
       await refresh(entry.id);

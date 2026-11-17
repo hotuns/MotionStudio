@@ -207,16 +207,22 @@ export function FlickStickSettings({profile,update}:Props) {
   const active=f.enabled||f.stick_aim;
   const release=Math.min(f.deadzone,Math.max(Math.min(0.15,f.deadzone),f.deadzone*(f.release_ratio??0.5)));
   return <>
-    <SettingSection id="flick-main" title="Flick Stick" defaultOpen summary={f.enabled?<>{f.smooth_ms} ms · {Math.round((f.release_ease??0.5)*100)}%</>:'关闭'}>
-      <Toggle label="启用 Flick Stick" value={f.enabled} onChange={v=>change('enabled',v)}/>
+    <SettingSection id="flick-main" title="拨动与扫动" defaultOpen summary={f.enabled?<>{f.smooth_ms} ms · {Math.round((f.release_ease??0.5)*100)}%</>:'关闭'}>
+      <Toggle label="启用拨动与扫动" value={f.enabled} onChange={v=>change('enabled',v)}/>
       {f.enabled&&<>
-        <Choice label="Flick 使用的摇杆" value={f.stick} options={sticks} onChange={v=>change('stick',v)}/>
-        <p className={styles.hint}>快推选择朝向，沿摇杆外圈转动控制镜头。</p>
+        <Choice label="拨动使用的摇杆" value={f.stick} options={sticks} onChange={v=>change('stick',v)}/>
+        <p className={styles.hint}>拨动选择朝向，沿摇杆外圈扫动控制镜头。</p>
+        <Toggle label="仅拨动（关闭外圈扫动）" value={f.only??false} onChange={v=>change('only',v)}
+          help="拨动摇杆时转到目标方向；保持在外圈并扫动时不再转向。回中后可以再次拨动。配套摇杆瞄准独立设置。"/>
+        <Choice label="拨动角度吸附" value={f.snap_mode??'none'}
+          options={[["none","不吸附"],["four","四向（每 90°）"],["eight","八向（每 45°）"]]} onChange={v=>change('snap_mode',v)}/>
+        {(f.snap_mode??'none')!=='none'&&<Range label="拨动角度吸附强度" value={(f.snap_strength??1)*100} min={0} max={100} step={1} unit="%"
+          onChange={v=>change('snap_strength',v/100)} help="100% 对齐最近方向，0% 保留原始角度，中间值柔和偏向最近方向。只作用于初始拨动，扫动保持连续。"/>}
         <div className={settingStyles.columns}>
           <div>
-            <Numbers object={f} specs={[["deadzone","快推转身阈值",0.05,0.99,0.01],["smooth_ms","180° 基准释放时间",0,2000,1," ms"]]} onChange={change}/>
+            <Numbers object={f} specs={[["deadzone","拨动转身阈值",0.05,0.99,0.01],["smooth_ms","180° 基准释放时间",0,2000,1," ms"]]} onChange={change}/>
             <Range label="按转角调整时间" value={f.time_exponent??0} min={0} max={2} step={0.05} onChange={v=>change('time_exponent',v)}
-              help="时间指数：0 为固定时间（默认），1 按转角等比例缩短，2 让小角度转身更快。上方释放时间以 180° 为基准，只影响初始转身，不影响绕圈追踪。"/>
+              help="时间指数：0 为固定时间（默认），1 按转角等比例缩短，2 让小角度转身更快。上方释放时间以 180° 为基准，只影响初始拨动，不影响扫动。"/>
             <p className={styles.hint}>预计转角释放时间：45° {Number((f.smooth_ms*Math.pow(0.25,f.time_exponent??0)).toFixed(1))} ms · 90° {Number((f.smooth_ms*Math.pow(0.5,f.time_exponent??0)).toFixed(1))} ms · 180° {f.smooth_ms} ms</p>
             <Range label="转角缓出强度" value={(f.release_ease??0.5)*100} min={0} max={100} step={1} unit="%" onChange={v=>change('release_ease',v/100)}
               help="0% 匀速释放，50% 使用 JSM 缓出（默认）。高于 50% 起步更快，100% 使用三次缓出。"/>
@@ -231,33 +237,33 @@ export function FlickStickSettings({profile,update}:Props) {
     <SettingSection id="stick-aim" title="配套摇杆瞄准" defaultOpen summary={f.stick_aim?<>{f.aim_sensitivity}× · {f.max_dps} °/s</>:'关闭'}>
       <Toggle label="启用配套摇杆瞄准" value={f.stick_aim} onChange={v=>change('stick_aim',v)}/>
       {f.stick_aim&&<>
-        {!f.enabled&&<Choice label="Flick 使用的摇杆" value={f.stick} options={sticks} onChange={v=>change('stick',v)}/>}
+        {!f.enabled&&<Choice label="拨动使用的摇杆" value={f.stick} options={sticks} onChange={v=>change('stick',v)}/>}
         <Numbers object={f} specs={[["aim_sensitivity","摇杆瞄准倍率",0.01,100,0.1,"×"],["max_dps","连续瞄准基础转速",1,4000,1," °/s"],["vertical_ratio","摇杆纵向比例",0.01,10,0.05,"×"]]} onChange={change}/>
-        <p className={styles.hint}>这些参数只调整连续瞄准，不改变 Flick 的目标转角或游戏本身的满杆转速。</p>
+        <p className={styles.hint}>这些参数只调整连续瞄准，不改变拨动的目标转角或游戏本身的满杆转速。</p>
       </>}
     </SettingSection>
-    {f.enabled&&<><SettingSection id="flick-tracking" title="Flick 追踪与退出" summary={<>追踪下限 {Number((release*100).toFixed(1))}% · {f.disengage_ms??10} ms</>}>
+    {f.enabled&&<><SettingSection id="flick-tracking" title="拨动追踪与退出" summary={<>追踪下限 {Number((release*100).toFixed(1))}% · {f.disengage_ms??10} ms</>}>
         <Range label="追踪下限比例" value={(f.release_ratio??0.5)*100} min={0} max={100} step={1} unit="%" onChange={v=>change('release_ratio',v/100)}
-          help="按快推转身阈值的比例计算，默认 50%。比例越高，绕圈时越要贴近外圈。100% 时追踪下限等于触发阈值。"/>
+          help="按拨动转身阈值的比例计算，默认 50%。比例越高，扫动时越要贴近外圈。100% 时追踪下限等于触发阈值。"/>
         <p className={styles.hint}>实际追踪下限 {Number((release*100).toFixed(1))}%</p>
         <p className={styles.hint}>低于最小追踪幅度时按最小值限制，避免接近中心时方向不稳定。</p>
-        <Range label="Flick 退出延时" value={f.disengage_ms??10} min={0} max={60} step={1} unit=" ms" slider={false} onChange={v=>change('disengage_ms',v)}
-          help="摇杆持续低于追踪下限后，才允许下一次快推转身。默认 10 ms，设为 0 则立即退出。"/>
-        <Numbers object={f} specs={[["stabilise_ms","绕圈方向稳定",0,1000,1," ms"]]} onChange={change}/>
+        <Range label="拨动退出延时" value={f.disengage_ms??10} min={0} max={60} step={1} unit=" ms" slider={false} onChange={v=>change('disengage_ms',v)}
+          help="摇杆持续低于追踪下限后，才允许下一次拨动转身。默认 10 ms，设为 0 则立即退出。"/>
+        {!f.only&&<Numbers object={f} specs={[["stabilise_ms","扫动方向稳定",0,1000,1," ms"]]} onChange={change}/>}
     </SettingSection>
-    <SettingSection id="flick-trigger" title="Flick 快速判定" summary={f.speed_gate_ms>0?<>{f.speed_gate_ms} ms</>:'不限制推杆时间'}>
-        <Numbers object={f} specs={[["forward_deadzone","正前方死角",0,180,1,"°"],["speed_gate_ms","快速推杆判定时间",0,2000,1," ms"]]} onChange={change}/>
+    <SettingSection id="flick-trigger" title="拨动快速判定" summary={f.speed_gate_ms>0?<>{f.speed_gate_ms} ms</>:'不限制推杆时间'}>
+        <Numbers object={f} specs={[["forward_deadzone","正前方死角",0,180,1,"°"],["speed_gate_ms","拨动判定时间",0,2000,1," ms"]]} onChange={change}/>
         <Toggle label="慢推锁定为连续瞄准" value={f.slow_lock} onChange={v=>change('slow_lock',v)}/>
     </SettingSection>
     </>}
     {active&&<SettingSection id="flick-shared" title="共用启用与输出规则" summary={f.standalone?'关闭体感仍启用':'随体感总开关'}>
         <Toggle label="关闭体感时也启用" value={f.standalone??false} onChange={v=>change('standalone',v)}/>
         <ControlInput label="按住启用（不设置则常开）" value={f.enable_input} onChange={v=>setControl('enable_input',v)}/>
-        <ControlInput label="按住暂停 Flick" value={f.pause_input??null} onChange={v=>setControl('pause_input',v)}/>
+        <ControlInput label="按住暂停拨动" value={f.pause_input??null} onChange={v=>setControl('pause_input',v)}/>
         <p className={styles.hint}>按住启用与按住暂停互斥，设置一个会清除另一个；都不设置时常开，仍受功能启用开关控制。</p>
         <Choice label="原始摇杆输出" value={f.suppress} options={[["full","使用时屏蔽"],["deadzone","只屏蔽外圈"],["off","保留原始输出"]]} onChange={v=>change('suppress',v)}/>
-        {!f.standalone&&!profile.gyro.enabled&&<p className={styles.hint}>请在「体感」页启用体感，以使用 Flick Stick 和配套摇杆瞄准。</p>}
-        <p className={styles.hint}>这些规则由 Flick Stick 和配套摇杆瞄准共用。</p>
+        {!f.standalone&&!profile.gyro.enabled&&<p className={styles.hint}>请在「体感」页启用体感，以使用拨动与扫动和配套摇杆瞄准。</p>}
+        <p className={styles.hint}>这些规则由拨动与扫动和配套摇杆瞄准共用。</p>
     </SettingSection>}
   </>;
 }
@@ -272,7 +278,7 @@ export type GameCalibrationProps = {
 export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'> & {profile:Profile}) {
   return <>
     <p className={styles.hint}>保存并应用基础层配置，启用映射后打开悬浮窗。对准参照物试转 360°，直接调整数值后再次试转，满意后保存。原来的手动转动测量保留在「更多校准方式」。</p>
-    {profile.gyro.output==='right_stick'&&<p className={styles.hint}>使用摇杆 Flick 前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。校准后保持游戏灵敏度不变。</p>}
+    {profile.gyro.output==='right_stick'&&<p className={styles.hint}>使用摇杆拨动前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。校准后保持游戏灵敏度不变。</p>}
     <div className="studio-actions">
       <button type="button" className="primary-btn" disabled={!canMeasure||(!profile.gyro.enabled&&!(profile.gyro.motion.flick.standalone&&(profile.gyro.motion.flick.enabled||profile.gyro.motion.flick.stick_aim)))}
         onClick={onOpenCalibration}>打开校准悬浮窗</button>
@@ -283,13 +289,13 @@ export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: P
 export function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration}:Props&Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'>) {
   const gyro=profile.gyro;
   return <SettingSection id="motion-calibration" title="输出与转角校准" summary={gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
-    <SettingField label="体感与 Flick 输出" disabled={gyro.motion.mode!=='pointer'}>
-      <div className={settingStyles.row}><SettingLabel label="体感与 Flick 输出"/><select aria-label="体感与 Flick 输出" value={gyro.output}
+    <SettingField label="体感与拨动输出" disabled={gyro.motion.mode!=='pointer'}>
+      <div className={settingStyles.row}><SettingLabel label="体感与拨动输出"/><select aria-label="体感与拨动输出" value={gyro.output}
         disabled={gyro.motion.mode!=='pointer'} onChange={event=>update(p=>{p.gyro.output=event.target.value as Profile['gyro']['output'];})}>
         <option value="mouse">鼠标</option><option value="right_stick" disabled={profile.virtual_gamepad==='none'}>虚拟手柄右摇杆</option>
       </select></div>
     </SettingField>
-    <p className={styles.hint}>体感、Flick 和配套摇杆瞄准共用这里的输出与转角换算。</p>
+    <p className={styles.hint}>体感、拨动和配套摇杆瞄准共用这里的输出与转角换算。</p>
     {profile.virtual_gamepad==='none'&&<p className={styles.hint}>在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。</p>}
     {gyro.output==='right_stick'
       ? <Range label="游戏满杆角速度" value={gyro.stick_full_scale_dps} min={30} max={1440} step={1} unit=" °/s" slider={false}

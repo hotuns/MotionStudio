@@ -39,7 +39,7 @@ sustain = true
 enabled = true
 activation = "always"
 output = "mouse"
-counts_per_degree = 12.0
+counts_per_degree = 40.0
 sensitivity = 2.0
 
 [stick_zones]

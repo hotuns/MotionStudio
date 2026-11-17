@@ -1,10 +1,10 @@
 dialog.dialog {
-  width: min(548px, calc(100vw - 40px));
+  width: min(640px, calc(100vw - 40px));
 }
 
 .steps {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   list-style: none;
   margin: 0 0 18px;
@@ -79,5 +79,6 @@ dialog.dialog {
 .preview > div { width: min(250px, 100%); }
 
 @media (max-width: 440px) {
+  .steps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .steps button { flex-direction: column; gap: 4px; }
 }

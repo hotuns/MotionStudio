@@ -17,7 +17,7 @@ export function StickInputSettings({profile,update}:Props) {
       settingPath={['input.'+(side==='left'?'deadzone_left':'deadzone_right'),...(profile.stick_mouse.stick===side?['stick_mouse.deadzone']:[])]}
       value={inputDeadzone(profile,side)*100} min={0} max={94} step={1} unit="%"
       onChange={v=>update(p=>setInputDeadzone(p,side,v/100))}/>)}
-    <p className={styles.hint}>摇杆鼠标、Flick Stick、方向映射和虚拟摇杆共用这里的输入死区。</p>
+    <p className={styles.hint}>摇杆鼠标、拨动与扫动、方向映射和虚拟摇杆共用这里的输入死区。</p>
     <Toggle label="启用摇杆防回弹" settingPath="stick_rebound_ms" value={profile.stick_rebound_ms!=null}
       onChange={enabled=>update(p=>{p.stick_rebound_ms=enabled?40:null;})}/>
     {profile.stick_rebound_ms!=null&&<Range label="防回弹窗口" value={profile.stick_rebound_ms} min={10} max={150} step={5} unit=" ms" slider={false}

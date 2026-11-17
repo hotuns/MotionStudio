@@ -156,11 +156,20 @@ pub fn install(app: &AppHandle, kind: &str) -> Result<InstallResult, String> {
     }
     let path = resource(app, &entry.file)?;
     let _verified_file = verify(&path, &entry)?;
-    launch(&path)
+    let log = super::runtime::runtime_dir(app)?.join(format!("driver-install-{kind}.log"));
+    if let Some(parent) = log.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    launch(&path, &log).map_err(|error| format!("{error} 安装日志：{}", log.display()))
 }
 
+// Both pinned official EXEs use Advanced Installer. Hide the bootstrapper and
+// MSI wizard, retaining explicit Windows elevation and suppressing auto-reboot.
+fn setup_parameters(log: &Path) -> String {
+    format!("/exenoui /qn /norestart /L*V \"{}\"", log.display())
+}
 #[cfg(windows)]
-fn launch(path: &Path) -> Result<InstallResult, String> {
+fn launch(path: &Path, log: &Path) -> Result<InstallResult, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::{
         Foundation::{CloseHandle, GetLastError, ERROR_CANCELLED, WAIT_OBJECT_0},
@@ -181,8 +190,7 @@ fn launch(path: &Path) -> Result<InstallResult, String> {
         .chain(Some(0))
         .collect();
     let verb: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
-    // Interactive official wizard; Windows handles elevation. Never auto-reboot.
-    let parameters: Vec<u16> = "/norestart".encode_utf16().chain(Some(0)).collect();
+    let parameters: Vec<u16> = setup_parameters(log).encode_utf16().chain(Some(0)).collect();
     unsafe {
         let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
         info.cbSize = std::mem::size_of_val(&info) as u32;
@@ -224,13 +232,17 @@ fn launch(path: &Path) -> Result<InstallResult, String> {
     }
 }
 #[cfg(not(windows))]
-fn launch(_: &Path) -> Result<InstallResult, String> {
+fn launch(_: &Path, _: &Path) -> Result<InstallResult, String> {
     Err("Driver installation requires Windows".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unattended_setup_keeps_restart_suppressed_and_quotes_the_log_path() {
+        assert_eq!(setup_parameters(Path::new(r"C:\Users\新 用户\driver-install-hidhide.log")), r#"/exenoui /qn /norestart /L*V "C:\Users\新 用户\driver-install-hidhide.log""#);
+    }
     #[test]
     fn bundled_installers_match_the_pinned_manifest() {
         for kind in ["hidhide", "vigem"] {

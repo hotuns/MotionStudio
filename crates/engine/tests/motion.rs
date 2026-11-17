@@ -492,6 +492,161 @@ fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_direc
 }
 
 #[test]
+fn flick_snaps_only_the_initial_angle_and_keeps_sweeps_continuous() {
+    for (snap_mode, strength, expected) in [
+        (FlickSnap::None, 1., 60.),
+        (FlickSnap::Four, 1., 90.),
+        (FlickSnap::Eight, 1., 45.),
+        (FlickSnap::Four, 0.5, 75.),
+        (FlickSnap::Four, 0., 60.),
+    ] {
+        for direction in [-1., 1.] {
+            let mut p = profile();
+            let f = &mut p.gyro.motion.flick;
+            f.enabled = true;
+            f.snap_mode = snap_mode;
+            f.snap_strength = strength;
+            let mut e = Engine::new(p).unwrap();
+            // Set the sub-threshold Y component first, then cross the rim at 60°.
+            for (index, value) in [(3, -16384), (2, (28377. * direction) as i16)] {
+                e.process(&InputEvent::Axis {
+                    time: time(1),
+                    index,
+                    value,
+                });
+            }
+            let mut initial = 0.;
+            for ms in (10..=150).step_by(10) {
+                initial += e.advance(0.01, ms * 1_000_000).mouse_delta[0];
+            }
+            assert!(
+                (initial - expected * 10. * direction).abs() < 0.1,
+                "{snap_mode:?}, {strength}: {initial}"
+            );
+            // From 60° to 80° on the rim: 20°, even with four/eight-way snapping.
+            for (index, value) in [(3, -5690), (2, (32269. * direction) as i16)] {
+                e.process(&InputEvent::Axis {
+                    time: time(151),
+                    index,
+                    value,
+                });
+            }
+            let mut sweep = 0.;
+            for ms in (160..=350).step_by(10) {
+                sweep += e.advance(0.01, ms * 1_000_000).mouse_delta[0];
+            }
+            assert!((sweep - 200. * direction).abs() < 0.1, "sweep {sweep}");
+        }
+    }
+}
+
+#[test]
+fn flick_only_finishes_the_initial_turn_but_never_emits_sweep_or_stabiliser_tail() {
+    for stabilise_ms in [0., 50.] {
+        let mut p = profile();
+        let f = &mut p.gyro.motion.flick;
+        f.enabled = true;
+        f.only = true;
+        f.stabilise_ms = stabilise_ms;
+        let mut e = Engine::new(p).unwrap();
+        axis(&mut e, 2, 32767);
+        let mut total = 0.;
+        for ms in (10..=150).step_by(10) {
+            if ms == 20 {
+                // Sweep while the initial 90° is still being paid out.
+                e.process(&InputEvent::Axis {
+                    time: time(ms),
+                    index: 3,
+                    value: 32767,
+                });
+                e.process(&InputEvent::Axis {
+                    time: time(ms),
+                    index: 2,
+                    value: 0,
+                });
+            }
+            if ms == 40 {
+                // Releasing the stick must not truncate that initial turn.
+                e.process(&InputEvent::Axis {
+                    time: time(ms),
+                    index: 3,
+                    value: 0,
+                });
+            }
+            total += e.advance(0.01, ms * 1_000_000).mouse_delta[0];
+        }
+        assert!((total - 900.).abs() < 0.01, "{stabilise_ms}: {total}");
+        assert_eq!(e.advance(0.01, 160_000_000).mouse_delta, [0.; 2]);
+        e.process(&InputEvent::Axis {
+            time: time(161),
+            index: 2,
+            value: -32768,
+        });
+        let mut next = 0.;
+        for ms in (170..=310).step_by(10) {
+            next += e.advance(0.01, ms * 1_000_000).mouse_delta[0];
+        }
+        assert!((next + 900.).abs() < 0.01, "rearmed turn {next}");
+    }
+}
+
+#[test]
+fn flick_snap_settings_roundtrip_and_layer_changes_require_recenter() {
+    let mut p = profile();
+    p.gyro.motion.flick.enabled = true;
+    p.layers.push(
+        serde_json::from_value(serde_json::json!({
+            "id":"snap", "name":"Snap", "input":"left_shoulder",
+            "settings":{"gyro":{"motion":{"flick":{
+                "only":true, "snap_mode":"eight", "snap_strength":0.75
+            }}}}
+        }))
+        .unwrap(),
+    );
+    let restored = parse_profile(&toml::to_string_pretty(&p).unwrap()).unwrap();
+    assert!(!restored.gyro.motion.flick.only);
+    assert_eq!(restored.gyro.motion.flick.snap_mode, FlickSnap::None);
+    let mut layer = motion_core::layers::resolve(&restored, &[0]).unwrap();
+    assert!(layer.gyro.motion.flick.only);
+    assert_eq!(layer.gyro.motion.flick.snap_mode, FlickSnap::Eight);
+    assert_eq!(layer.gyro.motion.flick.snap_strength, 0.75);
+    let mut e = Engine::new(restored).unwrap();
+    axis(&mut e, 2, 32767);
+    assert!(e.advance(0.01, 10_000_000).mouse_delta[0] > 0.);
+    e.apply_layer(layer.clone()).unwrap();
+    assert_eq!(e.advance(0.01, 20_000_000).mouse_delta, [0.; 2]);
+    for strength in [-0.01, 1.01, f32::NAN, f32::INFINITY] {
+        layer.gyro.motion.flick.snap_strength = strength;
+        assert!(layer.validate().is_err());
+    }
+}
+
+#[test]
+fn jsm_default_response_preserves_explicit_calibration_and_filter_values_on_load() {
+    let mut p = profile();
+    p.gyro = Default::default();
+    let native = flexinput_engine::eval::JsmAimSettings::default();
+    assert_eq!(
+        p.gyro.counts_per_degree,
+        native.real_world_calibration / native.in_game_sens
+    );
+    assert_eq!(p.gyro.smoothing_ms, 0.);
+    assert_eq!(p.gyro.acceleration.fast_multiplier, 1.);
+    assert_eq!(p.gyro.acceleration.curve, Curve::Linear);
+    assert_eq!(p.gyro.motion.angle_snap, 0.);
+    p.gyro.counts_per_degree = 12.;
+    p.gyro.smoothing_ms = 16.;
+    p.gyro.sensitivity = 2.5;
+    p.gyro.acceleration.power_reference = 60.;
+    p.gyro.motion.angle_snap_ease = true;
+    let restored = parse_profile(&toml::to_string_pretty(&p).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(&p).unwrap(),
+        serde_json::to_value(restored).unwrap()
+    );
+}
+
+#[test]
 fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
     for pause_at in [None, Some(0), Some(2)] {
         let mut p = profile();

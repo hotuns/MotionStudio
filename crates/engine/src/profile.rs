@@ -291,6 +291,7 @@ impl Gyro {
 }
 impl Default for Gyro {
     fn default() -> Self {
+        let jsm = flexinput_engine::eval::JsmAimSettings::default();
         Self {
             enabled: false,
             output: GyroOutput::Mouse,
@@ -298,7 +299,7 @@ impl Default for Gyro {
             activation_mode: GyroActivationMode::Hold,
             activation_threshold: 0.2,
             pause_input: None,
-            counts_per_degree: 12.0,
+            counts_per_degree: jsm.real_world_calibration / jsm.in_game_sens,
             stick_full_scale_dps: 360.0,
             sensitivity: 1.0,
             vertical_ratio: 1.0,
@@ -346,17 +347,18 @@ pub struct GyroAcceleration {
 
 impl Default for GyroAcceleration {
     fn default() -> Self {
+        let jsm = flexinput_engine::eval::jsm_motion_curves::Settings::default();
         Self {
             fast_multiplier: 1.0,
             start_dps: 40.0,
             full_dps: 180.0,
             curve: Default::default(),
-            natural_half: 200.0,
-            power_reference: 60.0,
-            power_exponent: 2.0,
-            sigmoid_mid: 90.0,
-            sigmoid_width: 20.0,
-            jump_width: 10.0,
+            natural_half: jsm.natural_vhalf,
+            power_reference: jsm.power_vref,
+            power_exponent: jsm.power_exponent,
+            sigmoid_mid: jsm.sigmoid_mid,
+            sigmoid_width: jsm.sigmoid_width,
+            jump_width: jsm.jump_tau,
             points: vec![[0.0, 1.0], [180.0, 2.0]],
         }
     }
