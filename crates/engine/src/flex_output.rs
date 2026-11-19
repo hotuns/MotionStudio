@@ -1,7 +1,7 @@
 //! FlexInput's VirtualDevice/pin contract over Studio-owned output transports.
 //! SendInput compatibility and HID lifetime ownership remain explicit adapters.
 use crate::{
-    engine::PadState,
+    engine::{Ds4ImuState, PadState},
     output::{MouseTracePoint, OutputStats, Sink},
 };
 use anyhow::{bail, Result};
@@ -324,6 +324,12 @@ impl<S: Sink + Send> Sink for FlexVirtualSink<S> {
     }
     fn idle_gamepad(&mut self) -> Result<()> {
         self.inner.idle_gamepad()
+    }
+    fn stage_ds4_imu(&mut self, state: Ds4ImuState) -> Result<()> {
+        self.inner.stage_ds4_imu(state)
+    }
+    fn retry_ds4_imu_clear(&mut self) -> Result<()> {
+        self.inner.retry_ds4_imu_clear()
     }
     fn scroll(&mut self, horizontal: i32, vertical: i32) -> Result<()> {
         self.submit("scroll_right", Signal::Float(horizontal as f32))?;
