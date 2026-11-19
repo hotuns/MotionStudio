@@ -86,6 +86,7 @@ export function ActionMappings({profile, baseProfile, layerId='', onEditBase, on
     ? controlLabel(part) : t(padInputLabel(part, split))).join(' + ');
   const touches = (part: string) => physicalControl(part) === 'touchpad' || (split && part === 'misc2');
   const motion = profile.gyro.motion;
+  const passthrough = profile.gyro.output === 'ds4_imu';
   const gamepadOutputs = virtualGamepadControls(profile.virtual_gamepad);
   const gamepadBindings = profile.gamepad_bindings ?? gamepadOutputs.map(output=>({input:output,output}));
   const canFillGamepad = fillStandardGamepadBindings(profile.virtual_gamepad, gamepadBindings).length
@@ -95,7 +96,7 @@ export function ActionMappings({profile, baseProfile, layerId='', onEditBase, on
       ? [{action:{kind:'gamepad' as const,value},index}] : []),
     ...profile.actions.map((value,index)=>({action:{kind:'binding' as const,value},index})),
     ...motion.turns.map((value,index)=>({action:{kind:'turn' as const,value},index})),
-    ...motion.bindings.map((value,index)=>({action:{kind:'motion' as const,value},index})),
+    ...(passthrough?[]:motion.bindings.map((value,index)=>({action:{kind:'motion' as const,value},index}))),
   ];
   const bindingCounts = new Map<string, number>();
   const groups = new Map<string, InputGroup>();
@@ -273,8 +274,8 @@ export function ActionMappings({profile, baseProfile, layerId='', onEditBase, on
               }}>填入标准布局</button>}
           </>}
           {!touchOnly&&<>
-            <button type="button" className="secondary-btn" disabled={blocked||!!capture||profile.gyro.motion.bindings.length>=64}
-              onClick={()=>addMotion('motion')}>添加体感动作</button>
+            {!passthrough&&<button type="button" className="secondary-btn" disabled={blocked||!!capture||profile.gyro.motion.bindings.length>=64}
+              onClick={()=>addMotion('motion')}>添加体感动作</button>}
             <button type="button" className="secondary-btn" disabled={blocked||!!capture||profile.gyro.motion.turns.length>=32}
               onClick={()=>addMotion('turn')}>添加定角转身</button>
           </>}
@@ -313,7 +314,7 @@ export function ActionMappings({profile, baseProfile, layerId='', onEditBase, on
         });
         setGamepadEdit(null);
       }}/>}
-    {extra&&<MotionActionEditor action={extra.action} blocked={blocked} onClose={()=>setExtra(null)}
+    {extra&&(!passthrough||extra.action.kind==='turn')&&<MotionActionEditor action={extra.action} blocked={blocked} onClose={()=>setExtra(null)}
       onSave={action=>{
         onUpdate(draft=>{
           const motion=draft.gyro.motion;

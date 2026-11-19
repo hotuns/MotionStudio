@@ -26,7 +26,8 @@ async function inspect(lookup: Lookup, signal: AbortSignal): Promise<Result> {
 
 function ProfilePreview({profile}: {profile: Profile}) {
   const {gyro} = profile;
-  const mode = gyro.motion.mode === 'steering' ? '姿态控制摇杆' :
+  const passthrough = gyro.output === 'ds4_imu';
+  const mode = passthrough ? 'DS4 传感器直通' : gyro.motion.mode === 'steering' ? '姿态控制摇杆' :
     gyro.motion.mode === 'stick_rotation' ? '体感旋转摇杆方向' :
     gyro.output === 'mouse' ? '鼠标瞄准' : '右摇杆瞄准';
   const groups = [{id: '', name: '基础层', actions: profile.actions}, ...(profile.layers ?? [])];
@@ -38,7 +39,7 @@ function ProfilePreview({profile}: {profile: Profile}) {
         <div><dt>开启方式</dt><dd>{gyro.activation === 'always' ? '始终开启' : <>
           {gyro.activation_mode === 'hold' ? '按住开启' : '按一下切换开关'} · {inputLabel(gyro.activation)}
         </>}</dd></div>
-        <div><dt>体感灵敏度</dt><dd>{Number(gyro.sensitivity.toFixed(2))}×</dd></div>
+        {!passthrough&&<div><dt>体感灵敏度</dt><dd>{Number(gyro.sensitivity.toFixed(2))}×</dd></div>}
       </>}
     </dl>
     {groups.some(group => group.actions.length > 0) && <details className={styles.shareBindings}>

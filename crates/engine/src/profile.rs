@@ -284,9 +284,19 @@ pub struct Gyro {
     pub motion: crate::motion_config::MotionConfig,
 }
 impl Gyro {
+    pub fn uses_ds4_imu(&self) -> bool {
+        self.output == GyroOutput::Ds4Imu
+    }
+
+    pub fn needs_accel(&self) -> bool {
+        self.uses_ds4_imu() || self.motion.needs_accel()
+    }
+
     pub(crate) fn flick_available(&self) -> bool {
         let flick = &self.motion.flick;
-        (self.enabled || flick.standalone) && (flick.enabled || flick.stick_aim)
+        !self.uses_ds4_imu()
+            && (self.enabled || flick.standalone)
+            && (flick.enabled || flick.stick_aim)
     }
 }
 impl Default for Gyro {
@@ -319,6 +329,7 @@ pub enum GyroOutput {
     #[default]
     Mouse,
     RightStick,
+    Ds4Imu,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -504,6 +515,18 @@ pub fn valid_output(output: &str) -> bool {
     crate::bindings::output_chord(output).is_some()
 }
 impl Profile {
+    pub fn has_ds4_imu(&self) -> bool {
+        self.gyro.uses_ds4_imu()
+            || self.layers.iter().any(|layer| {
+                layer
+                    .settings
+                    .get("gyro")
+                    .and_then(|gyro| gyro.get("output"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("ds4_imu")
+            })
+    }
+
     pub fn materialize_gamepad_bindings(&mut self) {
         if self.virtual_gamepad != GamepadTarget::None && self.gamepad_bindings.is_none() {
             self.gamepad_bindings = Some(crate::gamepad_bindings::standard_bindings(
@@ -582,7 +605,11 @@ impl Profile {
             }
         }
         let g = &self.gyro;
+        if self.has_ds4_imu() && self.virtual_gamepad != GamepadTarget::DualShock4 {
+            bail!("传感器直通需要选择虚拟 DualShock 4");
+        }
         if g.enabled
+            && !g.uses_ds4_imu()
             && g.motion.mode != crate::motion_config::MotionMode::Pointer
             && g.output != GyroOutput::RightStick
         {

@@ -26,6 +26,7 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
   onPreviewOutput:()=>void;
 }&Pick<GameCalibrationProps,'status'|'onMotionAction'>) {
   const gyro=profile.gyro;
+  const passthrough=gyro.output==='ds4_imu';
   const setGyro=<K extends keyof Gyro>(key:K,value:Gyro[K])=>update(draft=>{draft.gyro[key]=value;});
   const activation=gyro.activation==='always'?'always':gyro.activation_mode;
   const bindingLocked=!!recording||!!status?.binding_capture||!!status?.motion?.measuring;
@@ -33,8 +34,10 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
   const preset=gyro.motion.smoothing==='ema'?smoothingPresets.find(([,ms])=>ms===gyro.smoothing_ms&&(ms!==0||isJsmResponse(gyro))):undefined;
 
   return <div className={settingStyles.page}>
-    <SettingSection id="motion-main" title="体感瞄准" defaultOpen summary={gyro.enabled?<>{gyro.sensitivity}×</>:'关闭'}>
-      <Toggle label="启用体感" value={gyro.enabled} onChange={value=>setGyro('enabled',value)}/>
+    <SettingSection id="motion-main" title={passthrough?'DS4 传感器直通':'体感瞄准'} defaultOpen
+      summary={gyro.enabled?(passthrough?'已启用':<>{gyro.sensitivity}×</>):'关闭'}>
+      <Toggle label="启用体感" value={gyro.enabled} onChange={value=>setGyro('enabled',value)}
+        help={passthrough?'按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。':undefined}/>
       {gyro.enabled&&<>
         <SettingField label="开启和暂停" path={['gyro.activation','gyro.activation_mode','gyro.pause_input']} disabled={bindingLocked}>
           <div className={settingStyles.row}><SettingLabel label="开启方式"/>
@@ -60,7 +63,7 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
         </SettingField>
         {(activation!=='always'||gyro.pause_input)&&<Range label="扳机与摇杆阈值" value={gyro.activation_threshold}
           min={0} max={0.95} step={0.05} onChange={value=>setGyro('activation_threshold',value)}/>}
-        <Range label="体感灵敏度" value={gyro.sensitivity} min={0.1} max={10} step={0.1} unit="×"
+        {!passthrough&&<><Range label="体感灵敏度" value={gyro.sensitivity} min={0.1} max={10} step={0.1} unit="×"
           onChange={value=>setGyro('sensitivity',value)} help="转得太慢就调高，容易转过头就调低。"/>
         <Range label="垂直灵敏度比例" value={gyro.vertical_ratio} min={0.1} max={2} step={0.05} unit="×"
           onChange={value=>setGyro('vertical_ratio',value)}/>
@@ -69,16 +72,20 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
             onClick={()=>update(draft=>{if(ms===0)applyJsmResponse(draft.gyro);else{draft.gyro.motion.smoothing='ema';draft.gyro.smoothing_ms=ms;}})}>{label}</button>)}
         </div></div>
         <p className={styles.hint}>JSM 线性：加速倍率 1×，关闭额外平滑、低速抑制、吸附与刹车。保留当前灵敏度、坐标、转角校准和自定义滤波。</p>
+        </>}
       </>}
-      <div className="studio-actions"><button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button></div>
+      {passthrough?<>
+        <p className={styles.hint}>使用同时支持陀螺仪和加速度计的实体手柄。设备静止校准和安装方向可在「设备与输入」调整。</p>
+        {device&&(!device.gyro||!device.accelerometer)&&<p className={settingStyles.notice}>虚拟 PS4 传感器直通需要支持陀螺仪和加速度计的体感接口</p>}
+        <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
+        <div className="studio-actions"><button type="button" className="secondary-btn" onClick={onOpenDevice}>打开设备校准</button></div>
+      </>:<div className="studio-actions"><button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button></div>}
     </SettingSection>
-    {gyro.enabled&&<><StabilitySettings profile={profile} update={update} onOpenDevice={onOpenDevice} deviceNoise={deviceNoise}/>
+    {gyro.enabled&&!passthrough&&<><StabilitySettings profile={profile} update={update} onOpenDevice={onOpenDevice} deviceNoise={deviceNoise}/>
     <AccelerationSettings profile={profile} update={update}/>
     <MotionBehavior profile={profile} update={update}/>
     <SettingSection id="motion-filters" title="采样与扩展滤波" summary={<>{gyro.motion.custom_filters?.length??0} 个滤波器</>} lazy>
-      <MotionChoice label="采样时钟" value={gyro.timestamp_source}
-        options={[["host","SDL 事件时间戳（推荐）"],["sensor","传感器时间戳"]]}
-        onChange={value=>setGyro('timestamp_source',value as Gyro['timestamp_source'])}/>
+      <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
       <SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
         <CustomFilters key={profileId} profile={profile} update={update} embedded
           running={status?.profile_id===profileId&&['running','observing'].includes(status.state)}
@@ -88,5 +95,11 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
     </SettingSection>
     </>}
   </div>;
+}
+
+function SampleClock({value,onChange}:{value:Gyro['timestamp_source'];onChange:(value:Gyro['timestamp_source'])=>void}) {
+  return <MotionChoice label="采样时钟" value={value}
+    options={[["host","SDL 事件时间戳（推荐）"],["sensor","传感器时间戳"]]}
+    onChange={next=>onChange(next as Gyro['timestamp_source'])}/>;
 }
 

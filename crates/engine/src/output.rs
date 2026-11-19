@@ -1,4 +1,4 @@
-use crate::engine::{Frame, PadState};
+use crate::engine::{Ds4ImuState, Frame, PadState};
 use anyhow::{bail, Result};
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -25,6 +25,12 @@ pub enum GamepadBackend {
     Vigem,
     HidMaestro,
     UsbIp,
+}
+
+impl OutputBackend {
+    pub fn supports_ds4_imu(self, gamepad: GamepadBackend) -> bool {
+        self == Self::Legacy || gamepad == GamepadBackend::Vigem
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -115,6 +121,14 @@ pub trait Sink {
         Ok(())
     }
     fn gamepad(&mut self, pad: PadState) -> Result<()>;
+    /// Stage sensor fields on the pad. The next gamepad report submits them.
+    fn stage_ds4_imu(&mut self, state: Ds4ImuState) -> Result<()> {
+        anyhow::ensure!(state == Ds4ImuState::Off, "Output sink does not support DS4 sensor reports");
+        Ok(())
+    }
+    fn retry_ds4_imu_clear(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn idle_gamepad(&mut self) -> Result<()> {
         Ok(())
     }
@@ -159,6 +173,12 @@ impl<T: Sink + ?Sized> Sink for Box<T> {
     fn gamepad(&mut self, pad: PadState) -> Result<()> {
         (**self).gamepad(pad)
     }
+    fn stage_ds4_imu(&mut self, state: Ds4ImuState) -> Result<()> {
+        (**self).stage_ds4_imu(state)
+    }
+    fn retry_ds4_imu_clear(&mut self) -> Result<()> {
+        (**self).retry_ds4_imu_clear()
+    }
     fn idle_gamepad(&mut self) -> Result<()> {
         (**self).idle_gamepad()
     }
@@ -167,6 +187,9 @@ impl<T: Sink + ?Sized> Sink for Box<T> {
 #[derive(Default)]
 pub struct ObserveSink;
 impl Sink for ObserveSink {
+    fn stage_ds4_imu(&mut self, _: Ds4ImuState) -> Result<()> {
+        Ok(())
+    }
     fn scroll(&mut self, _: i32, _: i32) -> Result<()> {
         Ok(())
     }
@@ -190,6 +213,7 @@ pub struct Dispatcher<S: Sink> {
     scheduled: bool,
     pending_pad: Option<PadState>,
     pad: Option<PadState>,
+    ds4_imu: Ds4ImuState,
     pad_uncertain: bool,
     mouse_trace: Option<MouseTrace>,
     preview_generation: u64,
@@ -199,6 +223,10 @@ pub struct Dispatcher<S: Sink> {
     pub pad_reports: u64,
 }
 impl<S: Sink> Dispatcher<S> {
+    pub fn retry_ds4_imu_clear(&mut self) -> Result<()> {
+        self.sink.retry_ds4_imu_clear()
+    }
+
     pub fn feedback(&mut self) -> Option<crate::feedback::FeedbackFrame> {
         self.sink.feedback()
     }
@@ -217,6 +245,7 @@ impl<S: Sink> Dispatcher<S> {
             scheduled: false,
             pending_pad: None,
             pad: None,
+            ds4_imu: Ds4ImuState::Off,
             pad_uncertain: false,
             mouse_trace,
             preview_generation: 0,
@@ -269,6 +298,15 @@ impl<S: Sink> Dispatcher<S> {
             self.send_mouse(pending)?
         };
         self.pending_pad = frame.pad;
+        // Sensor reports are tied to individual gyro events. Do not replace
+        // them with the latest sample at a scheduled analog output slot.
+        if self.ds4_imu != frame.ds4_imu {
+            self.pad_uncertain = true;
+            self.sink.stage_ds4_imu(frame.ds4_imu)?;
+            self.flush_pad()?;
+            self.ds4_imu = frame.ds4_imu;
+            return Ok(());
+        }
         // Keep short button taps and trigger edges even if they begin and end
         // between output slots. Only continuous analog state can be replaced.
         if !self.scheduled || has_pad_edge(self.pad, frame.pad) {
@@ -335,6 +373,13 @@ impl<S: Sink> Dispatcher<S> {
         let mut errors = vec![];
         if let Err(error) = self.sink.cancel_pending() {
             errors.push(error.to_string());
+        }
+        if self.ds4_imu != Ds4ImuState::Off || self.pad_uncertain {
+            self.pad_uncertain = true;
+            match self.sink.stage_ds4_imu(Ds4ImuState::Off) {
+                Ok(()) => self.ds4_imu = Ds4ImuState::Off,
+                Err(error) => errors.push(error.to_string()),
+            }
         }
         for key in crate::bindings::button_order(&self.held, false) {
             match self.sink.button(&key, false) {
@@ -618,6 +663,33 @@ mod windows {
             };
             crate::flex_output::write_pad(target.device(), p);
             target.flush_checked()
+        }
+        fn stage_ds4_imu(&mut self, state: Ds4ImuState) -> Result<()> {
+            if let Some(VirtualTarget::DualShock4(pad)) = &mut self.target {
+                match state {
+                    Ds4ImuState::Off => pad.set_imu(None),
+                    Ds4ImuState::Neutral => {
+                        pad.set_imu(None);
+                        pad.prime_imu();
+                    }
+                    Ds4ImuState::Sample(sample) => {
+                        pad.set_imu(Some(flexinput_virtual::native_gamepads::Ds4ImuSample {
+                            timestamp_ns: sample.timestamp_ns,
+                            gyro: sample.gyro_dps,
+                            accel: sample.accel_g,
+                        }));
+                    }
+                }
+            } else {
+                anyhow::ensure!(state == Ds4ImuState::Off, "DS4 sensor reports require a ViGEm DS4 target");
+            }
+            Ok(())
+        }
+        fn retry_ds4_imu_clear(&mut self) -> Result<()> {
+            if let Some(VirtualTarget::DualShock4(pad)) = &mut self.target {
+                pad.retry_imu_clear().map_err(anyhow::Error::msg)?;
+            }
+            Ok(())
         }
         fn idle_gamepad(&mut self) -> Result<()> {
             // DS4 may temporarily have no pending USB read (Win32 259). In that

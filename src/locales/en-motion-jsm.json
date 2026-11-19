@@ -82,5 +82,22 @@
   "仅拨动": "Flick only",
   "拨动／转动": "Flick / rotation",
   "转动与回中": "Rotation & recentering",
-  "拨动判定": "Flick detection"
+  "拨动判定": "Flick detection",
+  "DS4 传感器直通": "DS4 sensor passthrough",
+  "DS4 传感器": "DS4 sensors",
+  "传感器直通期间停用": "Unavailable during sensor passthrough",
+  "切换到鼠标或虚拟右摇杆体感输出后，可使用拨动和配套摇杆瞄准。": "Select mouse or virtual right-stick gyro output to use Flick and companion stick aiming.",
+  "请在「设置与组件」将虚拟手柄后端设为 ViGEm，再使用 DS4 传感器直通。": "Set the virtual gamepad backend to ViGEm in Settings and components to use DS4 sensor passthrough.",
+  "DS4 传感器直通需要选择虚拟 DualShock 4 和 ViGEm 后端。": "DS4 sensor passthrough requires a virtual DualShock 4 with the ViGEm backend.",
+  "切换虚拟手柄类型前，请先在使用 DS4 传感器直通的基础层或配置层改用其他体感输出。": "Choose another gyro output in the base profile and any layers that use DS4 sensor passthrough before changing the virtual controller type.",
+  "向虚拟 DualShock 4 发送经设备校准的陀螺仪和加速度计数据。请在支持读取 DS4 传感器的游戏或 Steam 输入中设置体感。": "Send calibrated gyro and accelerometer data to the virtual DualShock 4. Configure gyro in a game or Steam Input that can read DS4 sensors.",
+  "下面的转角换算用于按键触发的定角转身。": "The conversion settings below apply to button-triggered fixed-angle turns.",
+  "使用同时支持陀螺仪和加速度计的实体手柄。设备静止校准和安装方向可在「设备与输入」调整。": "Use a physical controller with a gyroscope and accelerometer. Adjust stationary calibration and mounting orientation in Devices and input.",
+  "鼠标和右摇杆模式由 Studio 计算瞄准。DS4 传感器直通把设备数据交给游戏或 Steam 输入处理。": "Studio computes aiming for mouse and right-stick output. In DS4 sensor passthrough mode the game or Steam Input handles sensor data.",
+  "DS4 传感器直通 ViGEm IMU": "DS4 sensor passthrough ViGEm IMU",
+  "虚拟 PS4 传感器直通需要 ViGEm 手柄输出后端": "Virtual PS4 sensor passthrough requires the ViGEm gamepad backend",
+  "虚拟 PS4 传感器直通需要支持陀螺仪和加速度计的体感接口": "Virtual PS4 sensor passthrough requires a controller interface with a gyroscope and accelerometer",
+  "传感器直通由游戏处理，无需校准游戏转角。": "The game handles sensor passthrough and does not require Studio turn calibration.",
+  "传感器直通需要选择虚拟 DualShock 4": "Sensor passthrough requires a virtual DualShock 4",
+  "按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。": "Send calibrated sensor data to the virtual controller using the selected activation mode."
 }

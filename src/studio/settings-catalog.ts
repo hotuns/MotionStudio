@@ -43,7 +43,7 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('motion','motion-direction-stability','gyro.motion.',[['angle_snap','水平／垂直吸附角'], ['angle_snap_ease','柔和进入角度吸附'], ['drift_correction','使用重力修正姿态漂移']]),
   ...group('motion','motion-filters','gyro.',[['timestamp_source','采样时钟'], ['motion.custom_filters','自定义滤波']]),
   ...group('motion','motion-calibration','gyro.',[
-    ['output','体感与拨动输出'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
+    ['output','体感输出','DS4 传感器直通 ViGEm IMU'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),
   ...group('sticks','stick-input','input.',[['deadzone_left','左摇杆输入死区'], ['deadzone_right','右摇杆输入死区']]),
   ...group('sticks','stick-directions','input.',[['lstick_directions','左摇杆方向判定'], ['lstick_overlap_degrees','左摇杆斜向重叠角度'], ['rstick_directions','右摇杆方向判定'], ['rstick_overlap_degrees','右摇杆斜向重叠角度']]),

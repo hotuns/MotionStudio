@@ -33,7 +33,7 @@ export type MotionConfig={
 };
 export type Gyro = {
   enabled:boolean;
-  output:'mouse'|'right_stick';
+  output:'mouse'|'right_stick'|'ds4_imu';
   activation:string;
   activation_mode:'hold'|'toggle';
   activation_threshold:number;

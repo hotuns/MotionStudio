@@ -30,6 +30,17 @@ use std::{
 };
 
 const PAD_SHORTCUT_EVENT_LIMIT: usize = 64;
+const DS4_IMU_REQUIRES_SENSORS: &str = "虚拟 PS4 传感器直通需要支持陀螺仪和加速度计的体感接口";
+
+fn validate_ds4_imu_backend(config: &RunConfig, profile: &Profile) -> Result<()> {
+    anyhow::ensure!(
+        !config.emit
+            || !profile.has_ds4_imu()
+            || config.output_backend.supports_ds4_imu(config.gamepad_backend),
+        "虚拟 PS4 传感器直通需要 ViGEm 手柄输出后端"
+    );
+    Ok(())
+}
 
 fn probe_output(
     backend: OutputBackend,
@@ -499,6 +510,7 @@ impl Runtime {
     fn start(&mut self, config: RunConfig) -> Result<()> {
         config.io_rates.validate()?;
         Engine::new(config.profile.clone())?;
+        validate_ds4_imu_backend(&config, &config.profile)?;
         if config.device_path.trim().is_empty() {
             bail!("请先选择一个手柄接口");
         }
@@ -684,9 +696,7 @@ impl Runtime {
         if let Some(sdl) = &mut self.sdl {
             let sensors = sdl.set_sensors(
                 !self.status.ui_navigation,
-                self.engine
-                    .as_ref()
-                    .is_some_and(|engine| engine.profile.gyro.enabled),
+                config.profile.gyro.enabled || config.profile.has_ds4_imu(),
             );
             if !sdl.is_connected() {
                 return self.lost_device();
@@ -746,8 +756,9 @@ impl Runtime {
         }
         let config = self.config.as_ref().context("Missing configuration")?;
         let path = config.device_path.clone();
-        let require_gyro = config.profile.gyro.enabled;
-        let require_accel = require_gyro && config.profile.gyro.motion.needs_accel();
+        let ds4_imu = config.profile.has_ds4_imu();
+        let require_gyro = config.profile.gyro.enabled || ds4_imu;
+        let require_accel = ds4_imu || (config.profile.gyro.enabled && config.profile.gyro.needs_accel());
         let selected = self
             .connected_input()
             .filter(|device| device.path.eq_ignore_ascii_case(&path))
@@ -783,6 +794,10 @@ impl Runtime {
             self.next_discovery = Instant::now() + Duration::from_secs(2);
             return Ok(());
         };
+        if ds4_imu && (!device.gyro || !device.accelerometer) {
+            self.fault(DS4_IMU_REQUIRES_SENSORS.into());
+            return Ok(());
+        }
         if require_gyro && !device.gyro {
             self.close_input();
             self.status.state = "waiting".into();
@@ -828,11 +843,21 @@ impl Runtime {
             .config
             .as_ref()
             .context("引擎未运行，请先开始映射或观察")?;
+        validate_ds4_imu_backend(config, &profile)?;
         if self.calibration.is_some() {
             bail!("请等待静止校准完成");
         }
         if self.engine.as_ref().is_some_and(Engine::is_measuring) {
             bail!("请先结束或取消转角测量，再应用配置");
+        }
+        if profile.has_ds4_imu()
+            && self
+                .status
+                .device
+                .as_ref()
+                .is_some_and(|device| !device.gyro || !device.accelerometer)
+        {
+            bail!("{DS4_IMU_REQUIRES_SENSORS}");
         }
         if self
             .status
@@ -843,7 +868,7 @@ impl Runtime {
             bail!("当前接口没有体感，请停止并选择支持体感的接口");
         }
         if self.status.device.as_ref().is_some_and(|d| {
-            profile.gyro.enabled && profile.gyro.motion.needs_accel() && !d.accelerometer
+            profile.gyro.enabled && profile.gyro.needs_accel() && !d.accelerometer
         }) {
             bail!("当前接口没有加速度计，不能应用玩家／世界坐标或倾斜动作");
         }
@@ -938,7 +963,7 @@ impl Runtime {
         // Reuse the connected SDL session and its FIFO. Do not drain or reseed
         // from a newer snapshot: a queued release belongs to the old press.
         if let Some(sdl) = &mut self.sdl {
-            sdl.set_sensors(true, profile.gyro.enabled)?;
+            sdl.set_sensors(true, profile.gyro.enabled || profile.has_ds4_imu())?;
         }
         let previous =
             motion_core::engine::PressHandoff::new(self.engine.take().context("Missing engine")?);
@@ -1783,6 +1808,9 @@ impl Runtime {
         self.last_advance = advance_at;
         if self.output_paused() {
             self.io_clock.begin_flush(pass);
+            if let Some(output) = &mut self.output {
+                output.retry_ds4_imu_clear()?;
+            }
             return Ok(());
         }
         let Some(engine) = &mut self.engine else {

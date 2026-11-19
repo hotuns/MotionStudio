@@ -1035,8 +1035,8 @@
       "upstreamSha256": null,
       "modified": true,
       "derivedFrom": "crates/virtual/src/windows.rs::instance_label, XRumble, VirtualXInput through VirtualDS4 and pure axis/button helpers; headless checked flush and player-index API exposure (see docs/flexinput-reuse.md)",
-      "vendoredSha256": "771b4871df32d7e9fa0b4653258756f614d661d3b147350dffb7d6789748d5b6",
-      "patch": "Preserve original reports, target and notifications. Add command sequence counters captured atomically with polled values; existing fallible flush/player-index exposure retained. Offline tests never connect a driver. DS4 checked submit treats only Win32 259 as transient; Studio resubmits retained DS4 state at output cadence. Preserve immediate IOCTL errors and wait only on pending operations; report encoding is unchanged."
+      "vendoredSha256": "a772341d1393c2e58f6d141486313a15d9d1379d8f4b44968b7abc7c9711d0e3",
+      "patch": "Preserve original reports, target and notifications. Add command sequence counters captured atomically with polled values; existing fallible flush/player-index exposure retained. Offline tests never connect a driver. DS4 checked submit treats only Win32 259 as transient; Studio resubmits retained DS4 state at output cadence. Preserve immediate IOCTL errors and wait only on pending operations. Enable the reserved opt-in DS4 extended report with calibrated Sony axes, wrapping sensor timestamps, neutral priming and zero-gyro clearing. Ordinary reports preserve the cached sensor timestamp byte."
     },
     {
       "path": "crates/virtual/src/composite_device.rs",

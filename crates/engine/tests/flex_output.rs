@@ -82,6 +82,7 @@ fn flex_pins_preserve_chords_side_buttons_wheel_direction_and_pad_bits() {
         mouse_delta: [999_999., -999_999.],
         scroll: [-2, 3],
         pad: Some(pad),
+        ..Default::default()
     })
     .unwrap();
     out.reset().unwrap();

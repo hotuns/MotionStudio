@@ -19,6 +19,7 @@ mod windows;
 
 pub const LABEL: &str = "game-calibration";
 const MAPPING_CHANGED: &str = "校准所用的映射已改变，请重新打开校准悬浮窗。";
+const DS4_IMU_CALIBRATION_UNAVAILABLE: &str = "传感器直通由游戏处理，无需校准游戏转角。";
 
 #[derive(Clone, Default)]
 pub struct CalibrationWindow {
@@ -222,6 +223,7 @@ pub async fn open_calibration_window(
         }
         let entry = owner.store.load(&profile_id).map_err(text)?;
         let gyro = &entry.profile.gyro;
+        let scale = scale(gyro)?;
         if !gyro.enabled
             && !(gyro.motion.flick.standalone
                 && (gyro.motion.flick.enabled || gyro.motion.flick.stick_aim))
@@ -245,8 +247,8 @@ pub async fn open_calibration_window(
             manual_available: gyro.enabled
                 && gyro.motion.mode == MotionMode::Pointer
                 && snapshot.status.device.as_ref().is_some_and(|d| d.gyro),
-            original_scale: scale(gyro),
-            draft_scale: scale(gyro),
+            original_scale: scale,
+            draft_scale: scale,
             result: None,
             saved: None,
             hotkeys: Hotkeys::default(),
@@ -516,10 +518,12 @@ fn perform_action(
                     match gyro.output {
                         GyroOutput::Mouse => gyro.counts_per_degree = measurement.scale,
                         GyroOutput::RightStick => gyro.stick_full_scale_dps = measurement.scale,
+                        GyroOutput::Ds4Imu => return Err(DS4_IMU_CALIBRATION_UNAVAILABLE.into()),
                     }
                     apply_measurement(&mut gyro, measurement)?;
-                    validate_scale(gyro.output, scale(&gyro))?;
-                    session.draft_scale = scale(&gyro);
+                    let measured_scale = scale(&gyro)?;
+                    validate_scale(gyro.output, measured_scale)?;
+                    session.draft_scale = measured_scale;
                     session.manual = false;
                     session.result = None;
                 }
@@ -528,7 +532,7 @@ fn perform_action(
                 session.ready(snapshot)?;
                 let mut entry = state.store.load(&session.profile_id).map_err(text)?;
                 if entry.profile.gyro.output != session.output
-                    || scale(&entry.profile.gyro) != session.original_scale
+                    || scale(&entry.profile.gyro)? != session.original_scale
                 {
                     return Err(MAPPING_CHANGED.into());
                 }
@@ -538,6 +542,7 @@ fn perform_action(
                     GyroOutput::RightStick => {
                         entry.profile.gyro.stick_full_scale_dps = session.draft_scale
                     }
+                    GyroOutput::Ds4Imu => return Err(DS4_IMU_CALIBRATION_UNAVAILABLE.into()),
                 }
                 let result = save_profile_locked(state, entry)?;
                 session.saved = Some(Saved {
@@ -562,10 +567,11 @@ fn perform_action(
     result
 }
 
-fn scale(gyro: &Gyro) -> f32 {
+fn scale(gyro: &Gyro) -> Result<f32, &'static str> {
     match gyro.output {
-        GyroOutput::Mouse => gyro.counts_per_degree,
-        GyroOutput::RightStick => gyro.stick_full_scale_dps,
+        GyroOutput::Mouse => Ok(gyro.counts_per_degree),
+        GyroOutput::RightStick => Ok(gyro.stick_full_scale_dps),
+        GyroOutput::Ds4Imu => Err(DS4_IMU_CALIBRATION_UNAVAILABLE),
     }
 }
 
@@ -575,6 +581,7 @@ fn validate_scale(output: GyroOutput, value: f32) -> Result<(), String> {
         GyroOutput::RightStick if (30.0..=1440.0).contains(&value) => Ok(()),
         GyroOutput::Mouse => Err("鼠标转角系数需大于 0 且不超过 10000。".into()),
         GyroOutput::RightStick => Err("满杆角速度需为 30–1440 °/s".into()),
+        GyroOutput::Ds4Imu => Err(DS4_IMU_CALIBRATION_UNAVAILABLE.into()),
     }
 }
 
@@ -605,6 +612,7 @@ fn apply_measurement(gyro: &mut Gyro, measurement: &GameAngleMeasurement) -> Res
     let (scale, ratio) = match gyro.output {
         GyroOutput::Mouse => (&mut gyro.counts_per_degree, degrees / known),
         GyroOutput::RightStick => (&mut gyro.stick_full_scale_dps, known / degrees),
+        GyroOutput::Ds4Imu => return Err(DS4_IMU_CALIBRATION_UNAVAILABLE.into()),
     };
     if *scale != measurement.scale {
         return Err(MAPPING_CHANGED.into());

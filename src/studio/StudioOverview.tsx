@@ -44,6 +44,7 @@ export function StudioOverview({ profile, device, status, deviceCount, guideStep
     : profile?.virtual_gamepad === 'dualshock_4' ? 'DualShock 4'
     : profile?.virtual_gamepad === 'xbox_360' ? 'Xbox 360' : '键盘与鼠标';
   const gyroMode = !gyro ? '—' : !gyro.enabled ? '关闭'
+    : gyro.output === 'ds4_imu' ? 'DS4 传感器直通'
     : gyro.motion.mode === 'steering' ? '姿态控制摇杆'
     : gyro.motion.mode === 'stick_rotation' ? '体感旋转摇杆方向'
     : gyro.output === 'right_stick' ? '右摇杆瞄准' : '鼠标瞄准';

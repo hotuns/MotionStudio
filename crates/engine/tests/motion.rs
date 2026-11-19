@@ -1,5 +1,5 @@
 use motion_core::{
-    engine::{Engine, InputEvent},
+    engine::{Ds4ImuState, Engine, InputEvent},
     motion_config::*,
     profile::{Action, GamepadTarget, GyroActivationMode, GyroOutput, Profile, TimestampSource},
     storage::parse_profile,
@@ -50,6 +50,42 @@ fn button(e: &mut Engine, index: u8, down: bool) {
 fn gamepad(p: &mut Profile) {
     p.virtual_gamepad = GamepadTarget::Xbox360;
     p.gyro.output = GyroOutput::RightStick;
+}
+
+#[test]
+fn ds4_sensor_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
+    let mut p = profile();
+    p.virtual_gamepad = GamepadTarget::DualShock4;
+    p.gyro.output = GyroOutput::Ds4Imu;
+    p.gyro.pause_input = Some("south".into());
+    p.gyro.sensitivity = 3.;
+    p.gyro.motion.cutoff_dps = 100.;
+    let mut e = Engine::new(p).unwrap();
+    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+
+    accel(&mut e, 10, [0., 0., 1.]);
+    gyro(&mut e, 11, 1., 2., 3.);
+    gyro(&mut e, 12, 1., 2., 3.);
+    let Ds4ImuState::Sample(sample) = e.frame.ds4_imu else {
+        panic!("missing gyro sample");
+    };
+    assert_eq!(sample.timestamp_ns, 12_000_000);
+    for (got, expected) in sample.gyro_dps.into_iter().zip([1., 2., 3.]) {
+        assert!((got - expected).abs() < 1e-4);
+    }
+    assert!((sample.accel_g[2] - 1.).abs() < 1e-5);
+    assert_eq!(e.frame.mouse_delta, [0., 0.]);
+    assert_eq!(e.frame.pad.unwrap().right_x, 0);
+
+    button(&mut e, 0, true);
+    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    button(&mut e, 0, false);
+    gyro(&mut e, 14, 1., 2., 3.);
+    gyro(&mut e, 15, 1., 2., 3.);
+    gyro(&mut e, 59, 1., 2., 3.);
+    assert!(matches!(e.frame.ds4_imu, Ds4ImuState::Sample(_)));
+    e.advance_output(0.001, 60_000_000);
+    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
 }
 
 #[test]

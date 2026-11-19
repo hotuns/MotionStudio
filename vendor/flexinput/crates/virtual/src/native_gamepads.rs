@@ -229,6 +229,9 @@ mod vigem_ioctl {
         pub buttons: u16,
         pub special: u8,
         pub lt: u8, pub rt: u8,
+        // ViGEm copies sizeof(DS4_REPORT), including its tail padding. This
+        // occupies the low timestamp byte in the cached HID report.
+        pub timestamp_low: u8,
     }
 
     #[repr(C)]
@@ -240,7 +243,7 @@ mod vigem_ioctl {
 
     // ── DS4 extended report (with gyro/accel) ─────────────────────────────────
     // ViGEmBus defines these structs with #pragma pack(1) (pshpack1.h).
-    // DS4_SUBMIT_REPORT_EX = 72 bytes, DS4_REPORT_EX = 63 bytes, DS4_TOUCH = 9 bytes.
+    // DS4_SUBMIT_REPORT_EX = 71 bytes, DS4_REPORT_EX = 63 bytes, DS4_TOUCH = 9 bytes.
     // Must use #[repr(C, packed)] to match — natural alignment adds padding and the
     // driver rejects the IOCTL when Size != sizeof(DS4_SUBMIT_REPORT_EX).
 
@@ -267,11 +270,6 @@ mod vigem_ioctl {
         pub buf: [u8; 63],
     }
 
-    // RESERVED: setters for the extended (gyro/accel/touchpad) DS4 report.
-    // The `IOCTL_DS4_SUBMIT_REPORT_EX` path is scaffolded but never enabled —
-    // `VirtualDS4::has_extended` is hardwired false pending bus-version
-    // detection — so the basic `DS4Report` submit is the only live path today.
-    #[allow(dead_code)]
     impl DS4ReportEx {
         pub fn set_lx(&mut self, v: u8) { self.buf[0] = v; }
         pub fn set_ly(&mut self, v: u8) { self.buf[1] = v; }
@@ -283,7 +281,9 @@ mod vigem_ioctl {
         pub fn set_special(&mut self, v: u8) { self.buf[6] = v; }
         pub fn set_lt(&mut self, v: u8) { self.buf[7] = v; }
         pub fn set_rt(&mut self, v: u8) { self.buf[8] = v; }
-        // buf[9..10] = wTimestamp (leave 0)
+        pub fn set_timestamp(&mut self, ticks: u16) {
+            self.buf[9..11].copy_from_slice(&ticks.to_le_bytes());
+        }
         pub fn set_battery(&mut self, v: u8) { self.buf[11] = v; }
         pub fn set_gyro_x(&mut self, v: i16) {
             let b = v.to_le_bytes(); self.buf[12] = b[0]; self.buf[13] = b[1];
@@ -303,7 +303,7 @@ mod vigem_ioctl {
         pub fn set_accel_z(&mut self, v: i16) {
             let b = v.to_le_bytes(); self.buf[22] = b[0]; self.buf[23] = b[1];
         }
-        // buf[24..28] = _bUnknown1[5], buf[29] = bBatteryLvlSpecial, buf[30..31] = _bUnknown2
+        pub fn set_battery_status(&mut self, v: u8) { self.buf[29] = v; }
         pub fn set_touch_n(&mut self, v: u8) { self.buf[32] = v; }
         // DS4_TOUCH at offset 33 (current) and 42/51 (previous[0/1])
         // DS4_TOUCH layout: counter(1) track1(1) pos1[3] track2(1) pos2[3] = 9 bytes
@@ -329,6 +329,8 @@ mod vigem_ioctl {
     }
 
     const _: () = {
+        assert!(std::mem::size_of::<DS4Report>() == 10);
+        assert!(std::mem::size_of::<DS4Submit>() == 20);
         assert!(std::mem::size_of::<DS4Touch>()    ==  9);
         assert!(std::mem::size_of::<DS4ReportEx>() == 63);
         assert!(std::mem::size_of::<DS4ExSubmit>() == 71);
@@ -474,6 +476,22 @@ struct DS4NotifShared {
     stop:   bool,
 }
 
+/// One physical IMU sample in the FlexInput canonical frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ds4ImuSample {
+    pub timestamp_ns: u64,
+    /// Degrees per second, about (forward, right, down).
+    pub gyro: [f32; 3],
+    /// Gravitational units, along (forward, left, up), including gravity.
+    pub accel: [f32; 3],
+}
+
+const DS4_NEUTRAL_IMU: Ds4ImuSample = Ds4ImuSample {
+    timestamp_ns: 0,
+    gyro: [0.0; 3],
+    accel: [0.0, 0.0, 1.0],
+};
+
 pub struct VirtualDS4 {
     polled_feedback_sequence: u64,
     id:           String,
@@ -485,8 +503,11 @@ pub struct VirtualDS4 {
     serial:       u32,
     /// Windows event for overlapped I/O (submit); null when not connected.
     event:        *mut std::ffi::c_void,
-    /// Whether `IOCTL_DS4_SUBMIT_REPORT_EX` is supported by installed ViGEmBus.
-    has_extended: bool,
+    imu: Option<Ds4ImuSample>,
+    imu_timestamp: u16,
+    imu_reported: bool,
+    neutral_imu_pending: bool,
+    neutral_imu_accel: [f32; 3],
     // Report state
     lx: u8, ly: u8, rx: u8, ry: u8,
     lt: u8, rt: u8,
@@ -538,7 +559,13 @@ impl VirtualDS4 {
             id, display_name,
             polled_feedback_sequence: 0,
             _client: None, dev: std::ptr::null_mut(),
-            serial: 0, event: std::ptr::null_mut(), has_extended: false,
+            serial: 0, event: std::ptr::null_mut(),
+            imu: None,
+            // Match the timestamp of the initial ViGEm v1.22 HID report.
+            imu_timestamp: 0x63fd,
+            imu_reported: false,
+            neutral_imu_pending: false,
+            neutral_imu_accel: DS4_NEUTRAL_IMU.accel,
             lx: 0x80, ly: 0x80, rx: 0x80, ry: 0x80,
             lt: 0, rt: 0, buttons: 0, special: 0, dpad: [false; 4],
             gyro_x: 0.0, gyro_y: 0.0, gyro_z: 0.0,
@@ -592,7 +619,6 @@ impl VirtualDS4 {
         out.dev          = dev;
         out.serial       = serial;
         out.event        = event;
-        out.has_extended = false;
 
         eprintln!("[VirtualDS4] plugged in serial={serial}");
 
@@ -782,6 +808,7 @@ impl VirtualDevice for VirtualDS4 {
         self.dpad = [false; 4];
         self.gyro_x = 0.0; self.gyro_y = 0.0; self.gyro_z = 0.0;
         self.accel_x = 0.0; self.accel_y = 0.0; self.accel_z = 0.0;
+        self.set_imu(None);
         self.flush();
     }
 
@@ -803,26 +830,128 @@ impl VirtualDevice for VirtualDS4 {
 }
 
 impl VirtualDS4 {
+    /// Use an extended report for the live sample. Clearing a live sample first
+    /// sends a neutral extended report because basic reports leave the bus's
+    /// cached sensor readings intact.
+    pub fn set_imu(&mut self, sample: Option<Ds4ImuSample>) {
+        if let Some(sample) = sample {
+            let last = self.imu.map(|previous| previous.timestamp_ns);
+            if last != Some(sample.timestamp_ns) {
+                // DS4 ticks are 16/3 µs. Subtract quantized clock readings so
+                // fractional ticks are recovered by subsequent samples.
+                let to_ticks = |ns: u64| (u128::from(ns) * 3 / 16_000) as u64;
+                let ticks = last
+                    .and_then(|last| {
+                        let elapsed = sample.timestamp_ns.checked_sub(last)?;
+                        // A new clock epoch or a stale gap starts a new span.
+                        (elapsed <= 50_000_000)
+                            .then(|| to_ticks(sample.timestamp_ns) - to_ticks(last))
+                    })
+                    .unwrap_or(1)
+                    .max(1);
+                self.imu_timestamp = self.imu_timestamp.wrapping_add(ticks as u16);
+            }
+            self.imu = Some(sample);
+            self.neutral_imu_pending = false;
+        } else if let Some(last) = self.imu.take() {
+            // Keep the last gravity direction without including a translation
+            // impulse when readers process the neutral sample.
+            let gravity = glam::Vec3::from_array(last.accel).normalize_or_zero();
+            self.neutral_imu_accel = if gravity == glam::Vec3::ZERO {
+                DS4_NEUTRAL_IMU.accel
+            } else {
+                gravity.to_array()
+            };
+            self.imu_timestamp = self.imu_timestamp.wrapping_add(1);
+            self.neutral_imu_pending = true;
+        }
+    }
+
+    /// Stage neutral sensor data for an enabled stream that is waiting for its
+    /// first sample, or whose last live sample must be cleared.
+    pub fn prime_imu(&mut self) {
+        self.set_imu(None);
+        if !self.imu_reported && !self.neutral_imu_pending {
+            self.imu_timestamp = self.imu_timestamp.wrapping_add(1);
+            self.neutral_imu_pending = true;
+        }
+    }
+
+    /// Retry only the clearing report, without resending a live IMU sample.
+    pub fn retry_imu_clear(&mut self) -> Result<(), String> {
+        if self.neutral_imu_pending {
+            self.flush_checked()?;
+        }
+        Ok(())
+    }
+
     pub fn flush_checked(&mut self) -> Result<(), String> {
+        self.flush_imu_checked().map(|_| ())
+    }
+
+    /// Returns whether ViGEm accepted this report. With no pending USB
+    /// transfer, the retained report can be retried on the next output slot.
+    pub fn flush_imu_checked(&mut self) -> Result<bool, String> {
         if self.dev.is_null() { return Err("ViGEm DS4 target is disconnected".into()); }
         let dpad    = encode_dpad(self.dpad[0], self.dpad[1], self.dpad[2], self.dpad[3]);
         let buttons = (self.buttons & !0xF) | dpad;
 
-        let sub = vigem_ioctl::DS4Submit {
-            size:   std::mem::size_of::<vigem_ioctl::DS4Submit>() as u32,
-            serial: self.serial,
-            report: vigem_ioctl::DS4Report {
-                lx: self.lx, ly: self.ly, rx: self.rx, ry: self.ry,
-                buttons, special: self.special, lt: self.lt, rt: self.rt,
-            },
+        let extended = self.imu.is_some() || self.neutral_imu_pending;
+        let accepted = if extended {
+            let mut report = vigem_ioctl::DS4ReportEx { buf: [0; 63] };
+            report.set_lx(self.lx);
+            report.set_ly(self.ly);
+            report.set_rx(self.rx);
+            report.set_ry(self.ry);
+            report.set_buttons(buttons);
+            report.set_special(self.special);
+            report.set_lt(self.lt);
+            report.set_rt(self.rt);
+            report.set_timestamp(self.imu_timestamp);
+            report.set_battery(0x06);
+            report.set_battery_status(0x1b);
+            write_ds4_imu(&mut report, self.imu.unwrap_or(Ds4ImuSample {
+                accel: self.neutral_imu_accel,
+                ..DS4_NEUTRAL_IMU
+            }));
+            // No contact data on this path. Both fingers are explicitly up.
+            report.set_touch_n(1);
+            report.set_touch_cur(0, 0x80, [0; 3], 0x80, [0; 3]);
+            report.clear_touch_prev();
+            let sub = vigem_ioctl::DS4ExSubmit {
+                size: std::mem::size_of::<vigem_ioctl::DS4ExSubmit>() as u32,
+                serial: self.serial,
+                report,
+            };
+            // vigem_target_ds4_update_ex uses this same IOCTL with a larger buffer.
+            unsafe {
+                vigem_ioctl::ioctl(
+                    self.dev, self.event, vigem_ioctl::IOCTL_DS4_SUBMIT_REPORT,
+                    &sub as *const _ as _, std::mem::size_of_val(&sub) as u32,
+                )
+            }
+        } else {
+            let sub = vigem_ioctl::DS4Submit {
+                size:   std::mem::size_of::<vigem_ioctl::DS4Submit>() as u32,
+                serial: self.serial,
+                report: vigem_ioctl::DS4Report {
+                    lx: self.lx, ly: self.ly, rx: self.rx, ry: self.ry,
+                    buttons, special: self.special, lt: self.lt, rt: self.rt,
+                    timestamp_low: self.imu_timestamp as u8,
+                },
+            };
+            unsafe {
+                vigem_ioctl::ioctl(
+                    self.dev, self.event, vigem_ioctl::IOCTL_DS4_SUBMIT_REPORT,
+                    &sub as *const _ as _, std::mem::size_of_val(&sub) as u32,
+                )
+            }
         };
-        let accepted = unsafe {
-            vigem_ioctl::ioctl(
-                self.dev, self.event, vigem_ioctl::IOCTL_DS4_SUBMIT_REPORT,
-                &sub as *const _ as _, std::mem::size_of_val(&sub) as u32,
-            )
-        };
-        if accepted { return Ok(()); }
+        if accepted {
+            self.imu_reported |= extended;
+            self.neutral_imu_pending = false;
+            return Ok(true);
+        }
         let error = std::io::Error::last_os_error();
         // ViGEmBus SubmitReportImpl returns STATUS_NO_MORE_ENTRIES when no
         // USB IN request is waiting. The official client treats this as nonfatal.
@@ -830,11 +959,32 @@ impl VirtualDS4 {
         // its next output tick, even if their values have not changed.
         const ERROR_NO_MORE_ITEMS: i32 = 259;
         if error.raw_os_error() == Some(ERROR_NO_MORE_ITEMS) {
-            Ok(())
+            Ok(false)
+        } else if extended {
+            Err(format!("ViGEm DS4 extended motion report: {error}. Use ViGEmBus 1.17 or later."))
         } else {
             Err(format!("ViGEm DS4 report: {error}"))
         }
     }
+}
+
+fn write_ds4_imu(report: &mut vigem_ioctl::DS4ReportEx, imu: Ds4ImuSample) {
+    // Wire axes invert FlexInput's Sony physical decoder, as in HIDMaestro
+    // PinState. Undo the fixed calibration returned by ViGEmBus v1.22.0
+    // Ds4Pdo.cpp::UsbClassInterface (0x02), so hardware-calibrating readers
+    // recover the original dps and g. The spans below are the decoded +/−
+    // reference differences for 1080 dps and 2 g respectively.
+    let [roll, pitch, yaw] = imu.gyro;
+    let [forward, left, up] = imu.accel;
+    let raw = |value: f32, bias: f32, counts_per_unit: f32| {
+        (bias + value * counts_per_unit).round() as i16
+    };
+    report.set_gyro_x(raw(pitch, 1.0, 17676.0 / 1080.0));
+    report.set_gyro_y(raw(-yaw, 0.0, 17771.0 / 1080.0));
+    report.set_gyro_z(raw(-roll, 0.0, 17786.0 / 1080.0));
+    report.set_accel_x(raw(-left, -297.0, 16209.0 / 2.0));
+    report.set_accel_y(raw(up, -42.0, 16148.0 / 2.0));
+    report.set_accel_z(raw(-forward, -512.0, 15988.0 / 2.0));
 }
 
 fn float_to_i16(f: f32) -> i16 {

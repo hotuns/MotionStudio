@@ -911,6 +911,7 @@ export default function App() {
                 return entry;
               });
             }}
+            vigemGamepad={workspace.settings.output_backend==='legacy'||(workspace.settings.gamepad_backend??'vigem')==='vigem'}
             canMeasure={!!status?.emitting&&!!status.device&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
             onOpenCalibration={()=>void run(()=>invoke('open_calibration_window',{
               profileId:draft.id,theme:document.documentElement.dataset.theme==='light'?'light':'dark',

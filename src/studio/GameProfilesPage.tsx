@@ -23,6 +23,7 @@ type Props = Omit<ActionMappingsProps, 'touchOnly' | 'onClearTouch'> & {
   editingLayer?: ProfileLayer;
   settingRequest?: SettingRequest;
   onRestoreSetting: (paths: string[]) => void;
+  vigemGamepad: boolean;
   canMeasure: boolean;
   onOpenCalibration: () => void;
   onTab: (tab: GameTab) => void;
@@ -44,6 +45,11 @@ export function GameProfilesPage(props: Props) {
   const measuring = !!status?.motion?.measuring;
   const virtual = profile.virtual_gamepad !== 'none';
   const conflicts = !virtual && profile.gyro.enabled && profile.gyro.output === 'right_stick';
+  const base = props.baseProfile ?? profile;
+  const ds4Required = base.gyro.output === 'ds4_imu' || (base.layers ?? []).some(layer => {
+    const gyro=layer.settings.gyro;
+    return !!gyro && typeof gyro === 'object' && 'output' in gyro && gyro.output === 'ds4_imu';
+  });
 
   useEffect(()=>{
     setSearchHint(null);
@@ -116,6 +122,7 @@ export function GameProfilesPage(props: Props) {
           <div className={styles.gameOutput}>
             <label htmlFor={outputModeId}>输出方式</label>
             <select id={outputModeId} className={styles.outputSelect} value={profile.virtual_gamepad}
+              title={ds4Required?t('切换虚拟手柄类型前，请先在使用 DS4 传感器直通的基础层或配置层改用其他体感输出。'):undefined}
               disabled={blocked || layerMode || !!capture || measuring}
               onChange={event=>{
                 const target = event.currentTarget.value as GamepadTarget;
@@ -124,10 +131,10 @@ export function GameProfilesPage(props: Props) {
                   if(target!=='none') draft.gamepad_bindings ??= [];
                 });
               }}>
-              <option value="none">键盘与鼠标</option>
-              <option value="xbox_360">虚拟 Xbox 360</option>
+              <option value="none" disabled={ds4Required}>键盘与鼠标</option>
+              <option value="xbox_360" disabled={ds4Required}>虚拟 Xbox 360</option>
               <option value="dualshock_4">虚拟 DualShock 4（PS4）</option>
-              <option value="dualsense">虚拟 DualSense（PS5，音频触觉）</option>
+              <option value="dualsense" disabled={ds4Required}>虚拟 DualSense（PS5，音频触觉）</option>
             </select>
           </div>
           {props.layerControls}
@@ -174,6 +181,7 @@ export function GameProfilesPage(props: Props) {
         onUpdate={onUpdate} onEdit={props.onEdit} onBatch={props.onBatch} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :
         <fieldset className="studio-content" disabled={blocked || !!capture || measuring}>
           {(tab==='motion'||tab==='sticks')&&<MotionOutputSettings profile={profile} update={onUpdate}
+            vigemGamepad={props.vigemGamepad} ds4Required={ds4Required}
             canMeasure={props.canMeasure} onOpenCalibration={props.onOpenCalibration}/>}
           {tab==='sticks' && <StickSettings profile={profile} update={onUpdate}/>}
           {tab==='triggers' && <TriggerSettings profile={profile} layerMode={layerMode} update={onUpdate} onEditBase={props.onEditBase}/>}

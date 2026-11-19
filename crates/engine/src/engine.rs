@@ -3,7 +3,7 @@ pub use handoff::PressHandoff;
 
 use crate::profile::{
     input_pin, Action, GamepadTarget, GyroActivationMode, GyroOutput, Profile, StickRegion,
-    StickZones, Trigger, AXES, BUTTON_PINS, DIRECTIONS, PAD_PINS, ZONES,
+    StickZones, TimestampSource, Trigger, AXES, BUTTON_PINS, DIRECTIONS, PAD_PINS, ZONES,
 };
 use crate::timing::{SampleClock, SampleTime, MAX_GAP_NS};
 use crate::{
@@ -12,7 +12,10 @@ use crate::{
     motion_config::*,
 };
 use anyhow::{bail, Result};
-use flexinput_core::{imu::BUS_GYRO_DPS, PinMapExt, SigMap, Signal};
+use flexinput_core::{
+    imu::{BUS_ACCEL_G, BUS_GYRO_DPS},
+    PinMapExt, SigMap, Signal,
+};
 use flexinput_engine::{
     eval::{sample_curve, PressCompetition, TickOutput},
     eval_graph_tick,
@@ -100,6 +103,26 @@ pub struct Frame {
     /// Horizontal/right and vertical/up scroll, in wheel detents.
     pub scroll: [i32; 2],
     pub pad: Option<PadState>,
+    #[serde(skip)]
+    pub ds4_imu: Ds4ImuState,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Ds4ImuState {
+    #[default]
+    Off,
+    Neutral,
+    Sample(Ds4ImuSample),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ds4ImuSample {
+    /// Time of this gyro sample in the configured sample clock.
+    pub timestamp_ns: u64,
+    /// Calibrated FlexInput gyro basis: forward, right, down.
+    pub gyro_dps: [f32; 3],
+    /// Calibrated FlexInput acceleration basis: forward, left, up.
+    pub accel_g: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -973,7 +996,14 @@ impl Engine {
             self.gyro_latched = false;
         }
         let gyro_output_changed = profile.gyro.output != self.profile.gyro.output;
+        if gyro_disabled || gyro_output_changed {
+            self.frame.ds4_imu = Ds4ImuState::Off;
+        }
         if gyro_output_changed {
+            if profile.gyro.uses_ds4_imu() || self.profile.gyro.uses_ds4_imu() {
+                self.clear_gyro_motion();
+                self.clock.reset();
+            }
             self.gyro = gyro_graph(&profile);
             self.gyro_stick = Vec2::ZERO;
         } else {
@@ -1196,6 +1226,11 @@ impl Engine {
         self.eval_controls(false, 0);
     }
     fn update_pad(&mut self) {
+        if !self.profile.gyro.uses_ds4_imu() {
+            self.frame.ds4_imu = Ds4ImuState::Off;
+        } else if self.frame.ds4_imu == Ds4ImuState::Off {
+            self.frame.ds4_imu = Ds4ImuState::Neutral;
+        }
         if self.trial_scale.is_some() {
             self.frame.pad = self.physical_pad.map(|_| PadState {
                 right_x: axis_to_i16(self.turn_stick),
@@ -1263,6 +1298,7 @@ impl Engine {
             .collect();
     }
     fn clear_gyro_motion(&mut self) {
+        self.frame.ds4_imu = Ds4ImuState::Off;
         if self.trial_scale.is_some() {
             self.clear_turn_output();
         }
@@ -1655,6 +1691,7 @@ impl Engine {
             self.motion.reset_filters();
             self.gyro.state.clear();
             self.gyro_stick = Vec2::ZERO;
+            self.frame.ds4_imu = Ds4ImuState::Off;
             self.rotated_stick = None;
         } else {
             self.update_pad();
@@ -1788,7 +1825,7 @@ impl Engine {
                     }
                 } else {
                     self.accel = None;
-                    if self.profile.gyro.motion.needs_accel() {
+                    if self.profile.gyro.needs_accel() {
                         self.clear_gyro_motion();
                         if self.measuring.is_some() {
                             self.motion.telemetry.measurement_error =
@@ -1848,6 +1885,15 @@ impl Engine {
         self.update_pad();
     }
 
+    fn fresh_accel(&self, now_ns: u64) -> Option<Vec3> {
+        self.accel.and_then(|(last, value)| {
+            now_ns
+                .checked_sub(last)
+                .filter(|age| *age < MAX_GAP_NS)
+                .map(|_| value)
+        })
+    }
+
     fn process_gyro(&mut self, time: SampleTime, value: [f32; 3]) {
         self.gyro_events += 1;
         // A timed trial is output-driven; physical gyro samples must not add
@@ -1883,15 +1929,8 @@ impl Engine {
             return;
         }
         self.last_stick_gyro_ns = Some(time.host_ns);
-        let accel = self
-            .accel
-            .filter(|(last, _)| {
-                time.host_ns
-                    .checked_sub(*last)
-                    .is_some_and(|age| age < MAX_GAP_NS)
-            })
-            .map(|(_, v)| v);
-        if self.profile.gyro.motion.needs_accel() && accel.is_none() {
+        let accel = self.fresh_accel(time.host_ns);
+        if self.profile.gyro.needs_accel() && accel.is_none() {
             self.clear_gyro_motion();
             if self.measuring.is_some() {
                 self.motion.telemetry.measurement_error = Some("加速度采样中断，请重新测量".into());
@@ -1912,6 +1951,7 @@ impl Engine {
             self.pressed(&self.profile.gyro.motion.trackball.horizontal_input),
             self.pressed(&self.profile.gyro.motion.trackball.vertical_input),
         ];
+        let direct = self.profile.gyro.uses_ds4_imu();
         let result = self.motion.sample(
             &self.profile.gyro,
             raw,
@@ -1923,8 +1963,25 @@ impl Engine {
             c.gyro_noise_dps,
             c.accel_noise_g,
             time,
-            self.measuring.is_none(),
+            self.measuring.is_none() && !direct,
         );
+        if direct {
+            // The 3DOF result is still available for device telemetry. Forward
+            // calibrated sensor axes before any aiming projection or filtering.
+            self.frame.ds4_imu = if let Some(accel) = accel.filter(|_| self.active) {
+                Ds4ImuState::Sample(Ds4ImuSample {
+                    timestamp_ns: match self.profile.gyro.timestamp_source {
+                        TimestampSource::Host => time.host_ns,
+                        TimestampSource::Sensor => time.sensor_ns,
+                    },
+                    gyro_dps: (raw * BUS_GYRO_DPS).to_array(),
+                    accel_g: (accel * BUS_ACCEL_G).to_array(),
+                })
+            } else {
+                Ds4ImuState::Neutral
+            };
+            return;
+        }
         if self.paused() && self.measuring.is_some() {
             self.gyro_stick = Vec2::ZERO;
             self.update_pad();
@@ -2010,6 +2067,7 @@ impl Engine {
                 self.clock.reset();
                 self.clear_gyro_motion();
             }
+            GyroOutput::Ds4Imu => {}
         }
         self.update_pad();
     }
@@ -2088,6 +2146,7 @@ impl Engine {
         let valid = match output {
             GyroOutput::Mouse => scale.is_finite() && scale > 0. && scale <= 10000.,
             GyroOutput::RightStick => (30.0..=1440.0).contains(&scale),
+            GyroOutput::Ds4Imu => bail!("传感器直通由游戏处理，无需校准游戏转角。"),
         };
         if !valid {
             bail!("校准数值超出允许范围");
@@ -2133,6 +2192,7 @@ impl Engine {
             let valid = match self.profile.gyro.output {
                 GyroOutput::Mouse => scale.is_finite() && scale > 0. && scale <= 10000.,
                 GyroOutput::RightStick => (30.0..=1440.0).contains(&scale),
+                GyroOutput::Ds4Imu => bail!("传感器直通由游戏处理，无需校准游戏转角。"),
             };
             if !valid {
                 bail!("校准数值超出允许范围");
@@ -2154,6 +2214,9 @@ impl Engine {
     }
 
     pub fn begin_measurement(&mut self, axis: &str) -> Result<()> {
+        if self.profile.gyro.uses_ds4_imu() {
+            bail!("传感器直通由游戏处理，无需校准游戏转角。");
+        }
         if self.measuring.is_some() {
             bail!("请先结束或取消当前转角测量");
         }
@@ -2212,6 +2275,7 @@ impl Engine {
             scale: self.measurement_scale.take().unwrap_or(match gyro.output {
                 GyroOutput::Mouse => gyro.counts_per_degree,
                 GyroOutput::RightStick => gyro.stick_full_scale_dps,
+                GyroOutput::Ds4Imu => return None,
             }),
         };
         self.restore_measurement_scale();
@@ -2274,6 +2338,7 @@ impl Engine {
                     self.flick_stick = *v;
                 }
             }
+            GyroOutput::Ds4Imu => {}
         }
     }
 
@@ -2396,7 +2461,10 @@ impl Engine {
             }
             return &self.frame;
         }
-        if self
+        let accel_stale = matches!(self.frame.ds4_imu, Ds4ImuState::Sample(_))
+            && self.fresh_accel(now_ns).is_none();
+        if accel_stale
+            || self
             .last_stick_gyro_ns
             .is_some_and(|last| now_ns.checked_sub(last).is_none_or(|age| age >= MAX_GAP_NS))
         {

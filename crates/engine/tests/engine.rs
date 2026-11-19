@@ -665,6 +665,7 @@ fn tiny_motion_is_not_lost_and_drop_releases_held_keys_and_pad() {
                 buttons: 4096,
                 ..Default::default()
             }),
+            ..Default::default()
         };
         for _ in 0..800 {
             d.apply(&frame).unwrap();

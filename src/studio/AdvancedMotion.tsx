@@ -197,6 +197,9 @@ function EdgeTurning({profile,update}:Props) {
 }
 
 export function FlickStickSettings({profile,update}:Props) {
+  if(profile.gyro.output==='ds4_imu')return <SettingSection id="flick-main" title="快速转向" summary="传感器直通期间停用">
+    <p className={styles.hint}>切换到鼠标或虚拟右摇杆体感输出后，可使用拨动和配套摇杆瞄准。</p>
+  </SettingSection>;
   const f=profile.gyro.motion.flick;
   const change=(key:string,value:unknown)=>nested(update,'flick',key,value);
   const setControl=(key:'enable_input'|'pause_input',value:string|null)=>update(p=>{
@@ -290,22 +293,45 @@ export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: P
     </>;
 }
 
-export function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration}:Props&Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'>) {
+export function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,ds4Required}:
+  Props&Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'>&{vigemGamepad:boolean;ds4Required:boolean}) {
   const gyro=profile.gyro;
-  return <SettingSection id="motion-calibration" title="输出与转角校准" summary={gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
-    <SettingField label="体感与拨动输出" disabled={gyro.motion.mode!=='pointer'}>
-      <div className={settingStyles.row}><SettingLabel label="体感与拨动输出"/><select aria-label="体感与拨动输出" value={gyro.output}
-        disabled={gyro.motion.mode!=='pointer'} onChange={event=>update(p=>{p.gyro.output=event.target.value as Profile['gyro']['output'];})}>
-        <option value="mouse">鼠标</option><option value="right_stick" disabled={profile.virtual_gamepad==='none'}>虚拟手柄右摇杆</option>
+  const passthrough=gyro.output==='ds4_imu';
+  const isDs4=profile.virtual_gamepad==='dualshock_4';
+  const canUsePassthrough=isDs4&&vigemGamepad;
+  const outputLocked=gyro.motion.mode!=='pointer'&&!passthrough&&!canUsePassthrough;
+  const showMouseScale=passthrough
+    ? gyro.motion.turns.some(turn=>turn.output!=='right_stick')
+    : gyro.output==='mouse';
+  const showStickScale=passthrough
+    ? gyro.motion.turns.some(turn=>turn.output!=='mouse')
+    : gyro.output==='right_stick';
+  return <SettingSection id="motion-calibration" title={passthrough?'体感输出':'输出与转角校准'}
+    summary={passthrough?'DS4 传感器直通':gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
+    <SettingField label="体感输出" disabled={outputLocked}>
+      <div className={settingStyles.row}><SettingLabel label="体感输出"/><select aria-label="体感输出" value={gyro.output}
+        disabled={outputLocked} onChange={event=>{
+          const output=event.currentTarget.value as Profile['gyro']['output'];
+          update(p=>{p.gyro.output=output;});
+        }}>
+        <option value="mouse" disabled={gyro.motion.mode!=='pointer'}>鼠标</option><option value="right_stick" disabled={profile.virtual_gamepad==='none'}>虚拟手柄右摇杆</option>
+        <option value="ds4_imu" disabled={!canUsePassthrough}>DS4 传感器直通</option>
       </select></div>
     </SettingField>
-    <p className={styles.hint}>体感、拨动和配套摇杆瞄准共用这里的输出与转角换算。</p>
-    {profile.virtual_gamepad==='none'&&<p className={styles.hint}>在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。</p>}
-    {gyro.output==='right_stick'
-      ? <Range label="游戏满杆角速度" value={gyro.stick_full_scale_dps} min={30} max={1440} step={1} unit=" °/s" slider={false}
-          onChange={v=>update(p=>{p.gyro.stick_full_scale_dps=v;})} help="填写游戏实际满杆时的转向速度，用于将目标转角换算成摇杆输出。提高这里的值不会让游戏转得更快。"/>
-      : <Range label="基础鼠标计数" value={gyro.counts_per_degree} min={1} max={100} step={0.5} unit=" /°" slider={false}
-          onChange={v=>update(p=>{p.gyro.counts_per_degree=v;})} help="每旋转一度产生的基础鼠标计数，再乘以体感灵敏度。"/>}
-    <GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>
+    {isDs4&&!vigemGamepad&&<p className={settingStyles.notice}>请在「设置与组件」将虚拟手柄后端设为 ViGEm，再使用 DS4 传感器直通。</p>}
+    {!isDs4&&<p className={styles.hint}>DS4 传感器直通需要选择虚拟 DualShock 4 和 ViGEm 后端。</p>}
+    {ds4Required&&<p className={styles.hint}>切换虚拟手柄类型前，请先在使用 DS4 传感器直通的基础层或配置层改用其他体感输出。</p>}
+    {passthrough?<>
+      <p className={styles.hint}>向虚拟 DualShock 4 发送经设备校准的陀螺仪和加速度计数据。请在支持读取 DS4 传感器的游戏或 Steam 输入中设置体感。</p>
+      {(showStickScale||showMouseScale)&&<p className={styles.hint}>下面的转角换算用于按键触发的定角转身。</p>}
+    </>:<>
+      <p className={styles.hint}>体感、拨动和配套摇杆瞄准共用这里的输出与转角换算。</p>
+      {profile.virtual_gamepad==='none'&&<p className={styles.hint}>在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。</p>}
+    </>}
+    {showStickScale&&<Range label="游戏满杆角速度" value={gyro.stick_full_scale_dps} min={30} max={1440} step={1} unit=" °/s" slider={false}
+      onChange={v=>update(p=>{p.gyro.stick_full_scale_dps=v;})} help="填写游戏实际满杆时的转向速度，用于将目标转角换算成摇杆输出。提高这里的值不会让游戏转得更快。"/>}
+    {showMouseScale&&<Range label="基础鼠标计数" value={gyro.counts_per_degree} min={1} max={100} step={0.5} unit=" /°" slider={false}
+      onChange={v=>update(p=>{p.gyro.counts_per_degree=v;})} help="每旋转一度产生的基础鼠标计数，再乘以体感灵敏度。"/>}
+    {!passthrough&&<GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>}
   </SettingSection>;
 }
