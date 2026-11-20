@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { memo, useEffect, useId, useState } from 'react';
 import { useLanguage } from '../i18n';
 import type { Gyro } from '../types';
+import {usesJsmAim} from '../motion-presets';
 import styles from './MotionControls.module.css';
 
 type Point = [x: number, reference: number, processed: number];
@@ -21,6 +22,14 @@ export function useStabilityPreview(gyro: Gyro, deviceNoise?: number) {
   // Send only the controls that change these curves, including when editing a layer.
   const request = JSON.stringify({
     gyro: {
+      aim_engine: usesJsmAim(gyro)?'jsm':'studio',
+      jsm_response: {
+        cutoff_recovery_dps:gyro.jsm_response?.cutoff_recovery_dps,
+        smooth_time_ms:gyro.jsm_response?.smooth_time_ms,
+        smooth_threshold_dps:gyro.jsm_response?.smooth_threshold_dps,
+        decay_smoothing:gyro.jsm_response?.decay_smoothing,
+        one_euro:gyro.jsm_response?.one_euro,
+      },
       smoothing_ms: gyro.smoothing_ms,
       noise_threshold: gyro.noise_threshold,
       motion: {
@@ -94,8 +103,8 @@ export function FlickReleaseCurve({strength}: {strength: number}) {
   </>;
 }
 
-export function AccelerationCurve({acceleration}: {acceleration: Gyro['acceleration']}) {
-  const request = JSON.stringify({acceleration});
+export function AccelerationCurve({acceleration,jsm=false}: {acceleration: Gyro['acceleration'];jsm?:boolean}) {
+  const request = JSON.stringify({acceleration,jsm});
   const [points, setPoints] = useState<Point[]>();
   const [failedRequest, setFailedRequest] = useState<string>();
 

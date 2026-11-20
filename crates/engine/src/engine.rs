@@ -1,4 +1,5 @@
 mod handoff;
+pub(crate) mod jsm;
 pub use handoff::PressHandoff;
 
 use crate::profile::{
@@ -573,6 +574,7 @@ pub struct Engine {
     gyro_signals: SigMap,
     controls: GraphRunner,
     gyro: GraphRunner,
+    jsm: Option<Box<jsm::JsmAim>>,
     active: bool,
     last_paused: bool,
     activation_pressed: bool,
@@ -790,6 +792,7 @@ impl Engine {
                 .collect(),
             action_time_ns: 0,
             gyro: gyro_graph(&profile),
+            jsm: profile.gyro.uses_jsm_aim().then(|| Box::new(jsm::JsmAim::new(&profile.gyro))),
             motion: MotionRuntime::new(&profile.gyro)?,
             sensor_calibration: SensorCalibration::default(),
             flick: flick_graph(&profile),
@@ -846,6 +849,11 @@ impl Engine {
     }
     pub fn graph_node_count(&self) -> usize {
         self.controls.graph.nodes.len() + self.gyro.graph.nodes.len()
+    }
+    pub fn aiming_engine(&self) -> Option<crate::profile::AimEngine> {
+        let g = &self.profile.gyro;
+        (self.measuring.is_none() && !g.uses_ds4_imu() && g.motion.mode == MotionMode::Pointer
+            && (g.enabled || g.flick_available())).then_some(g.aim_engine)
     }
     /// Layer changes keep the sample clock, input bus, untouched activators,
     /// pending turns and motion filters. The caller keeps the same dispatcher.
@@ -954,6 +962,15 @@ impl Engine {
         }
         let gyro_clock_changed = std::mem::discriminant(&profile.gyro.timestamp_source)
             != std::mem::discriminant(&self.profile.gyro.timestamp_source);
+        let aim_engine_changed = profile.gyro.uses_jsm_aim() != self.profile.gyro.uses_jsm_aim();
+        if aim_engine_changed {
+            self.clear_gyro_motion();
+            self.clock.reset();
+            self.jsm = profile.gyro.uses_jsm_aim().then(|| Box::new(jsm::JsmAim::new(&profile.gyro)));
+        } else if let Some(jsm) = &mut self.jsm {
+            jsm.configure(&profile.gyro);
+            if gyro_clock_changed { jsm.clear_gyro(); }
+        }
         if gyro_clock_changed {
             self.clock = SampleClock::new(profile.gyro.timestamp_source);
         }
@@ -1044,7 +1061,7 @@ impl Engine {
             .iter()
             .map(|turn| self.input_value(&turn.input) > self.profile.gyro.activation_threshold)
             .collect();
-        if flick_changed
+        if aim_engine_changed || flick_changed
             || (gyro_enabled_changed && !self.profile.gyro.motion.flick.standalone)
             || gyro_output_changed
             || input_changed
@@ -1272,8 +1289,11 @@ impl Engine {
                 }
             }
             let aim = self.gyro_stick + self.flick_stick;
-            let mut right_x = axis_from_i16(pad.right_x) + aim.x;
-            pad.right_y = axis_to_i16(axis_from_i16(pad.right_y) + aim.y);
+            let right = self.jsm.as_ref().and_then(|jsm| jsm.right)
+                .filter(|_| self.measuring.is_none())
+                .unwrap_or_else(|| Vec2::new(axis_from_i16(pad.right_x), axis_from_i16(pad.right_y)));
+            let mut right_x = right.x + aim.x;
+            pad.right_y = axis_to_i16(right.y + aim.y);
             for (pin, v) in &self.motion_pad {
                 match pin.as_str() {
                     "left_stick_x" => pad.left_x = axis_to_i16(axis_from_i16(pad.left_x) + v),
@@ -1307,6 +1327,7 @@ impl Engine {
     }
     fn clear_gyro_motion(&mut self) {
         self.frame.ds4_imu = Ds4ImuState::Off;
+        if let Some(jsm) = &mut self.jsm { jsm.clear_gyro(); }
         if self.trial_scale.is_some() {
             self.clear_turn_output();
         }
@@ -1362,6 +1383,7 @@ impl Engine {
         .then_some(f.stick)
     }
     fn clear_flick_output(&mut self) {
+        if let Some(jsm) = &mut self.jsm { jsm.clear_stick(); }
         self.flick.state.clear();
         self.flick_stick = Vec2::ZERO;
         self.flick_turn_stick = 0.;
@@ -1696,6 +1718,7 @@ impl Engine {
             }
         } else if active != self.active && self.measuring.is_none() {
             self.clock.reset();
+            if let Some(jsm) = &mut self.jsm { jsm.clear_gyro(); }
             self.motion.reset_filters();
             self.gyro.state.clear();
             self.gyro_stick = Vec2::ZERO;
@@ -1971,7 +1994,7 @@ impl Engine {
             c.gyro_noise_dps,
             c.accel_noise_g,
             time,
-            self.measuring.is_none() && !direct,
+            self.measuring.is_none() && !direct && self.jsm.is_none(),
         );
         if direct {
             // Device telemetry uses the physical sample. Filters act on the
@@ -2013,6 +2036,12 @@ impl Engine {
             return;
         }
         if self.measuring.is_none() {
+            if let Some(jsm) = &mut self.jsm {
+                let mouse = jsm.sample(raw, accel, dt, tracking);
+                self.add_jsm_mouse(mouse);
+                self.update_pad();
+                return;
+            }
             if let Some(steering) = result.steering {
                 self.gyro_stick = steering;
                 self.update_pad();
@@ -2359,6 +2388,9 @@ impl Engine {
 
     /// Observe Flick input after FIFO events and layer changes.
     pub fn advance_flick_input(&mut self) {
+        // JSM reads the complete thumb position at its turn tick. An SDL X
+        // event followed by Y is not two separate flick directions.
+        if self.jsm.is_some() { return; }
         let now = self.action_time_ns;
         let input_dt = self
             .flick_input_ns
@@ -2366,6 +2398,25 @@ impl Engine {
             .map_or(0., |last| (now.saturating_sub(last) as f32 / 1e9).min(0.05));
         self.advance_flick(0., input_dt);
         self.update_pad();
+    }
+
+    fn add_jsm_mouse(&mut self, bus: Vec2) {
+        for (i, value) in [bus.x, -bus.y].into_iter().enumerate() {
+            self.frame.mouse_delta[i] += f64::from(value);
+            self.mouse_total[i] += f64::from(value);
+        }
+    }
+
+    fn advance_jsm_output(&mut self, dt: f32) {
+        let gesture = (self.flick_active() && !self.flick_snapshot_blocked)
+            .then(|| self.stick_value_radial(self.profile.gyro.motion.flick.stick));
+        let carrier = self.physical_pad.map_or(Vec2::ZERO, |pad| {
+            Vec2::new(axis_from_i16(pad.right_x), axis_from_i16(pad.right_y))
+        });
+        if let Some(jsm) = &mut self.jsm {
+            let mouse = jsm.output(dt, gesture, carrier);
+            self.add_jsm_mouse(mouse);
+        }
     }
 
     fn advance_turns(&mut self, dt: f32) {
@@ -2494,6 +2545,13 @@ impl Engine {
                 state.elapsed = 0.;
             }
             self.flick_turn_stick = 0.;
+            if let Some(jsm) = &mut self.jsm {
+                jsm.clear_stick();
+                jsm.clear_gyro();
+                self.clock.reset();
+                let f = &self.profile.gyro.motion.flick;
+                self.flick_snapshot_blocked = f.enabled && self.stick_value_radial(f.stick).length() >= f.deadzone;
+            }
             self.clear_turn_output();
             self.update_pad();
             return &self.frame;
@@ -2519,7 +2577,11 @@ impl Engine {
                 }
             }
         }
-        self.advance_flick(dt, flick_input_dt);
+        if self.jsm.is_some() && self.measuring.is_none() {
+            self.advance_jsm_output(dt);
+        } else {
+            self.advance_flick(dt, flick_input_dt);
+        }
         self.advance_turns(dt);
         self.advance_stick_mouse(dt);
         &self.frame

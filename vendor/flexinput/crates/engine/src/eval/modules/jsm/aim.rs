@@ -110,7 +110,7 @@ pub enum GyroSource {
 ///
 /// Shared with the editor's curve preview, which would otherwise draw a config's
 /// deadzone as if it weren't there.
-pub(crate) fn cutoff_factor(s: &Settings, length: f32) -> f32 {
+pub fn cutoff_factor(s: &Settings, length: f32) -> f32 {
     if s.cutoff_recovery > s.cutoff_speed {
         ((length - s.cutoff_speed) / (s.cutoff_recovery - s.cutoff_speed)).clamp(0.0, 1.0)
     } else if s.cutoff_speed > 0.0 && length < s.cutoff_speed {
@@ -426,7 +426,7 @@ impl Aim {
         self.tick_sampled(s, p, m, c, gravity, dt, gyro, analog, actions, down, JsmGyroClock::Tick)
     }
 
-    pub(crate) fn tick_sampled(
+    pub fn tick_sampled(
         &mut self,
         s: &Settings,
         p: &pad::Settings,
@@ -459,19 +459,7 @@ impl Aim {
         if actions.contains(&GyroAction::Off) { blocked = true; }
 
         if matches!(clock, JsmGyroClock::Reset) {
-            self.gyro_samples.fill((0.0, 0.0));
-            self.gyro_front = 0;
-            self.trackball_x.fill(0.0);
-            self.trackball_y.fill(0.0);
-            self.trackball_ix = 0;
-            self.trackball_iy = 0;
-            self.last_abs_x = 0.0;
-            self.last_abs_y = 0.0;
-            self.decay.reset();
-            self.one_euro_x.reset();
-            self.one_euro_y.reset();
-            self.brake.reset();
-            self.sampled_gyro = GyroAim::default();
+            self.reset_sampled_gyro();
         }
         let sample_dt = clock.interval(dt);
         if let Some(seconds) = sample_dt {
@@ -519,16 +507,49 @@ impl Aim {
         // A bound flick isn't JSM's, so that gate doesn't reach it: it goes where
         // `FLICK_STICK_OUTPUT` says and nothing else silences it.
         let mouse = if p.gyro_dest == Dest::Mouse {
-            let calibration = s.real_world_calibration / s.in_game_sens.max(1e-6);
-            let x = vel_x * calibration * sample_dt.unwrap_or(0.0) + cam.x;
-            // JSM counts the screen's y downward and the bus counts it up.
-            let y = -(vel_y * calibration * dt) + cam.y;
-            Vec2::new(x, y)
+            self.gyro_mouse_delta(s, sample_dt.unwrap_or(0.0)) + cam
         } else {
             Vec2::ZERO
         } + Vec2::new(bound_px, 0.0);
         let GyroAim { midi_dps, curve_dps, .. } = self.sampled_gyro;
         Aimed { mouse, gyro_dps, flick_dps, turn_dps, midi_dps, curve_dps }
+    }
+
+    /// Advance only the gyro half for a timestamped sensor sample. Stick travel
+    /// and flick payout keep their own tick, reading the retained camera rate.
+    pub fn sample_motion(
+        &mut self, s: &Settings, p: &pad::Settings, m: &super::motion::Settings,
+        c: &super::cc::Settings, gravity: super::motion::Gravity, dt: f32,
+        gyro: Gyro, actions: &HashSet<GyroAction>,
+    ) -> Vec2 {
+        self.sampled_gyro = self.gyro_sample(s, p, m, c, gravity, dt, gyro, actions, false);
+        if p.gyro_dest == Dest::Mouse { self.gyro_mouse_delta(s, dt) } else { Vec2::ZERO }
+    }
+
+    fn gyro_mouse_delta(&self, s: &Settings, seconds: f32) -> Vec2 {
+        let calibration = s.real_world_calibration / s.in_game_sens.max(1e-6);
+        let v = self.sampled_gyro.velocity;
+        Vec2::new(v.x * calibration * seconds, -(v.y * calibration * seconds))
+    }
+
+    pub fn reset_sampled_gyro(&mut self) {
+        self.gyro_samples.fill((0.0, 0.0));
+        self.gyro_front = 0;
+        self.trackball_x.fill(0.0);
+        self.trackball_y.fill(0.0);
+        self.trackball_ix = 0;
+        self.trackball_iy = 0;
+        self.last_abs_x = 0.0;
+        self.last_abs_y = 0.0;
+        self.decay.reset();
+        self.one_euro_x.reset();
+        self.one_euro_y.reset();
+        self.brake.reset();
+        self.sampled_gyro = GyroAim::default();
+    }
+
+    pub fn reset_sticks(&mut self) {
+        self.sticks = Default::default();
     }
 
     fn gyro_sample(

@@ -1,5 +1,5 @@
 import {Range, Toggle} from './Controls';
-import {applyJsmResponse,isJsmResponse} from '../motion-presets';
+import {applyJsmResponse,isJsmResponse,usesJsmAim} from '../motion-presets';
 import type {Device, Ds4ImuFilter, Gyro, Profile} from '../types';
 import styles from './MotionControls.module.css';
 import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice, type GameCalibrationProps} from './AdvancedMotion';
@@ -27,6 +27,7 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
 }&Pick<GameCalibrationProps,'status'|'onMotionAction'>) {
   const gyro=profile.gyro;
   const passthrough=gyro.output==='ds4_imu';
+  const jsm=usesJsmAim(gyro);
   const ds4Filter=gyro.ds4_imu_filter;
   const setGyro=<K extends keyof Gyro>(key:K,value:Gyro[K])=>update(draft=>{draft.gyro[key]=value;});
   const setDs4Filter=(change:Ds4ImuFilter)=>update(draft=>{
@@ -40,6 +41,12 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
   return <div className={settingStyles.page}>
     <SettingSection id="motion-main" title={passthrough?'DS4 传感器直通':'体感瞄准'} defaultOpen
       summary={gyro.enabled?(passthrough?'已启用':<>{gyro.sensitivity}×</>):'关闭'}>
+      {!passthrough&&<>
+        <MotionChoice label="瞄准引擎" value={jsm?'jsm':'studio'} disabled={gyro.motion.mode!=='pointer'}
+          options={[['studio','Studio'],['jsm','JSM 原生']]} onChange={v=>setGyro('aim_engine',v as Gyro['aim_engine'])}/>
+        {gyro.motion.mode!=='pointer'?<p className={styles.hint}>选择角速度瞄准后可切换引擎。</p>
+          :jsm&&<p className={styles.hint}>体感和快速转向使用 JSM 的响应。切换引擎后应用修改，即可用同一套键位和游戏校准对比。</p>}
+      </>}
       <Toggle label="启用体感" value={gyro.enabled} onChange={value=>setGyro('enabled',value)}
         help={passthrough?'按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。':undefined}/>
       {gyro.enabled&&<>
@@ -71,11 +78,11 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
           onChange={value=>setGyro('sensitivity',value)} help="转得太慢就调高，容易转过头就调低。"/>
         <Range label="垂直灵敏度比例" value={gyro.vertical_ratio} min={0.1} max={2} step={0.05} unit="×"
           onChange={value=>setGyro('vertical_ratio',value)}/>
-        <div className={settingStyles.row}><span>防抖预设</span><div className={styles.activationModes} role="group" aria-label="防抖预设">
+        {!jsm&&<><div className={settingStyles.row}><span>防抖预设</span><div className={styles.activationModes} role="group" aria-label="防抖预设">
           {smoothingPresets.map(([label,ms])=><button key={ms} type="button" className="secondary-btn" aria-pressed={preset?.[1]===ms}
             onClick={()=>update(draft=>{if(ms===0)applyJsmResponse(draft.gyro);else{draft.gyro.motion.smoothing='ema';draft.gyro.smoothing_ms=ms;}})}>{label}</button>)}
         </div></div>
-        <p className={styles.hint}>JSM 线性：加速倍率 1×，关闭额外平滑、低速抑制、吸附与刹车。保留当前灵敏度、坐标、转角校准和自定义滤波。</p>
+        <p className={styles.hint}>JSM 线性：加速倍率 1×，关闭额外平滑、低速抑制、吸附与刹车。保留当前灵敏度、坐标、转角校准和自定义滤波。</p></>}
         </>}
       </>}
       {passthrough?<>
@@ -92,8 +99,8 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
         <MotionBehavior profile={profile} update={update}/>
       </>}
       <SettingSection key={passthrough?'ds4':'aim'} id={passthrough?'motion-ds4-filters':'motion-filters'}
-        title={passthrough?'直通滤波':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
-        summary={!passthrough&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
+        title={passthrough?'直通滤波':jsm?'采样时钟':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
+        summary={!passthrough&&!jsm&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
         {passthrough?<>
           <p className={styles.hint}>发送给虚拟 DS4 前可处理三轴角速度。加速度计数据沿用设备校准。</p>
           <Range label="直通平滑时间" value={ds4Filter?.smoothing_ms??0} min={0} max={120} step={1} unit=" ms"
@@ -106,12 +113,12 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
             onChange={use_custom_filters=>setDs4Filter({use_custom_filters})}
             help="在直通时应用下方已启用的 Rhai 脚本。"/>
         </>:<SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>}
-        <SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
+        {jsm?<p className={styles.hint}>JSM 直接处理校准后的采样。切回 Studio 可继续使用已保存的自定义滤波和边缘转向。</p>:<SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
           <CustomFilters key={profileId} profile={profile} update={update} embedded rawGyroOnly={passthrough}
             running={(!passthrough||!!ds4Filter?.use_custom_filters)&&status?.profile_id===profileId&&['running','observing'].includes(status.state)}
             statuses={status?.profile_id===profileId?status.motion?.filters:undefined}
             onReset={()=>onMotionAction('reset_filters')}/>
-        </SettingField>
+        </SettingField>}
       </SettingSection>
     </>}
   </div>;

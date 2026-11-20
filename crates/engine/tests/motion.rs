@@ -54,6 +54,50 @@ fn gamepad(p: &mut Profile) {
 }
 
 #[test]
+fn jsm_mouse_integrates_each_sample_once_on_both_axes() {
+    let mut p = profile();
+    p.gyro.aim_engine = motion_core::profile::AimEngine::Jsm;
+    p.gyro.pause_input = Some("south".into());
+    let mut e = Engine::new(p).unwrap();
+    gyro(&mut e, 10, 0., 20., 30.);
+    gyro(&mut e, 20, 0., 20., 30.);
+    let [x, y] = e.frame.mouse_delta;
+    assert!((x - 3.).abs() < 1e-4 && (y + 2.).abs() < 1e-4);
+    assert_eq!(e.advance_output(0.002, time(21).host_ns).mouse_delta, [0.; 2]);
+    gyro(&mut e, 25, 0., 20., 30.);
+    assert!((e.mouse_total[0] - 4.5).abs() < 1e-4 && (e.mouse_total[1] + 3.).abs() < 1e-4);
+    button(&mut e, 0, true);
+    gyro(&mut e, 30, 0., 20., 30.);
+    gyro(&mut e, 40, 0., 20., 30.);
+    assert_eq!(e.frame.mouse_delta, [0.; 2]);
+}
+
+#[test]
+fn jsm_virtual_flick_uses_full_stick_speed_and_releases_on_engine_switch() {
+    let mut p = profile();
+    gamepad(&mut p);
+    p.gyro.aim_engine = motion_core::profile::AimEngine::Jsm;
+    p.gyro.motion.flick.enabled = true;
+    p.gyro.motion.flick.smooth_ms = 2000.; // A mouse duration cannot slow a native stick flick.
+    let mut e = Engine::new(p.clone()).unwrap();
+    axis(&mut e, 2, i16::MAX);
+    e.advance_flick_input();
+    assert_eq!(e.frame.pad.unwrap().right_x, 0);
+    e.advance_output(0.002, time(2).host_ns);
+    assert_eq!(e.frame.pad.unwrap().right_x, i16::MAX);
+    assert_eq!(e.frame.mouse_delta, [0.; 2]);
+    axis(&mut e, 2, 0);
+    gyro(&mut e, 3, 0., 0., 0.);
+    gyro(&mut e, 4, 0., 0., 0.);
+    e.advance_output(0.002, time(4).host_ns);
+    assert_eq!(e.frame.pad.unwrap().right_x, i16::MAX);
+    p.gyro.aim_engine = motion_core::profile::AimEngine::Studio;
+    e.apply_layer(p).unwrap();
+    assert_eq!(e.frame.pad.unwrap().right_x, 0);
+    assert_eq!(e.advance_output(0.002, time(6).host_ns).pad.unwrap().right_x, 0);
+}
+
+#[test]
 fn ds4_sensor_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
     let mut p = profile();
     p.virtual_gamepad = GamepadTarget::DualShock4;

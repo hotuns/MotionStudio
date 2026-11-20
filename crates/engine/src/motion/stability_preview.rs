@@ -10,12 +10,24 @@ use crate::{
 };
 use anyhow::{ensure, Result};
 use flexinput_core::imu::{BUS_ACCEL_G, BUS_GYRO_DPS};
+use flexinput_engine::eval::{jsm_aim, jsm_compile, jsm_sens_curve};
 use glam::{Vec2, Vec3};
 use serde::Serialize;
 use std::sync::OnceLock;
 
 /// Horizontal coordinate, reference value, processed value.
 type Point = [f32; 3];
+
+pub fn jsm_acceleration(a: &GyroAcceleration) -> Result<Vec<Point>> {
+    a.validate()?;
+    let mut cfg = jsm_compile("", &[]);
+    cfg.aim.min_sens = (1., 1.);
+    cfg.aim.max_sens = (a.fast_multiplier, a.fast_multiplier);
+    cfg.aim.min_threshold = a.start_dps;
+    cfg.aim.max_threshold = a.full_dps;
+    cfg.cc = acceleration_settings(a);
+    Ok(jsm_sens_curve(&cfg, 201).into_iter().map(|p| [p.dps, 1., p.sens]).collect())
+}
 
 pub fn acceleration(a: &GyroAcceleration) -> Result<Vec<Point>> {
     a.validate()?;
@@ -90,6 +102,7 @@ pub struct StabilityPreview {
 
 pub fn preview(gyro: &Gyro, sensor_noise: Option<f32>) -> Result<StabilityPreview> {
     gyro.motion.validate()?;
+    gyro.jsm_response.validate()?;
     ensure!(
         (0.0..=50.0).contains(&gyro.smoothing_ms) && (0.0..=5.0).contains(&gyro.noise_threshold),
         "平滑时间需为 0–50 ms，静止抑制需为 0–5 °/s"
@@ -100,10 +113,10 @@ pub fn preview(gyro: &Gyro, sensor_noise: Option<f32>) -> Result<StabilityPrevie
     Ok(StabilityPreview {
         smoothing: smoothing(gyro),
         idle: idle(gyro, noise_floor),
-        recovery: recovery(gyro),
+        recovery: if gyro.uses_jsm_aim() { vec![] } else { recovery(gyro) },
         snap: snap(&settings),
         brake: brake(&settings),
-        drift: drift(gyro.motion.drift_correction),
+        drift: if gyro.uses_jsm_aim() { vec![] } else { drift(gyro.motion.drift_correction) },
         measured_noise: measured.is_some(),
         noise_floor,
     })
@@ -111,6 +124,26 @@ pub fn preview(gyro: &Gyro, sensor_noise: Option<f32>) -> Result<StabilityPrevie
 
 fn smoothing(gyro: &Gyro) -> Vec<Point> {
     let mut filter = AimSmoothing::default();
+    let mut native = gyro.uses_jsm_aim().then(|| {
+        // Isolate the smoothing stage: 1 count/degree, local yaw, unit gain.
+        let mut g = Gyro {
+            counts_per_degree: 1.,
+            smoothing_ms: gyro.smoothing_ms,
+            jsm_response: crate::profile::JsmResponse {
+                smooth_time_ms: gyro.jsm_response.smooth_time_ms,
+                smooth_threshold_dps: gyro.jsm_response.smooth_threshold_dps,
+                decay_smoothing: gyro.jsm_response.decay_smoothing,
+                one_euro: gyro.jsm_response.one_euro,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        g.motion.smoothing = gyro.motion.smoothing;
+        g.motion.decay_threshold = gyro.motion.decay_threshold;
+        g.motion.one_euro_cutoff = gyro.motion.one_euro_cutoff;
+        g.motion.one_euro_beta = gyro.motion.one_euro_beta;
+        crate::engine::jsm::JsmAim::new(&g)
+    });
     (0..=200)
         .map(|index| {
             let time_ms = index * 2;
@@ -120,7 +153,9 @@ fn smoothing(gyro: &Gyro) -> Vec<Point> {
                 220..=338 => 105. + wobble,
                 _ => 0.,
             };
-            let output = filter.tick(gyro, Vec2::new(input, 0.), 0.002).x;
+            let output = if let Some(jsm) = &mut native {
+                jsm.sample(Vec3::Z * (input / BUS_GYRO_DPS), None, 0.002, [false; 2]).x / 0.002
+            } else { filter.tick(gyro, Vec2::new(input, 0.), 0.002).x };
             [time_ms as f32, input, output]
         })
         .collect()
@@ -132,6 +167,17 @@ fn plot_limit(minimum: f32, needed: f32) -> f32 {
 
 fn idle(gyro: &Gyro, noise: f32) -> Vec<Point> {
     let m = &gyro.motion;
+    if gyro.uses_jsm_aim() {
+        let settings = jsm_aim::Settings {
+            cutoff_speed: m.cutoff_dps, cutoff_recovery: gyro.jsm_response.cutoff_recovery_dps,
+            ..Default::default()
+        };
+        let end = plot_limit(5., 1.5 * settings.cutoff_speed.max(settings.cutoff_recovery));
+        return (0..=160).map(|i| {
+            let input = end * i as f32 / 160.;
+            [input, input, input * jsm_aim::cutoff_factor(&settings, input)]
+        }).collect();
+    }
     let end = plot_limit(
         5.,
         gyro.noise_threshold + 2. * noise * m.noise_gate + 1.5 * m.cutoff_dps,

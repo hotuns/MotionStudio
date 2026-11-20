@@ -7,9 +7,11 @@ const group = (tab: GameTab, section: string, prefix: string, fields: [string, s
 
 export const settingsCatalog: SettingTarget[] = [
   ...group('motion','motion-main','gyro.',[
+    ['aim_engine','瞄准引擎','JSM'],
     ['enabled','启用体感'], ['activation','开启按键'], ['activation_mode','开启方式'], ['pause_input','按住暂停'],
     ['activation_threshold','扳机与摇杆阈值'], ['sensitivity','体感灵敏度'], ['vertical_ratio','垂直灵敏度比例'],
   ]),
+  ...group('motion','motion-idle','gyro.jsm_response.',[['cutoff_recovery_dps','JSM 完全恢复转速']]),
   ...group('motion','motion-direction','gyro.',[['invert_y','反转垂直方向']]),
   ...group('motion','motion-direction','gyro.motion.',[
     ['space','体感坐标'], ['invert_x','反转水平方向'], ['roll_contribution','横滚参与水平转向'], ['hold_angles','习惯握持角度'],
@@ -34,6 +36,9 @@ export const settingsCatalog: SettingTarget[] = [
     ['sigmoid_width','过渡宽度'], ['jump_width','跳变过渡宽度'], ['points','自定义控制点'],
   ]),
   ...group('motion','motion-smoothing','gyro.',[['smoothing_ms','平滑时间']]),
+  ...group('motion','motion-smoothing','gyro.jsm_response.',[
+    ['decay_smoothing','JSM 前置平滑'], ['smooth_time_ms','JSM 平滑窗口'], ['smooth_threshold_dps','JSM 平滑阈值'], ['one_euro','叠加 One Euro 滤波'],
+  ]),
   ...group('motion','motion-smoothing','gyro.motion.',[
     ['smoothing','平滑方式','One Euro 自适应滤波'], ['decay_threshold','退出平滑的转速'], ['one_euro_cutoff','最低截止频率'], ['one_euro_beta','速度响应系数'],
   ]),
@@ -46,6 +51,7 @@ export const settingsCatalog: SettingTarget[] = [
     ['smoothing_ms','直通平滑时间'], ['noise_gate','直通噪声抑制倍率'], ['use_custom_filters','直通应用原始角速度脚本','Rhai'],
   ]),
   ...group('motion','motion-calibration','gyro.',[
+    ['jsm_response.right_undeadzone_inner','右摇杆内死区补偿'], ['jsm_response.right_undeadzone_outer','右摇杆外死区补偿'], ['jsm_response.right_unpower','右摇杆响应指数'],
     ['output','体感输出','DS4 传感器直通 ViGEm IMU'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),
   ...group('sticks','stick-input','input.',[['deadzone_left','左摇杆输入死区'], ['deadzone_right','右摇杆输入死区']]),

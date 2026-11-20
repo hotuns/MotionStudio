@@ -38,6 +38,8 @@ pub struct GameAngleMeasurement {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MotionTelemetry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aim_engine: Option<crate::profile::AimEngine>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<FilterStatus>,
     pub accel_g: [f32; 3],
@@ -402,10 +404,10 @@ impl MotionRuntime {
             .unwrap_or(Vec3::ZERO)
             .to_array()
             .map(|v| v * BUS_ACCEL_G);
-        if g.uses_ds4_imu() {
+        if g.uses_ds4_imu() || g.uses_jsm_aim() {
             return MotionSample {
                 rate: Vec2::ZERO,
-                physical_rate: Vec2::ZERO,
+                physical_rate: Vec2::new(raw.x, -raw.y),
                 steering: None,
             };
         }
@@ -535,7 +537,7 @@ fn acceleration_gain(a: &GyroAcceleration, settings: &cc::Settings, speed: f32) 
     )
 }
 
-fn cc_settings(g: &Gyro) -> cc::Settings {
+pub(crate) fn cc_settings(g: &Gyro) -> cc::Settings {
     let m = &g.motion;
     cc::Settings {
         angle_snap: m.angle_snap,

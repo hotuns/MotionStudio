@@ -169,6 +169,18 @@ fn calibration_sensitivity_axes_and_hold_activation_are_translated_in_units() {
     assert!(g.invert_y);
     assert_eq!(g.activation, "left_trigger_soft");
     assert_eq!(g.smoothing_ms, 20.);
+    assert_eq!(g.jsm_response.smooth_time_ms, Some(20.));
+    assert_eq!(g.jsm_response.smooth_threshold_dps, Some(0.));
+}
+#[test]
+fn native_threshold_inherits_the_jsm_window_and_one_euro_can_follow_decay() {
+    let p = convert("GYRO_SMOOTH_THRESHOLD=14\nGYRO_SMOOTHING_DECAY=ON\nONE_EURO_FILTER");
+    assert_eq!(p.skipped, 0);
+    let native = p.profile.gyro.jsm_response;
+    assert_eq!(native.smooth_time_ms, Some(125.));
+    assert_eq!(native.smooth_threshold_dps, Some(14.));
+    assert_eq!(native.decay_smoothing, Some(true));
+    assert_eq!(native.one_euro, Some(true));
 }
 #[test]
 fn a_later_gyro_sens_assignment_sets_both_limits_and_independent_max_is_preserved() {
@@ -184,6 +196,7 @@ fn invalid_numbers_do_not_discard_other_supported_actions_or_enable_gyro() {
     assert_eq!(p.profile.actions.len(), 1);
     assert!(!p.profile.gyro.enabled);
     assert_eq!(p.profile.gyro.smoothing_ms, 0.);
+    assert_eq!(p.profile.gyro.jsm_response.smooth_time_ms, Some(125.));
     assert!(p.skipped >= 4);
 }
 #[test]
@@ -258,6 +271,19 @@ fn native(target: &str, prefix: &str) -> String {
     };
     format!("VIRTUAL_CONTROLLER={target}\n{}\nLEFT_STICK_MODE=LEFT_STICK\nRIGHT_STICK_MODE=RIGHT_STICK\nZL_MODE={}\nZR_MODE={}",buttons.join("\n"),if prefix=="X"{"X_LT"}else{"PS_L2"},if prefix=="X"{"X_RT"}else{"PS_R2"})
 }
+#[test]
+fn a_standard_pad_with_a_flick_stick_imports_without_a_duplicate_physical_stick() {
+    let text = native("XBOX", "X").replace("RIGHT_STICK_MODE=RIGHT_STICK", "RIGHT_STICK_MODE=FLICK");
+    let p = convert(&format!("{text}\nGYRO_SENS=2\nGYRO_OUTPUT=RIGHT_STICK\nFLICK_STICK_OUTPUT=RIGHT_STICK\nRIGHT_STICK_UNDEADZONE_INNER=0.11"));
+    assert_eq!(p.skipped, 0);
+    assert_eq!(p.profile.virtual_gamepad, GamepadTarget::Xbox360);
+    assert!(p.profile.gyro.motion.flick.enabled);
+    assert_eq!(p.profile.gyro.jsm_response.right_undeadzone_inner, 0.11);
+    let bindings = p.profile.gamepad_bindings.unwrap();
+    assert!(bindings.iter().any(|b| b.input == "left_stick" && b.output == "left_stick"));
+    assert!(!bindings.iter().any(|b| b.input == "right_stick"));
+}
+
 #[test]
 fn standard_native_layouts_migrate_but_partial_or_remapped_pads_do_not_gain_extra_automapping() {
     assert_eq!(

@@ -20,7 +20,7 @@ export type FilterStatus={id:string;name:string;stage:FilterStage;enabled:boolea
 export type FilterPreview={points:{t:number;input:number[];output:number[]}[];status:FilterStatus};
 export type TurnBinding={name:string;input:string;degrees:number;duration_ms:number;output:AimOutput};
 export type SensorCalibration={accel_offset:number[];accel_scale:number[];gyro_sign:number[];accel_sign:number[];mounting:number[];gyro_noise_dps:number;accel_noise_g:number;accel_faces:(number|null)[][]};
-export type MotionTelemetry={filters?:FilterStatus[];accel_g:number[];accel_fresh:boolean;orientation:number[];orientation_quat?:[number,number,number,number]|null;quantities:number[];rotation_offset:number;rotation_taken:boolean;measured_degrees:number;measurement_peak:number;measuring:string|null;measurement_error:string|null};
+export type MotionTelemetry={aim_engine?:Gyro['aim_engine'];filters?:FilterStatus[];accel_g:number[];accel_fresh:boolean;orientation:number[];orientation_quat?:[number,number,number,number]|null;quantities:number[];rotation_offset:number;rotation_taken:boolean;measured_degrees:number;measurement_peak:number;measuring:string|null;measurement_error:string|null};
 export type MotionConfig={
   space:'pitch_yaw'|'pitch_roll'|'player'|'world';mode:'pointer'|'steering'|'stick_rotation';
   hold_angles:number[];roll_contribution:number;invert_x:boolean;reset_input:string|null;neutral_input:string|null;
@@ -34,6 +34,11 @@ export type MotionConfig={
 };
 export type Gyro = {
   enabled:boolean;
+  aim_engine?:'studio'|'jsm';
+  jsm_response?:{
+    smooth_time_ms?:number; smooth_threshold_dps?:number; decay_smoothing?:boolean; one_euro?:boolean;
+    cutoff_recovery_dps?:number; right_undeadzone_inner?:number; right_undeadzone_outer?:number; right_unpower?:number;
+  };
   output:'mouse'|'right_stick'|'ds4_imu';
   activation:string;
   activation_mode:'hold'|'toggle';

@@ -21,6 +21,12 @@ ZRF = LMOUSE
 
 ## 转换成 Studio 配置
 
+在「游戏配置 → 体感 → 瞄准引擎」选择「JSM 原生」，应用修改后，可用原生体感和拨动运行导入的配置。切回「Studio」即可用相同的动作、灵敏度和游戏转角校准对比。标准 Xbox 或 DS4 布局中，一根摇杆也可设为 AIM、FLICK 或 FLICK_ONLY。转换会保留另一根摇杆和普通按键，并把瞄准摇杆交给快速转向设置。
+
+鼠标和虚拟右摇杆都支持体感与拨动共用输出目标。导入时会核对 `FLICK_STICK_OUTPUT` 与体感目标。JSM 的 `GYRO_CUTOFF_RECOVERY`、`RIGHT_STICK_UNDEADZONE_INNER`、`RIGHT_STICK_UNDEADZONE_OUTER` 和 `RIGHT_STICK_UNPOWER` 会写入 Studio 配置，在 JSM 原生引擎中生效。
+
+JSM 原生引擎会保留阈值平滑或衰减平滑，并可在其后叠加 One Euro。只导入 `GYRO_SMOOTH_THRESHOLD` 时使用 JSM 默认的 125 ms 窗口。只导入 `GYRO_SMOOTH_TIME` 时，默认阈值为 0。可在「体感 → 防抖与平滑」调整这两项。
+
 主文件引用 `GyroConfigs/Aim.txt` 等文件时，在导入窗口点「添加关联 JSM 文件」选中 `Aim.txt`。转换按引用位置合并一层静态文件。文件数量上限为 16 个，合计及展开后均不得超过 512 KB 和 4096 行。报告标明每行的来源文件。
 
 之前保存的 JSM 原文配置也可以转换。在「导入 JSM 配置」中选择旧版 TOML 文件，预览后另存为新配置，旧文件保留。输出和透传有差异时会显示提示。

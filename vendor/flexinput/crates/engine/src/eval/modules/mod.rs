@@ -11,6 +11,7 @@ mod area_mapper;
 mod automap_curve;
 mod gyro3dof;
 mod jsm;
+pub use jsm::jsm_aim;
 mod lean;
 mod map_action;
 mod menu;

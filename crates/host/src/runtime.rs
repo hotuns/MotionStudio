@@ -204,6 +204,7 @@ impl Runtime {
             status.output_preview = self.output.as_ref().map(Dispatcher::preview);
             status.mapping = self.engine.as_ref().map(Engine::mapping_status).unwrap_or_default();
         }
+        status.motion.aim_engine = self.engine.as_ref().and_then(Engine::aiming_engine);
         status.motion.filters = self
             .engine
             .as_ref()

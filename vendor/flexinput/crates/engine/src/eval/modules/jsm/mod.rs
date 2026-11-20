@@ -39,6 +39,15 @@ pub use analog::{
 };
 pub use aim::JsmGyroClock;
 pub use aim::Settings as JsmAimSettings;
+/// The same aiming components driven by jsm_publish, for hosts which already
+/// resolve their own bindings and supply distinct sensor and output clocks.
+pub mod jsm_aim {
+    pub use super::aim::{cutoff_factor, Aim, AxisMask, Gyro, JsmGyroClock, Settings, SnapMode};
+    pub use super::analog::{Analog, Pad as PadInput, Settings as AnalogSettings, StickMode};
+    pub use super::motion::{Gravity, Motion, Settings as MotionSettings, Space};
+    pub use super::names::GyroAction;
+    pub use super::pad::{Dest, Pad, Settings as PadSettings};
+}
 pub(crate) use aim::{snap_flick_angle, flick_rotates, SnapMode as JsmFlickSnap};
 pub(crate) use analog::StickMode as JsmStickMode;
 pub use cc as jsm_motion_curves;

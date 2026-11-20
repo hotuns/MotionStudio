@@ -627,9 +627,12 @@ async fn preview_motion_stability(
 #[tauri::command]
 async fn preview_gyro_acceleration(
     acceleration: motion_core::profile::GyroAcceleration,
+    jsm: Option<bool>,
 ) -> Result<Vec<[f32; 3]>, String> {
     background(move || {
-        motion_core::motion::stability_preview::acceleration(&acceleration).map_err(text)
+        use motion_core::motion::stability_preview;
+        if jsm == Some(true) { stability_preview::jsm_acceleration(&acceleration) }
+        else { stability_preview::acceleration(&acceleration) }.map_err(text)
     })
     .await
 }

@@ -267,6 +267,10 @@ where
 #[serde(default, deny_unknown_fields)]
 pub struct Gyro {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "AimEngine::is_studio")]
+    pub aim_engine: AimEngine,
+    #[serde(skip_serializing_if = "JsmResponse::is_default")]
+    pub jsm_response: JsmResponse,
     pub output: GyroOutput,
     pub activation: String,
     pub activation_mode: GyroActivationMode,
@@ -291,7 +295,16 @@ impl Gyro {
     }
 
     pub fn needs_accel(&self) -> bool {
+        if self.uses_jsm_aim() {
+            return matches!(self.motion.space, crate::motion_config::Space::Player | crate::motion_config::Space::World)
+                || self.motion.bindings.iter().any(|b| !b.input.starts_with("imu_gyro_"));
+        }
         self.uses_ds4_imu() || self.motion.needs_accel()
+    }
+
+    pub fn uses_jsm_aim(&self) -> bool {
+        self.aim_engine == AimEngine::Jsm && !self.uses_ds4_imu()
+            && self.motion.mode == crate::motion_config::MotionMode::Pointer
     }
 
     pub(crate) fn flick_available(&self) -> bool {
@@ -306,6 +319,8 @@ impl Default for Gyro {
         let jsm = flexinput_engine::eval::JsmAimSettings::default();
         Self {
             enabled: false,
+            aim_engine: AimEngine::Studio,
+            jsm_response: JsmResponse::default(),
             output: GyroOutput::Mouse,
             activation: "always".into(),
             activation_mode: GyroActivationMode::Hold,
@@ -333,6 +348,62 @@ pub enum GyroOutput {
     Mouse,
     RightStick,
     Ds4Imu,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AimEngine {
+    #[default]
+    Studio,
+    Jsm,
+}
+
+impl AimEngine {
+    fn is_studio(&self) -> bool {
+        *self == Self::Studio
+    }
+}
+
+/// Native response controls. Absent smoothing overrides inherit the Studio form.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JsmResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth_time_ms: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub smooth_threshold_dps: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decay_smoothing: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one_euro: Option<bool>,
+    pub cutoff_recovery_dps: f32,
+    pub right_undeadzone_inner: f32,
+    pub right_undeadzone_outer: f32,
+    pub right_unpower: f32,
+}
+
+impl JsmResponse {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub(crate) fn validate(&self) -> Result<()> {
+        use crate::motion_config::range;
+        if let Some(time) = self.smooth_time_ms {
+            range("JSM 平滑窗口", time, 0., 2000.)?;
+        }
+        if let Some(threshold) = self.smooth_threshold_dps {
+            range("JSM 平滑阈值", threshold, 0., 2000.)?;
+        }
+        range("JSM 完全恢复转速", self.cutoff_recovery_dps, 0., 2000.)?;
+        range("右摇杆内死区补偿", self.right_undeadzone_inner, 0., 0.99)?;
+        range("右摇杆外死区补偿", self.right_undeadzone_outer, 0., 0.99)?;
+        range("右摇杆响应指数", self.right_unpower, 0., 10.)?;
+        if self.right_undeadzone_inner + self.right_undeadzone_outer >= 1. {
+            bail!("右摇杆内外死区补偿之和必须小于 100%");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -644,6 +715,7 @@ impl Profile {
         }
         g.motion.validate()?;
         g.acceleration.validate()?;
+        g.jsm_response.validate()?;
         g.ds4_imu_filter.validate()?;
         let needs_pad = g.motion.mode != crate::motion_config::MotionMode::Pointer
             || g.motion

@@ -542,16 +542,20 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             "NONE" | "OFF" => Some(GamepadTarget::None),
             _ => None,
         };
+        let sticks = ["LEFT_STICK_MODE", "RIGHT_STICK_MODE"].map(|name| {
+            settings.get(name).map(|s| s.value.as_str())
+        });
+        let aim_mode = |mode| matches!(mode, Some("AIM" | "FLICK" | "FLICK_ONLY"));
+        let aim_stick = match sticks {
+            [left, Some("RIGHT_STICK")] if aim_mode(left) => Some("left_stick"),
+            [Some("LEFT_STICK"), right] if aim_mode(right) => Some("right_stick"),
+            _ => None,
+        };
         let complete = crate::profile::BUTTONS[..15].iter().all(|button| {
             bindings
                 .get(*button)
                 .is_some_and(|b| native_output(&b.value) == Some(*button))
-        }) && settings
-            .get("LEFT_STICK_MODE")
-            .is_some_and(|s| s.value == "LEFT_STICK")
-            && settings
-                .get("RIGHT_STICK_MODE")
-                .is_some_and(|s| s.value == "RIGHT_STICK")
+        }) && (aim_stick.is_some() || sticks == [Some("LEFT_STICK"), Some("RIGHT_STICK")])
             && settings
                 .get("ZL_MODE")
                 .is_some_and(|s| matches!(s.value.as_str(), "X_LT" | "PS_L2"))
@@ -562,6 +566,11 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             p.virtual_gamepad = target;
             let message = if target == GamepadTarget::None {
                 "已选择键鼠输出"
+            } else if let Some(stick) = aim_stick {
+                let mut layout = crate::gamepad_bindings::standard_bindings(target);
+                layout.retain(|binding| binding.input != stick);
+                p.gamepad_bindings = Some(layout);
+                "已填入虚拟手柄布局，瞄准用摇杆交给快速转向设置"
             } else {
                 "已填入标准虚拟手柄布局"
             };
@@ -806,13 +815,32 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                     g.stick_full_scale_dps = scalar(v)?;
                     None
                 }
+                "FLICK_STICK_OUTPUT" => return Ok(None), // Resolve against the final gyro destination below.
+                "GYRO_CUTOFF_RECOVERY" | "RIGHT_STICK_UNDEADZONE_INNER"
+                | "RIGHT_STICK_UNDEADZONE_OUTER" | "RIGHT_STICK_UNPOWER" => {
+                    let cfg = jsm_compile(&format!("{} = {v}", s.key), &[]);
+                    ensure!(cfg.lines.first().is_some_and(|l| matches!(l.status, JsmLineStatus::Ok)),
+                        "JSM 参数无效");
+                    let right = cfg.pad.out[1];
+                    match s.key.as_str() {
+                        "GYRO_CUTOFF_RECOVERY" => g.jsm_response.cutoff_recovery_dps = cfg.aim.cutoff_recovery,
+                        "RIGHT_STICK_UNDEADZONE_INNER" => g.jsm_response.right_undeadzone_inner = right.undeadzone_inner,
+                        "RIGHT_STICK_UNDEADZONE_OUTER" => g.jsm_response.right_undeadzone_outer = right.undeadzone_outer,
+                        _ => g.jsm_response.right_unpower = right.unpower,
+                    }
+                    Some("参数已保存在 Studio 配置中，选择 JSM 原生瞄准引擎后生效")
+                }
                 "GYRO_CUTOFF_SPEED" => {
                     g.motion.cutoff_dps = scalar(v)?;
                     Some("已设置低速截止；平滑与截止恢复算法可能不同")
                 }
                 "GYRO_SMOOTH_TIME" => {
-                    g.smoothing_ms = scalar(v)? * 1000.;
-                    Some("秒已换算为毫秒；使用 Motion Studio 的时间平滑，最多 50 ms")
+                    let ms = scalar(v)? * 1000.;
+                    g.jsm_response.smooth_time_ms = Some(ms);
+                    if ms <= 50. {
+                        g.smoothing_ms = ms;
+                    }
+                    Some("JSM 使用导入的平滑窗口，Studio 平滑时间最多为 50 ms")
                 }
                 "GYRO_SMOOTHING_DECAY" => {
                     g.motion.smoothing = match v {
@@ -820,11 +848,16 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                         "OFF" => crate::motion_config::Smoothing::Ema,
                         _ => bail!("需要 ON 或 OFF"),
                     };
-                    Some("已转换平滑方式，原 JSM 阈值平滑与时间平滑并非完全等价")
+                    g.jsm_response.decay_smoothing = Some(v == "ON");
+                    Some("已保留 JSM 的阈值或衰减平滑方式")
                 }
                 "GYRO_SMOOTH_THRESHOLD" => {
-                    g.motion.decay_threshold = scalar(v)?;
-                    Some("已用于衰减平滑阈值；传统阈值均值平滑未迁移")
+                    let threshold = scalar(v)?;
+                    g.jsm_response.smooth_threshold_dps = Some(threshold);
+                    if threshold >= 0.1 {
+                        g.motion.decay_threshold = threshold;
+                    }
+                    Some("JSM 使用导入的平滑阈值，设为 0 可关闭前置平滑")
                 }
                 "GYRO_ANGLE_SNAP" => {
                     g.motion.angle_snap = scalar(v)?;
@@ -848,7 +881,8 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 }
                 "ONE_EURO_FILTER" => {
                     g.motion.smoothing = crate::motion_config::Smoothing::OneEuro;
-                    Some("已启用 One Euro；不叠加原 JSM 的前置阈值平滑")
+                    g.jsm_response.one_euro = Some(true);
+                    Some("已启用 One Euro，在 JSM 中可与前置平滑同时使用")
                 }
                 "ACCEL_CURVE" => {
                     g.acceleration.curve = match v {
@@ -1239,6 +1273,33 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "未转换对应的 AIM 摇杆瞄准模式，灵敏度未应用",
             );
         }
+    }
+    if let Some(s) = settings.get("FLICK_STICK_OUTPUT") {
+        apply(&mut p, &mut lines, s, |p| {
+            let target = match s.value.as_str() {
+                "MOUSE" => GyroOutput::Mouse,
+                "RIGHT_STICK" if p.virtual_gamepad != GamepadTarget::None => GyroOutput::RightStick,
+                _ => bail!("拨动需要鼠标或已启用的虚拟右摇杆"),
+            };
+            if !p.gyro.enabled && p.gyro.motion.flick.enabled && !gyro_blocked {
+                p.gyro.output = target;
+            }
+            ensure!(!gyro_blocked && p.gyro.output == target, "体感和拨动需要使用同一个输出目标");
+            Ok(None)
+        });
+    }
+    // A JSM file specifying only the threshold inherits the native 125 ms
+    // window. A file specifying only the window inherits a zero threshold.
+    if ["GYRO_SMOOTH_TIME", "GYRO_SMOOTH_THRESHOLD", "GYRO_SMOOTHING_DECAY", "ONE_EURO_FILTER"]
+        .iter().filter_map(|key| settings.get(*key))
+        .any(|s| matches!(lines[s.index].status.as_str(), "converted" | "approximate"))
+    {
+        let defaults = flexinput_engine::eval::JsmAimSettings::default();
+        let response = &mut p.gyro.jsm_response;
+        response.smooth_time_ms.get_or_insert(defaults.smooth_time * 1000.);
+        response.smooth_threshold_dps.get_or_insert(defaults.smooth_threshold);
+        response.decay_smoothing.get_or_insert(false);
+        response.one_euro.get_or_insert(false);
     }
     p.materialize_gamepad_bindings();
     p.validate().context("转换后的配置校验失败")?;

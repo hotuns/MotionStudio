@@ -1,5 +1,9 @@
 import type {Gyro} from './types';
 
+export function usesJsmAim(gyro:Gyro) {
+  return gyro.aim_engine==='jsm' && gyro.output!=='ds4_imu' && gyro.motion.mode==='pointer';
+}
+
 // Stock JSM's zero smoothing threshold bypasses its 125 ms window.
 // Preserve game calibration, sensitivity, coordinates and custom scripts.
 export function applyJsmResponse(gyro:Gyro) {

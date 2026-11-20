@@ -222,9 +222,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/aim.rs",
       "upstreamSha256": "481997db60aea3944217a537c89f4a238225b59706912062d273def7851aa299",
-      "vendoredSha256": "f64e0229d837d5a3043cde1f1fb650864c5a71ba22564f86051698b0f4a3e4a3",
+      "vendoredSha256": "30b038c9b2852eee6eb6ba0626cd79a64ede41771a36d017cb08753870a62301",
       "modified": true,
-      "notes": "Headless gyro sample timing with the original per-sample math and filter order. Both Flick sites now call the shared original easing expression in eval/curves.rs. Reuse flick_time_scale at both existing time-exponent call sites without changing JSM timing behavior. Extract unchanged initial flick snapping and FLICK_ONLY rotation decision for shared JSM/RWS use."
+      "notes": "Headless gyro sample timing with the original per-sample math and filter order. Both Flick sites now call the shared original easing expression in eval/curves.rs. Reuse flick_time_scale at both existing time-exponent call sites without changing JSM timing behavior. Extract unchanged initial flick snapping and FLICK_ONLY rotation decision for shared JSM/RWS use. Expose sample_motion, sampled output ticks, independent gyro/stick resets and the cutoff preview. Both axes now consume the fresh sample interval in the shared mouse conversion."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/analog.rs",
@@ -297,9 +297,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/mod.rs",
       "upstreamSha256": "e317c5c110afcdbaa630e0ea9006b0c3bc3a0a944495997e5fe3afdd2907797e",
-      "vendoredSha256": "66eef6c884c9592a1ec0109fa40cb39d420b1f2bffd83c63b30e1f74bee837d9",
+      "vendoredSha256": "389d71bdb57fe12450a0ac25884ede9e69ab661ec53f32616cf4cfe78e3bb2c9",
       "modified": true,
-      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point, shared NoMouse stick direction predicate and its configurable-ratio entry. Expose native aim defaults and internal shared flick snapping/mode helpers."
+      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point, shared NoMouse stick direction predicate and its configurable-ratio entry. Expose native aim defaults and internal shared flick snapping/mode helpers. The jsm_aim namespace exports the same Aim, Analog, Motion and Pad components used by jsm_publish."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/motion.rs",
@@ -358,9 +358,9 @@
     {
       "path": "crates/engine/src/eval/modules/mod.rs",
       "upstreamSha256": "09db165887dde2c343b4b8f461af4f22acb0c747aa378cec8d77615aa8d7e2ce",
-      "vendoredSha256": "6c33c1ca7a21a4a46e8c9fd086102fe9b219efde4187d5e90489f5074d2398e2",
+      "vendoredSha256": "86361d99ff94136cef06a1d7f3d1148ecbe381ff3d64ad9c6f1be9a6dc32a738",
       "modified": true,
-      "notes": "Compile JSM Config and expose its parser, trigger-only entry point and shared NoMouse direction predicate, including the configurable-ratio entry, in the headless evaluator. Re-export native JSM aim defaults to the Studio adapter."
+      "notes": "Compile JSM Config and expose its parser, trigger-only entry point and shared NoMouse direction predicate, including the configurable-ratio entry, in the headless evaluator. Re-export the native JSM aim defaults and jsm_aim runtime API to the Studio adapter."
     },
     {
       "path": "crates/engine/src/eval/modules/remapper.rs",
@@ -1155,5 +1155,5 @@
       "modified": false
     }
   ],
-  "port": "Motion Studio headless adapter: excludes GUI and JSM evaluation; native SDL raw event seam, original physical-source processing and native gamepad devices; Studio owns configuration and bounded lifecycle"
+  "port": "Motion Studio headless adapter with native SDL raw events, physical-source processing, optional JSM aim/Flick evaluation and native gamepad devices. Studio owns the editable configuration, bindings and output lifecycle."
 }
