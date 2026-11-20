@@ -222,9 +222,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/aim.rs",
       "upstreamSha256": "481997db60aea3944217a537c89f4a238225b59706912062d273def7851aa299",
-      "vendoredSha256": "3bf505bc1dbe227f5316e11d6037f6cd1019326acc51692d3e91beda06faaa24",
+      "vendoredSha256": "f8adb226474df51b4c1c5ef072563358704fabd94f9ebb05c5118b3120328791",
       "modified": true,
-      "notes": "Headless gyro sample timing with the original per-sample math and filter order. Both Flick sites now call the shared original easing expression in eval/curves.rs. Reuse flick_time_scale at both existing time-exponent call sites without changing JSM timing behavior. Extract unchanged initial flick snapping and FLICK_ONLY rotation decision for shared JSM/RWS use. Expose sample_motion, sampled output ticks, independent gyro/stick resets and the cutoff preview. Both axes now consume the fresh sample interval in the shared mouse conversion. Accept the Studio activation gate on a fresh sample, mute the retained rate independently of sensor history, expose native Flick engagement for completed thumb input, and size the outer-ring smoother to the standalone 64 ms window. Share the unfiltered native projection with the game-angle calibration input."
+      "notes": "Headless gyro sample timing with the original per-sample math and filter order. Both Flick sites now call the shared original easing expression in eval/curves.rs. Reuse flick_time_scale at both existing time-exponent call sites without changing JSM timing behavior. Extract unchanged initial flick snapping and FLICK_ONLY rotation decision for shared JSM/RWS use. Expose sample_motion, sampled output ticks, independent gyro/stick resets and the cutoff preview. Both axes now consume the fresh sample interval in the shared mouse conversion. Accept the Studio activation gate on a fresh sample, mute the retained rate independently of sensor history, expose native Flick engagement for completed thumb input, and size the outer-ring smoother to the standalone 64 ms window. Share the unfiltered native projection with the game-angle calibration input. Expose the projected gyro input and a final camera-rate transform for timestamped custom filters before either output."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/analog.rs",

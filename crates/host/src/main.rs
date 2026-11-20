@@ -84,14 +84,13 @@ fn self_test(dll: &std::path::Path) -> anyhow::Result<()> {
         let mut stick_samples = 0;
         for event in trace {
             let frame = engine.process(&event);
-            if matches!(event, InputEvent::Gyro { .. })
-                && frame.pad.is_some_and(|pad| pad.right_x > 0)
-            {
-                anyhow::ensure!(
-                    frame.mouse_delta == [0.0; 2],
-                    "Right stick emitted mouse movement"
-                );
-                stick_samples += 1;
+            if matches!(event, InputEvent::Gyro { .. }) {
+                anyhow::ensure!(frame.mouse_delta == [0.; 2], "Right stick emitted mouse movement");
+                let report = engine.advance_output(0.002, event.time().host_ns);
+                anyhow::ensure!(report.mouse_delta == [0.; 2], "Right stick emitted mouse movement");
+                if report.pad.is_some_and(|pad| pad.right_x > 0) {
+                    stick_samples += 1;
+                }
             }
         }
         anyhow::ensure!(

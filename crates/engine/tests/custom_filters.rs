@@ -118,33 +118,89 @@ fn runtime_fault_bypasses_without_losing_existing_button_outputs() {
 }
 #[test]
 fn unchanged_layers_keep_state_and_invalid_layers_do_not_partly_apply() {
-    let mut p = scripted_profile();
-    p.gyro.motion.custom_filters = vec![filter(
-        "fn process(s,p){if !this.contains(\"n\"){this.n=0.0;}this.n+=1.0;[this.n,s.y,s.z]}",
-        Stage::BeforeBuiltin,
-    )];
-    let mut engine = scripted_engine(p.clone());
-    gyro(&mut engine, 2, 10.);
-    let first = gyro(&mut engine, 4, 10.);
-    p.gyro.sensitivity *= 2.;
-    engine.apply_layer(p.clone()).unwrap();
-    let second = gyro(&mut engine, 6, 10.);
-    assert!((second / first - 4.).abs() < 0.01);
-    assert_eq!(engine.motion.custom_filters.statuses()[0].calls, 2);
-    let mut invalid = p.clone();
-    invalid.gyro.motion.custom_filters[0].source = "invalid".into();
-    invalid.gyro.sensitivity = 8.;
-    assert!(engine.apply_layer(invalid).is_err());
-    assert_eq!(engine.profile.gyro.sensitivity, p.gyro.sensitivity);
+    for mut p in [profile(), scripted_profile()] {
+        p.gyro.motion.custom_filters = vec![filter(
+            "fn process(s,p){if !this.contains(\"n\"){this.n=0.0;}this.n+=10.0;[this.n,s.y,s.z]}",
+            Stage::BeforeBuiltin,
+        )];
+        let mut engine = scripted_engine(p.clone());
+        gyro(&mut engine, 2, 10.);
+        let first = gyro(&mut engine, 4, 10.);
+        p.gyro.sensitivity *= 2.;
+        engine.apply_layer(p.clone()).unwrap();
+        let second = gyro(&mut engine, 6, 10.);
+        assert!((second / first - 4.).abs() < 0.01, "first {first}, second {second}");
+        assert_eq!(engine.motion.custom_filters.statuses()[0].calls, 2);
+        let mut invalid = p.clone();
+        invalid.gyro.motion.custom_filters[0].source = "invalid".into();
+        invalid.gyro.sensitivity = 8.;
+        assert!(engine.apply_layer(invalid).is_err());
+        assert_eq!(engine.profile.gyro.sensitivity, p.gyro.sensitivity);
+    }
 }
 #[test]
-fn angular_aim_uses_jsm_and_preserves_legacy_scripts_for_other_modes() {
+fn angular_mouse_and_stick_apply_all_stages_once_per_sensor_sample() {
+    for output in [GyroOutput::Mouse, GyroOutput::RightStick] {
+        let mut p = profile();
+        p.gyro.output = output;
+        p.virtual_gamepad = GamepadTarget::Xbox360;
+        p.gyro.counts_per_degree = 1.;
+        p.gyro.stick_full_scale_dps = 120.;
+        p.gyro.sensitivity = 2.;
+        p.gyro.vertical_ratio = 0.5;
+        p.gyro.invert_y = true;
+        let raw = filter("fn process(s,p){[s.x, s.y+s.z, s.z*2.0]}", Stage::RawGyro);
+        let mut before = filter(r#"fn process(s,p){
+            if abs(s.raw_z-10.0)>0.001 || abs(s.x-20.0)>0.001 || abs(s.y+10.0)>0.001 {throw "projection";}
+            [s.x+5.0, s.y*2.0, 0.0]
+        }"#, Stage::BeforeBuiltin);
+        before.id = "projected".into();
+        let mut after = filter(r#"fn process(s,p){
+            if abs(s.x-25.0)>0.001 || abs(s.y-20.0)>0.001 || s.sensor_ns != 4000000 {throw "post-filter units";}
+            [s.x+5.0, s.y+10.0, 0.0]
+        }"#, Stage::AfterBuiltin);
+        after.id = "final".into();
+        p.gyro.motion.custom_filters = vec![after, before, raw];
+
+        let mut engine = Engine::new(p).unwrap();
+        gyro(&mut engine, 2, 10.);
+        gyro(&mut engine, 4, 10.);
+        if output == GyroOutput::Mouse {
+            let [x, y] = engine.frame.mouse_delta;
+            assert!((x - 0.12).abs() < 1e-5 && (y - 0.06).abs() < 1e-5);
+        }
+        for ms in [4, 5, 6] {
+            let frame = engine.advance_output(0.001, ms * 1_000_000);
+            assert_eq!(frame.mouse_delta, [0.; 2]);
+            if output == GyroOutput::RightStick {
+                let pad = frame.pad.unwrap();
+                assert!((f32::from(pad.right_x) / 32767. - 0.5).abs() < 0.0001);
+                assert!((f32::from(pad.right_y) / 32767. + 0.25).abs() < 0.0001);
+            }
+        }
+        for status in engine.motion.custom_filters.statuses() {
+            assert!(!status.bypassed, "{:?}", status.error);
+            assert_eq!(status.calls, 1);
+        }
+    }
+}
+
+#[test]
+fn pausing_gyro_gates_a_script_generated_rate_independently_of_flick() {
     let mut p = profile();
-    p.gyro.motion.custom_filters = vec![filter("fn process(s,p){[0.0,0.0,0.0]}", Stage::BeforeBuiltin)];
+    p.gyro.pause_input = Some("south".into());
+    p.gyro.motion.flick.enabled = true;
+    p.gyro.motion.custom_filters = vec![filter("fn process(s,p){[60.0, 0.0, 0.0]}", Stage::AfterBuiltin)];
     let mut engine = Engine::new(p).unwrap();
-    gyro(&mut engine, 2, 10.);
-    assert!(gyro(&mut engine, 4, 10.) > 0.);
-    assert_eq!(engine.motion.custom_filters.statuses()[0].calls, 0);
+    gyro(&mut engine, 2, 0.);
+    assert!(gyro(&mut engine, 4, 0.) > 0.);
+    let time = |ms| SampleTime { host_ns: ms * 1_000_000u64, sensor_ns: ms * 1_000_000u64 };
+    engine.process(&InputEvent::Button { time: time(5), index: 0, down: true });
+    assert_eq!(gyro(&mut engine, 6, 10.), 0.);
+    engine.process(&InputEvent::Axis { time: time(7), index: 2, value: i16::MAX });
+    engine.advance_output(0.002, time(8).host_ns);
+    assert!(engine.advance_output(0.002, time(10).host_ns).mouse_delta[0] > 0.);
+    assert_eq!(engine.motion.custom_filters.statuses()[0].calls, 1);
 }
 
 #[test]
@@ -154,6 +210,7 @@ fn game_angle_measurement_bypasses_all_custom_processing() {
         "fn process(s,p){[s.x*10.0,s.y*10.0,s.z*10.0]}",
         Stage::RawGyro,
     )];
+    p.gyro.motion.custom_filters[0].requires_accel = true;
     let mut engine = Engine::new(p).unwrap();
     engine.begin_measurement("yaw").unwrap();
     for n in 1..=101 {
@@ -177,12 +234,12 @@ fn old_profiles_default_to_an_empty_chain_and_scripts_roundtrip() {
 
 #[test]
 fn declared_accelerometer_dependency_waits_for_fresh_calibrated_accel() {
-    let mut p = scripted_profile();
+    let mut p = profile();
     let mut f=filter("fn process(s,p){if !s.accel_fresh || abs(s.accel_z+1.0)>0.01 {throw \"accel frame\";}[s.x,s.y,s.z]}",Stage::BeforeBuiltin);
     f.requires_accel = true;
     p.gyro.motion.custom_filters = vec![f];
-    assert!(p.gyro.motion.needs_accel());
-    let mut engine = scripted_engine(p);
+    assert!(p.gyro.needs_accel());
+    let mut engine = Engine::new(p).unwrap();
     gyro(&mut engine, 2, 10.);
     gyro(&mut engine, 4, 10.);
     assert_eq!(engine.motion.custom_filters.statuses()[0].calls, 0);

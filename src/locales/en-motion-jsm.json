@@ -157,5 +157,5 @@
   "仅拨动和仅转动不能同时启用": "Flick only and rotate only are mutually exclusive",
   "瞄准输入轴组合值需在 0 到 7 之间": "The aim input axis combination must be between 0 and 7",
   "线性预设使用固定灵敏度，并关闭平滑、低速抑制、吸附和刹车。": "The Linear preset uses constant sensitivity and turns off smoothing, low-speed suppression, snapping and braking.",
-  "角速度瞄准会跳过此配置中保存的脚本滤波和边缘转向。": "Angular aiming skips the filter scripts and edge turning saved in this profile."
+  "此配置的边缘转向设置仅在旧版角速度瞄准中生效。": "This profile’s edge turning settings apply only to the legacy angular aiming mode."
 }

@@ -3,7 +3,7 @@ use crate::{text, AppState};
 use motion_core::{
     protocol::Status,
     sdl::Device,
-    storage::{ControllerOverlaySettings, Language, OverlayPosition},
+    storage::{ControllerOverlaySettings, Language, OverlayContent, OverlayPosition},
 };
 use serde::Serialize;
 use tauri::{
@@ -12,6 +12,18 @@ use tauri::{
 };
 
 pub const LABEL: &str = "controller-overlay";
+
+fn logical_size(settings: &ControllerOverlaySettings) -> [f64; 2] {
+    let width = f64::from(settings.width);
+    let model = width * 0.75;
+    let panel = (width * 0.48).clamp(128., 224.);
+    let height = match settings.content {
+        OverlayContent::Controller => model,
+        OverlayContent::KeyMouse => panel,
+        OverlayContent::Both => model + panel,
+    };
+    [width, height]
+}
 
 fn placement(
     origin: [i32; 2],
@@ -57,10 +69,11 @@ pub fn configure(app: &AppHandle, settings: &ControllerOverlaySettings) -> Resul
     }
     let existing = app.get_webview_window(LABEL);
     let created = existing.is_none();
+    let [width, height] = logical_size(settings);
     let window = match existing {
         Some(window) => window,
         None => WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html".into()))
-            .title("Motion Studio · Controller overlay")
+            .title("Motion Studio · Desktop overlay")
             .initialization_script("window.__MOTION_CONTROLLER_OVERLAY__ = true;")
             .transparent(true)
             .background_color(Color(0, 0, 0, 0))
@@ -75,7 +88,7 @@ pub fn configure(app: &AppHandle, settings: &ControllerOverlaySettings) -> Resul
             .maximizable(false)
             .closable(false)
             .visible(false)
-            .inner_size(settings.width as f64, settings.width as f64 * 0.75)
+            .inner_size(width, height)
             .build()
             .map_err(text)?,
     };
@@ -91,11 +104,9 @@ pub fn configure(app: &AppHandle, settings: &ControllerOverlaySettings) -> Resul
             .ok_or("无法确定悬浮手柄显示器")?;
         let work = monitor.work_area();
         let scale = monitor.scale_factor();
-        let width = ((settings.width as f64 * scale).round() as u32)
-            .min(work.size.width)
-            .min(work.size.height.saturating_mul(4) / 3)
-            .max(1);
-        let size = [width, (width * 3 / 4).max(1)];
+        let fit = scale.min(f64::from(work.size.width) / width)
+            .min(f64::from(work.size.height) / height);
+        let size = [width, height].map(|axis| (axis * fit).round().max(1.) as u32);
         let pos = placement(
             [work.position.x, work.position.y],
             [work.size.width, work.size.height],
@@ -151,6 +162,7 @@ pub struct OverlayView {
     settings: ControllerOverlaySettings,
     language: Language,
     status: Option<Status>,
+    status_age_ms: Option<u64>,
     device: Option<Device>,
     restart_count: u32,
 }
@@ -170,16 +182,18 @@ pub fn controller_overlay_state(
             .find(|device| device.path == settings.device_path)
             .cloned()
     });
+    let status_age_ms = snapshot.status_seen.map(|at| at.elapsed().as_millis() as u64);
     let status = live(
         &snapshot.status,
         snapshot.engine_ready,
-        state.client.status_is_fresh(),
+        status_age_ms.is_some_and(|age| age < 600),
     )
     .then_some(snapshot.status);
     Ok(OverlayView {
         settings: settings.controller_overlay,
         language: settings.language,
         status,
+        status_age_ms,
         device,
         restart_count: snapshot.restart_count,
     })
@@ -301,6 +315,11 @@ mod tests {
         let settings: motion_core::storage::Settings = serde_json::from_str("{}").unwrap();
         assert!(!settings.controller_overlay.enabled);
         assert_eq!(settings.controller_overlay.width, 320);
+        assert_eq!(settings.controller_overlay.content, OverlayContent::KeyMouse);
+        let old: ControllerOverlaySettings = serde_json::from_str(r#"{"enabled":true,"width":400}"#).unwrap();
+        assert_eq!(old.content, OverlayContent::Controller);
+        assert_eq!(logical_size(&old), [400., 300.]);
+        assert_eq!(logical_size(&ControllerOverlaySettings {content: OverlayContent::Both, ..old}), [400., 492.]);
         for (width, opacity) in [(159, 100), (641, 100), (320, 19), (320, 101)] {
             let config = ControllerOverlaySettings {
                 width,

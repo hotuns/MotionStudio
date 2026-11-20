@@ -468,7 +468,8 @@ impl Aim {
         }
         let sample_dt = clock.interval(dt);
         if let Some(seconds) = sample_dt {
-            self.sampled_gyro = self.gyro_sample(s, p, m, c, gravity, seconds, gyro, actions, blocked);
+            let projected = Self::project_motion(s, m, c, gravity, gyro);
+            self.sampled_gyro = self.gyro_sample(s, p, c, projected, seconds, gyro, actions, blocked);
         } else if blocked { self.block_sampled_gyro(); }
         let Vec2 { x: vel_x, y: vel_y } = self.sampled_gyro.velocity;
 
@@ -522,7 +523,19 @@ impl Aim {
         c: &super::cc::Settings, gravity: super::motion::Gravity, dt: f32,
         gyro: Gyro, actions: &HashSet<GyroAction>, blocked: bool,
     ) -> Vec2 {
-        self.sampled_gyro = self.gyro_sample(s, p, m, c, gravity, dt, gyro, actions, blocked);
+        let projected = Self::project_motion(s, m, c, gravity, gyro);
+        self.sample_projected_motion(s, p, c, projected, dt, gyro, actions, blocked, std::convert::identity)
+    }
+
+    /// Process a projected gyro sample through the same native response. The
+    /// transform sees only the gyro camera rate, before mouse or stick output.
+    pub fn sample_projected_motion(
+        &mut self, s: &Settings, p: &pad::Settings, c: &super::cc::Settings,
+        projected: (f32, f32), dt: f32, gyro: Gyro, actions: &HashSet<GyroAction>,
+        blocked: bool, transform: impl FnOnce(Vec2) -> Vec2,
+    ) -> Vec2 {
+        self.sampled_gyro = self.gyro_sample(s, p, c, projected, dt, gyro, actions, blocked);
+        if !blocked { self.sampled_gyro.velocity = transform(self.sampled_gyro.velocity); }
         if p.gyro_dest == Dest::Mouse { self.gyro_mouse_delta(s, dt) } else { Vec2::ZERO }
     }
 
@@ -610,15 +623,14 @@ impl Aim {
         &mut self,
         s: &Settings,
         p: &pad::Settings,
-        m: &super::motion::Settings,
         c: &super::cc::Settings,
-        gravity: super::motion::Gravity,
+        projected: (f32, f32),
         dt: f32,
         gyro: Gyro,
         actions: &HashSet<GyroAction>,
         blocked: bool,
     ) -> GyroAim {
-        let (mut gx, mut gy) = Self::project_motion(s, m, c, gravity, gyro);
+        let (mut gx, mut gy) = projected;
 
         // ── smoothing ────────────────────────────────────────────────────────
         if c.decay_smoothing {

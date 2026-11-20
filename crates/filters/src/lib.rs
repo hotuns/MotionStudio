@@ -555,6 +555,11 @@ impl FilterChain {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+    pub fn has_active(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.config.enabled && !entry.status.bypassed)
+    }
     pub fn has_stage(&self, stage: Stage) -> bool {
         self.entries.iter().any(|entry| {
             entry.config.enabled && entry.config.stage == stage && !entry.status.bypassed

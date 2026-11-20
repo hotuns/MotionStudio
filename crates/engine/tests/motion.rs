@@ -407,6 +407,7 @@ fn a_layer_switching_motion_modes_releases_the_previous_stick_output() {
     let mut e = Engine::new(pointer.clone()).unwrap();
     gyro(&mut e, 1, 0., 0., 90.);
     gyro(&mut e, 2, 0., 0., 90.);
+    e.advance_output(0.001, time(2).host_ns);
     assert!(e.frame.pad.unwrap().right_x > 0);
 
     e.apply_layer(rotation).unwrap();
@@ -577,6 +578,33 @@ fn a_complete_flick_between_output_slots_is_recognized_then_paid_out() {
         }
     }
     assert!((counts - 900.).abs() < 0.01, "{counts}");
+}
+
+#[test]
+fn flick_preserves_a_complete_rim_vector_and_return_in_one_input_poll() {
+    for (push, expected) in [
+        (vec![(2, 32767)], 900.),
+        (vec![(2, 32767), (3, -32767)], 450.),
+        (vec![(3, -32767), (2, 32767)], 450.),
+    ] {
+        for release_ms in [2, 3] {
+            let mut p = profile();
+            p.gyro.motion.flick.enabled = true;
+            let mut e = Engine::new(p).unwrap();
+            for &(index, value) in &push {
+                e.process(&InputEvent::Axis { time: time(2), index, value });
+            }
+            for &(index, _) in &push {
+                e.process(&InputEvent::Axis { time: time(release_ms), index, value: 0 });
+            }
+            e.advance_input(time(4).host_ns);
+            assert_eq!(e.frame.mouse_delta, [0.; 2]);
+            let total: f64 = (1..=30)
+                .map(|tick| e.advance_output(0.01, time(tick * 10).host_ns).mouse_delta[0])
+                .sum();
+            assert!((total - expected).abs() < 0.1, "{push:?} at {release_ms} ms: {total}");
+        }
+    }
 }
 
 #[test]
@@ -828,7 +856,7 @@ fn jsm_default_response_preserves_explicit_calibration_and_filter_values_on_load
 }
 
 #[test]
-fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
+fn virtual_stick_flick_uses_full_speed_for_the_calibrated_duration() {
     for pause_at in [None, Some(0), Some(2)] {
         let mut p = profile();
         gamepad(&mut p);
@@ -849,10 +877,14 @@ fn flick_to_virtual_stick_preserves_the_angle_even_when_it_needs_more_time() {
                 button(&mut e, 0, true);
             }
             let f = e.advance(0.01, n * 10_000_000);
+            let axis = f.pad.unwrap().right_x;
+            if n <= 100 { assert_eq!(axis, i16::MAX); }
+            if n >= 102 { assert_eq!(axis, 0); }
             degrees += f.pad.unwrap().right_x as f32 / 32767. * 90. * 0.01;
             assert_eq!(f.mouse_delta, [0.; 2]);
         }
-        assert!((degrees - 90.).abs() < 0.1, "pause={pause_at:?}: {degrees}");
+        // Native Flick emits a full report on the inclusive duration boundary.
+        assert!((degrees - 90.).abs() <= 0.9 + 0.001, "pause={pause_at:?}: {degrees}");
     }
 }
 
@@ -863,7 +895,9 @@ fn a_layer_changing_trackball_settings_preserves_a_flick_in_progress() {
     p.gyro.stick_full_scale_dps = 90.;
     p.gyro.motion.flick.enabled = true;
     let mut e = Engine::new(p.clone()).unwrap();
+    let mut baseline = Engine::new(p.clone()).unwrap();
     axis(&mut e, 2, 32767);
+    axis(&mut baseline, 2, 32767);
     let mut degrees = 0.;
     for n in 1..201 {
         if n == 2 {
@@ -871,9 +905,10 @@ fn a_layer_changing_trackball_settings_preserves_a_flick_in_progress() {
             e.apply_layer(p.clone()).unwrap();
         }
         let pad = e.advance(0.01, n * 10_000_000).pad.unwrap();
+        assert_eq!(pad, baseline.advance(0.01, n * 10_000_000).pad.unwrap());
         degrees += pad.right_x as f32 / 32767. * 90. * 0.01;
     }
-    assert!((degrees - 90.).abs() < 0.1, "{degrees}");
+    assert!((degrees - 90.).abs() <= 0.9 + 0.001, "{degrees}");
 }
 
 #[test]
@@ -980,15 +1015,20 @@ fn an_opposing_stick_turn_uses_the_same_clamped_axis_as_the_capacity_check() {
         output: AimOutput::RightStick,
         ..Default::default()
     }];
+    let mut baseline = Engine::new(p.clone()).unwrap();
     let mut e = Engine::new(p).unwrap();
     axis(&mut e, 2, 32767);
+    axis(&mut baseline, 2, 32767);
     button(&mut e, 0, true);
     gyro(&mut e, 1, 0., 0., 180.);
+    gyro(&mut baseline, 1, 0., 0., 180.);
     let mut degrees = 0.;
     for ms in (10..=400).step_by(10) {
         gyro(&mut e, ms, 0., 0., 180.);
+        gyro(&mut baseline, ms, 0., 0., 180.);
         let x = e.advance(0.01, ms * 1_000_000).pad.unwrap().right_x;
-        degrees += (x as f32 / 32767. - 1.) * 360. * 0.01;
+        let base = baseline.advance(0.01, ms * 1_000_000).pad.unwrap().right_x;
+        degrees += (f32::from(x) - f32::from(base)) / 32767. * 360. * 0.01;
     }
     assert!((degrees + 90.).abs() < 0.05, "{degrees}");
 }
@@ -1017,7 +1057,7 @@ fn trackball_coasts_while_held_and_stops_when_released_or_disconnected() {
 }
 
 #[test]
-fn all_curves_and_filters_are_finite_and_custom_points_change_the_response() {
+fn all_angular_curves_and_filters_stay_within_the_configured_gain_range() {
     for curve in [
         Curve::Linear,
         Curve::Natural,
@@ -1040,7 +1080,7 @@ fn all_curves_and_filters_are_finite_and_custom_points_change_the_response() {
                 assert!(e.frame.mouse_delta.iter().all(|v| v.is_finite()));
             }
             assert!(
-                e.frame.mouse_delta[0] >= 1. && e.frame.mouse_delta[0] <= 3.001,
+                (1. - 1e-5..=3.001).contains(&e.frame.mouse_delta[0]),
                 "{curve:?} {smoothing:?} {:?}",
                 e.frame.mouse_delta
             );

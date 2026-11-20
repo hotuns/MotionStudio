@@ -42,6 +42,9 @@ impl<K: Sink, P: Sink> Sink for SplitSink<K, P> {
     fn mouse_trace(&self) -> Option<Vec<MouseTracePoint>> {
         self.keys.mouse_trace()
     }
+    fn key_mouse_preview(&self) -> KeyMousePreview {
+        self.keys.key_mouse_preview()
+    }
     fn button(&mut self, name: &str, down: bool) -> Result<()> {
         self.keys.button(name, down)
     }

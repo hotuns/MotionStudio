@@ -97,16 +97,27 @@ pub enum OverlayPosition {
 #[serde(default, deny_unknown_fields)]
 pub struct ControllerOverlaySettings {
     pub enabled: bool,
+    #[serde(default)] // Previously saved overlay settings always displayed the controller.
+    pub content: OverlayContent,
     pub width: u32,
     pub opacity: u32,
     pub position: OverlayPosition,
     pub monitor: Option<String>,
     pub follow_motion: bool,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OverlayContent {
+    #[default]
+    Controller,
+    KeyMouse,
+    Both,
+}
 impl Default for ControllerOverlaySettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            content: OverlayContent::KeyMouse,
             width: 320,
             opacity: 100,
             position: OverlayPosition::BottomLeft,

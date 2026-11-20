@@ -297,6 +297,9 @@ impl<S: Sink + Send> Sink for FlexVirtualSink<S> {
     fn mouse_trace(&self) -> Option<Vec<MouseTracePoint>> {
         self.inner.mouse_trace()
     }
+    fn key_mouse_preview(&self) -> crate::output::KeyMousePreview {
+        self.inner.key_mouse_preview()
+    }
     fn button(&mut self, name: &str, down: bool) -> Result<()> {
         let pin = if let Some(key) = name.strip_prefix("key:") {
             format!("key_{key}")

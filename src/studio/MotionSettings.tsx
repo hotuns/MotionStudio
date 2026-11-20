@@ -90,8 +90,8 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
             })}>{label}</button>)}
         </div></div>
         <p className={styles.hint}>线性预设使用固定灵敏度，并关闭平滑、低速抑制、吸附和刹车。</p>
-        {jsm&&(gyro.motion.edge.mode!=='off'||gyro.motion.custom_filters?.some(filter=>filter.enabled))&&
-          <p className={settingStyles.notice}>角速度瞄准会跳过此配置中保存的脚本滤波和边缘转向。</p>}
+        {jsm&&gyro.motion.edge.mode!=='off'&&
+          <p className={settingStyles.notice}>此配置的边缘转向设置仅在旧版角速度瞄准中生效。</p>}
         </>}
       </>}
       {passthrough?<>
@@ -108,8 +108,8 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
         <MotionBehavior profile={profile} update={update}/>
       </>}
       <SettingSection key={passthrough?'ds4':'aim'} id={passthrough?'motion-ds4-filters':'motion-filters'}
-        title={passthrough?'直通滤波':jsm?'采样与校准':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
-        summary={!passthrough&&!jsm&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
+        title={passthrough?'直通滤波':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
+        summary={!passthrough&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
         {passthrough?<>
           <p className={styles.hint}>发送给虚拟 DS4 前可处理三轴角速度。加速度计数据沿用设备校准。</p>
           <Range label="直通平滑时间" value={ds4Filter?.smoothing_ms??0} min={0} max={120} step={1} unit=" ms"
@@ -122,14 +122,15 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
             onChange={use_custom_filters=>setDs4Filter({use_custom_filters})}
             help="在直通时应用下方已启用的 Rhai 脚本。"/>
         </>:<SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>}
-        {jsm?<Toggle label="自动校准陀螺仪偏移" value={gyro.jsm_response?.auto_calibrate_gyro??false}
+        {jsm&&<Toggle label="自动校准陀螺仪偏移" value={gyro.jsm_response?.auto_calibrate_gyro??false}
           onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,auto_calibrate_gyro:v};})}
-          help="手柄静止时自动估计陀螺仪的残余偏移。默认关闭。"/>:<SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
+          help="手柄静止时自动估计陀螺仪的残余偏移。默认关闭。"/>}
+        <SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
           <CustomFilters key={profileId} profile={profile} update={update} embedded rawGyroOnly={passthrough}
             running={(!passthrough||!!ds4Filter?.use_custom_filters)&&filtersRunning}
             statuses={filterStatuses}
             onReset={()=>onMotionAction('reset_filters')}/>
-        </SettingField>}
+        </SettingField>
       </SettingSection>
     </>}
   </div>;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { MouseTracePoint, PadTracePoint, Status, VirtualPadPreview } from '../types';
+import {mouseTrajectory,signedCount as signed} from '../mouse-trajectory';
 import styles from './OutputMonitor.module.css';
 import {OutputWaveform} from './OutputWaveform';
 
@@ -26,37 +27,23 @@ function appendTrail<T extends TracePoint>(trail: Trail<T>, incoming: T[]) {
   return { ...trail, points: merged.slice(Math.max(0, start - 1)).slice(-MAX_POINTS) };
 }
 
-function signed(value: number) {
-  return value > 0 ? '+' + value : String(value);
-}
-
 function MousePath({ points }: { points: MouseTracePoint[] }) {
-  const first = points[0]?.position ?? [0, 0];
-  const last = points.at(-1)?.position ?? first;
-  const xs = points.map(point => point.position[0]);
-  const ys = points.map(point => point.position[1]);
-  const minX = Math.min(first[0], ...xs), maxX = Math.max(first[0], ...xs);
-  const minY = Math.min(first[1], ...ys), maxY = Math.max(first[1], ...ys);
-  const scale = Math.min((PLOT_WIDTH - 2 * PAD) / Math.max(80, maxX - minX),
-    (PLOT_HEIGHT - 2 * PAD) / Math.max(36, maxY - minY));
-  const centerX = (minX + maxX) / 2, centerY = (minY + maxY) / 2;
-  const x = (value: number) => PLOT_WIDTH / 2 + (value - centerX) * scale;
-  const y = (value: number) => PLOT_HEIGHT / 2 + (value - centerY) * scale;
+  const {path,start,end,delta}=mouseTrajectory(points,PLOT_WIDTH,PLOT_HEIGHT,PAD);
   return <figure className={styles.trajectory}>
     <div className={styles.plot}>
       <svg viewBox={`0 0 ${PLOT_WIDTH} ${PLOT_HEIGHT}`} role="img" aria-label="鼠标相对位移轨迹">
         <path className={styles.gridLines} d="M40 0V150 M80 0V150 M120 0V150 M160 0V150 M200 0V150 M240 0V150 M280 0V150 M0 30H320 M0 60H320 M0 90H320 M0 120H320"/>
         {points.length > 1 && <>
-          <polyline className={styles.trace} points={points.map(point=>`${x(point.position[0]).toFixed(1)},${y(point.position[1]).toFixed(1)}`).join(' ')} />
-          <circle className={styles.start} cx={x(first[0])} cy={y(first[1])} r={3} />
-          <circle className={styles.end} cx={x(last[0])} cy={y(last[1])} r={4} />
+          <polyline className={styles.trace} points={path} />
+          <circle className={styles.start} cx={start[0]} cy={start[1]} r={3} />
+          <circle className={styles.end} cx={end[0]} cy={end[1]} r={4} />
         </>}
       </svg>
       {points.length < 2 && <span className={styles.empty}>等待鼠标位移</span>}
     </div>
     <figcaption className={styles.caption}>
       <span>相对位移（计数）</span>
-      <strong>X {signed(last[0] - first[0])} · Y {signed(last[1] - first[1])}</strong>
+      <strong>X {signed(delta[0])} · Y {signed(delta[1])}</strong>
     </figcaption>
   </figure>;
 }

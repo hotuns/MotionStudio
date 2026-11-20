@@ -1,12 +1,14 @@
 //! Adapt Studio's editable profile and two clocks to the native JSM aiming pipeline.
 use super::gamepad_motion::GamepadMotion;
 use crate::{
-    motion::cc_settings,
+    motion::{cc_settings, filter_sample, filter_screen_rate},
     motion_config::{FlickSnap, Smoothing, Space},
     profile::{Gyro, GyroOutput},
+    timing::SampleTime,
 };
 use flexinput_engine::eval::{jsm_aim as jsm, jsm_motion_curves};
 use glam::{Vec2, Vec3};
+use motion_filters::{FilterChain, Stage};
 use std::collections::HashSet;
 
 #[derive(PartialEq)]
@@ -19,6 +21,7 @@ struct Settings {
     gesture_mode: jsm::StickMode,
     stick_scale: f32,
     auto_calibrate: bool,
+    fast_multiplier: f32,
 }
 
 fn axis_mask(bits: u8) -> jsm::AxisMask {
@@ -165,6 +168,7 @@ impl Settings {
             gesture_mode,
             stick_scale: stick_speed / pad.calibration,
             auto_calibrate: response.auto_calibrate_gyro,
+            fast_multiplier: fast,
         }
     }
 }
@@ -226,9 +230,6 @@ impl JsmAim {
         self.aim.reset_sampled_gyro();
         self.has_sample = false;
         self.right = None;
-        if !self.stick_active {
-            self.analog = Default::default();
-        }
     }
 
     pub fn block_gyro(&mut self) {
@@ -238,8 +239,8 @@ impl JsmAim {
     }
 
     // A thumb can reach the rim and return between two output reports. Capture
-    // its first complete vector after the SDL FIFO drains, never an isolated X
-    // or Y axis event. JSM still owns snapping, hysteresis and the entire turn.
+    // its first complete vector when an SDL axis report closes. JSM still
+    // owns snapping, hysteresis and the entire turn on the output clock.
     pub fn observe_flick(&mut self, thumb: Vec2) {
         if self.pending_flick.is_none()
             && !self.aim.flick_engaged(0)
@@ -256,11 +257,16 @@ impl JsmAim {
     pub fn clear_stick(&mut self) {
         self.pending_flick = None;
         if self.stick_active {
-            self.aim.reset_sticks();
-            self.analog = Default::default();
-            self.stick_active = false;
-            self.right = None;
+            self.reset_sticks();
         }
+    }
+
+    pub fn reset_sticks(&mut self) {
+        self.pending_flick = None;
+        self.aim.reset_sticks();
+        self.analog = Default::default();
+        self.stick_active = false;
+        self.right = None;
     }
 
     fn observe(&mut self, raw: Vec3, accel: Option<Vec3>, dt: f32) -> jsm::Gyro {
@@ -284,8 +290,9 @@ impl JsmAim {
         dt: f32,
         tracking: [bool; 2],
         active: bool,
+        filters: Option<(&mut FilterChain, SampleTime)>,
     ) -> Vec2 {
-        let gyro = self.observe(raw, accel, dt);
+        let mut gyro = self.observe(raw, accel, dt);
         let s = &self.settings;
         self.actions.clear();
         if tracking[0] {
@@ -295,16 +302,64 @@ impl JsmAim {
             self.actions.insert(jsm::GyroAction::TrackballY);
         }
         self.has_sample = active;
-        self.aim.sample_motion(
-            &s.aim,
+        let Some((chain, time)) = filters.filter(|(chain, _)| active && chain.has_active()) else {
+            return self.aim.sample_motion(
+                &s.aim,
+                &s.pad,
+                &s.motion,
+                &s.curves,
+                self.gravity,
+                dt,
+                gyro,
+                &self.actions,
+                !active,
+            );
+        };
+
+        // The estimator observes the physical IMU. Scripts see its bias-corrected
+        // rate in Studio's existing forward/right/down frame, in degrees/s.
+        chain.begin_sample();
+        let sample = filter_sample(Vec3::new(-gyro.roll, gyro.pitch, gyro.yaw), accel, dt, time);
+        if chain.has_stage(Stage::RawGyro) {
+            let [roll, pitch, yaw] = chain.process(Stage::RawGyro, sample).map(|v| v as f32);
+            gyro = jsm::Gyro {
+                pitch,
+                yaw,
+                roll: -roll,
+            };
+        }
+        let mut projected =
+            jsm::Aim::project_motion(&s.aim, &s.motion, &s.curves, self.gravity, gyro);
+        if chain.has_stage(Stage::BeforeBuiltin) {
+            projected =
+                filter_screen_rate(chain, Stage::BeforeBuiltin, sample, projected.into()).into();
+        }
+
+        // The original script API places after_builtin after the acceleration
+        // curve but before base sensitivity and the vertical ratio.
+        let after = chain.has_stage(Stage::AfterBuiltin);
+        let mut aim = s.aim;
+        if after {
+            aim.min_sens = (1., 1.);
+            aim.max_sens = (s.fast_multiplier, s.fast_multiplier);
+        }
+        self.aim.sample_projected_motion(
+            &aim,
             &s.pad,
-            &s.motion,
             &s.curves,
-            self.gravity,
+            projected,
             dt,
             gyro,
             &self.actions,
             !active,
+            |rate| {
+                if after {
+                    filter_screen_rate(chain, Stage::AfterBuiltin, sample, rate)
+                        * Vec2::from(s.aim.min_sens)
+                } else {
+                    rate
+                }
+            },
         )
     }
 
@@ -313,7 +368,8 @@ impl JsmAim {
             self.clear_stick();
         }
         let gesture = self.pending_flick.take().or(gesture);
-        if !self.has_sample && gesture.is_none() {
+        let idle = !self.has_sample && gesture.is_none();
+        if idle && self.settings.pad.gyro_dest != jsm::Dest::RightStick {
             self.right = None;
             return Vec2::ZERO;
         }
@@ -338,6 +394,13 @@ impl JsmAim {
             input.sticks[0] = gesture.unwrap_or_default().into();
         }
         self.analog.tick(&analog, dt, &input);
+        if idle {
+            // The native mixer reads the previous report's physical direction.
+            // Track it while the gyro is gated so the first live report can add
+            // gyro to a stick the player was already holding.
+            self.right = None;
+            return Vec2::ZERO;
+        }
         let aimed = self.aim.tick_sampled(
             &s.aim,
             &pad,

@@ -5,9 +5,9 @@ use std::time::Instant;
 pub const OUTPUT_MUTEX: &str = "Local\\MotionStudioOutput";
 mod preview;
 mod split;
-pub(crate) use preview::MouseTrace;
+pub(crate) use preview::{KeyMouseTrace, MouseTrace};
 use preview::PadTrace;
-pub use preview::{MouseTracePoint, OutputPreview};
+pub use preview::{KeyMousePreview, MouseTracePoint, OutputPreview};
 pub use split::SplitSink;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -115,6 +115,10 @@ pub trait Sink {
     fn mouse_trace(&self) -> Option<Vec<MouseTracePoint>> {
         None
     }
+    /// Only keyboard/mouse writers publish delivered buttons and wheel ticks.
+    fn key_mouse_preview(&self) -> KeyMousePreview {
+        KeyMousePreview::default()
+    }
     fn button(&mut self, name: &str, down: bool) -> Result<()>;
     fn mouse(&mut self, dx: i32, dy: i32) -> Result<()>;
     fn idle_mouse(&mut self) -> Result<()> {
@@ -157,6 +161,9 @@ impl<T: Sink + ?Sized> Sink for Box<T> {
     }
     fn mouse_trace(&self) -> Option<Vec<MouseTracePoint>> {
         (**self).mouse_trace()
+    }
+    fn key_mouse_preview(&self) -> KeyMousePreview {
+        (**self).key_mouse_preview()
     }
     fn scroll(&mut self, horizontal: i32, vertical: i32) -> Result<()> {
         (**self).scroll(horizontal, vertical)
@@ -423,6 +430,7 @@ impl<S: Sink> Dispatcher<S> {
         OutputPreview {
             generation: self.preview_generation,
             mouse,
+            key_mouse: self.sink.key_mouse_preview(),
             pad: self.pad,
             pad_trace: self.pad_trace.points(),
             pad_time_ms: self.pad_trace.time_ms(),
@@ -482,6 +490,7 @@ mod windows {
     pub struct WindowsSink {
         target: Option<VirtualTarget>,
         gamepad: Option<GamepadStatus>,
+        key_mouse_trace: KeyMouseTrace,
         last_probe: std::time::Instant,
     }
     pub fn probe_virtual_driver() -> Result<()> {
@@ -497,6 +506,7 @@ mod windows {
                 return Ok(Self {
                     target: None,
                     gamepad: None,
+                    key_mouse_trace: KeyMouseTrace::default(),
                     last_probe: std::time::Instant::now(),
                 });
             }
@@ -523,6 +533,7 @@ mod windows {
             let protected_devices = crate::visibility::wait_for_virtual_gamepad(&baseline)?;
             Ok(Self {
                 target: Some(device),
+                key_mouse_trace: KeyMouseTrace::default(),
                 last_probe: std::time::Instant::now(),
                 gamepad: Some(GamepadStatus {
                     target,
@@ -630,11 +641,21 @@ mod windows {
                 .map(|target| crate::feedback::FeedbackFrame::read(target.device()))
         }
         fn button(&mut self, name: &str, down: bool) -> Result<()> {
-            if let Some(key) = name.strip_prefix("key:") {
-                send(keyboard_input(key, down)?)
+            let input = if let Some(key) = name.strip_prefix("key:") {
+                keyboard_input(key, down)?
             } else {
-                send(mouse_button(name, down)?)
-            }
+                mouse_button(name, down)?
+            };
+            send(input)?;
+            self.key_mouse_trace.button(name, down, Instant::now());
+            Ok(())
+        }
+        fn key_mouse_preview(&self) -> KeyMousePreview {
+            self.key_mouse_trace.snapshot()
+        }
+        fn cancel_pending(&mut self) -> Result<()> {
+            self.key_mouse_trace = KeyMouseTrace::default();
+            Ok(())
         }
         fn scroll(&mut self, horizontal: i32, vertical: i32) -> Result<()> {
             if horizontal.unsigned_abs() > 1024 || vertical.unsigned_abs() > 1024 {
@@ -642,9 +663,11 @@ mod windows {
             }
             if vertical != 0 {
                 send(wheel_input(vertical, false))?;
+                self.key_mouse_trace.wheel([0, vertical], Instant::now());
             }
             if horizontal != 0 {
                 send(wheel_input(horizontal, true))?;
+                self.key_mouse_trace.wheel([horizontal, 0], Instant::now());
             }
             Ok(())
         }

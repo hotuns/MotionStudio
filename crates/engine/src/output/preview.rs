@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, time::Instant};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    time::{Duration, Instant},
+};
 
 pub(crate) const SAMPLE_MS: u64 = 8;
 const RECENT_POINTS: usize = 40;
@@ -19,6 +22,8 @@ pub struct MouseTracePoint {
 pub struct OutputPreview {
     pub generation: u64,
     pub mouse: Vec<MouseTracePoint>,
+    #[serde(default)]
+    pub key_mouse: KeyMousePreview,
     pub pad: Option<crate::engine::PadState>,
     #[serde(default)]
     pub pad_trace: Vec<PadTracePoint>,
@@ -26,6 +31,75 @@ pub struct OutputPreview {
     pub pad_time_ms: u64,
     #[serde(default)]
     pub sample_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum KeyMouseChange {
+    Button { name: String, down: bool },
+    Wheel { delta: [i32; 2] },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KeyMouseEvent {
+    pub age_ms: u64,
+    #[serde(flatten)]
+    pub change: KeyMouseChange,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct KeyMousePreview {
+    pub held: Vec<String>,
+    pub recent: Vec<KeyMouseEvent>,
+}
+
+/// Keep fast taps between status publications, separately from long-held keys.
+/// All timestamps and edges come from successful writes on the same backend.
+#[derive(Default)]
+pub(crate) struct KeyMouseTrace {
+    held: BTreeSet<String>,
+    recent: VecDeque<(Instant, KeyMouseChange)>,
+}
+
+impl KeyMouseTrace {
+    pub(crate) fn button(&mut self, name: &str, down: bool, at: Instant) {
+        if self.held.contains(name) == down {
+            return;
+        }
+        if down {
+            self.held.insert(name.to_owned());
+        } else {
+            self.held.remove(name);
+        }
+        self.push(at, KeyMouseChange::Button {
+            name: name.to_owned(),
+            down,
+        });
+    }
+    pub(crate) fn wheel(&mut self, delta: [i32; 2], at: Instant) {
+        if delta != [0; 2] {
+            self.push(at, KeyMouseChange::Wheel { delta });
+        }
+    }
+    fn push(&mut self, at: Instant, change: KeyMouseChange) {
+        if self.recent.len() == 48 {
+            self.recent.pop_front();
+        }
+        self.recent.push_back((at, change));
+    }
+    pub(crate) fn snapshot(&self) -> KeyMousePreview {
+        let now = Instant::now();
+        let recent = self.recent.iter()
+            .filter_map(|(at, change)| {
+                let age = now.saturating_duration_since(*at);
+                (age < Duration::from_secs(1)).then(|| KeyMouseEvent {
+                    age_ms: age.as_millis() as u64,
+                    change: change.clone(),
+                })
+            })
+            .collect();
+        KeyMousePreview { held: self.held.iter().cloned().collect(), recent }
+    }
 }
 
 /// Coalesces successful reports into display samples without touching their

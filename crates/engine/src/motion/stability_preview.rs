@@ -154,7 +154,7 @@ fn smoothing(gyro: &Gyro) -> Vec<Point> {
                 _ => 0.,
             };
             let output = if let Some(jsm) = &mut native {
-                jsm.sample(Vec3::Z * (input / BUS_GYRO_DPS), None, 0.002, [false; 2], true).x / 0.002
+                jsm.sample(Vec3::Z * (input / BUS_GYRO_DPS), None, 0.002, [false; 2], true, None).x / 0.002
             } else { filter.tick(gyro, Vec2::new(input, 0.), 0.002).x };
             [time_ms as f32, input, output]
         })

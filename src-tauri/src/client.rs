@@ -22,6 +22,8 @@ type EngineReply = Result<Option<GameAngleMeasurement>, String>;
 #[derive(Clone, Default, Serialize)]
 pub struct Snapshot {
     pub status: Status,
+    #[serde(skip)]
+    pub status_seen: Option<Instant>,
     pub devices: Vec<Device>,
     pub restart_count: u32,
     pub engine_ready: bool,
@@ -39,7 +41,6 @@ pub struct Client {
     pub stopping: AtomicBool,
     pub snapshot: Mutex<Snapshot>,
     last_seen: Mutex<Instant>,
-    status_seen: Mutex<Option<Instant>>,
 }
 impl Client {
     pub fn new(app: AppHandle) -> Arc<Self> {
@@ -54,7 +55,6 @@ impl Client {
             stopping: AtomicBool::new(false),
             snapshot: Mutex::new(Snapshot::default()),
             last_seen: Mutex::new(Instant::now()),
-            status_seen: Mutex::new(None),
         })
     }
     pub fn log(&self, text: String) {
@@ -158,8 +158,11 @@ impl Client {
                 }
             }
             Event::Status { status } => {
-                self.snapshot.lock().unwrap().status = *status.clone();
-                *self.status_seen.lock().unwrap() = Some(Instant::now());
+                {
+                    let mut snapshot = self.snapshot.lock().unwrap();
+                    snapshot.status = *status.clone();
+                    snapshot.status_seen = Some(Instant::now());
+                }
                 self.publish_calibration();
                 let _ = self.app.emit("engine-status", status);
             }
@@ -194,9 +197,6 @@ impl Client {
         if let Some(state) = self.app.try_state::<crate::AppState>() {
             state.game_calibration.refresh();
         }
-    }
-    pub fn status_is_fresh(&self) -> bool {
-        self.status_seen.lock().unwrap().is_some_and(|time| time.elapsed() < Duration::from_millis(600))
     }
     pub fn request(&self, command: EngineCommand) -> Result<(), String> {
         self.request_reply(command).map(|_| ())
@@ -274,6 +274,7 @@ impl Client {
             let mut state = self.snapshot.lock().unwrap();
             state.restart_count += 1;
             state.status = Status::default();
+            state.status_seen = None;
             state.status.message = "引擎已恢复，请手动开始映射".into();
         }
         self.spawn_worker()

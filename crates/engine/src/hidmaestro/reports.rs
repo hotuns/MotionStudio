@@ -9,7 +9,41 @@ use flexinput_hidmaestro::{
     encode::{GamepadState, PinState},
     Profile,
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::OnceLock};
+
+pub(super) const MOUSE_BUTTONS: [&str; 5] = [
+    "mouse:left", "mouse:right", "mouse:middle", "mouse:x1", "mouse:x2",
+];
+
+/// Decode the same usages the encoder put on the wire, including the modifier
+/// byte. Truncated rollover slots therefore never appear as delivered keys.
+pub(super) fn keyboard_edges(previous: &[u8], next: &[u8], mut edge: impl FnMut(&str, bool)) {
+    static NAMES: OnceLock<[Option<String>; 256]> = OnceLock::new();
+    let names = NAMES.get_or_init(|| {
+        let mut names = std::array::from_fn(|_| None);
+        for key in crate::keyboard::keys() {
+            let usage = if key.modifier != 0 {
+                Some(0xe0 + key.modifier.trailing_zeros() as u8)
+            } else {
+                key.hid_usage()
+            };
+            if let Some(usage) = usage {
+                names[usize::from(usage)] = Some(format!("key:{}", key.name));
+            }
+        }
+        names
+    });
+    for (report, other, down) in [(previous, next, false), (next, previous, true)] {
+        let modifiers = report[0] & !other[0];
+        let changed = (0..8).filter(|bit| modifiers & (1 << bit) != 0).map(|bit| 0xe0 + bit)
+            .chain(report[2..].iter().copied().filter(|usage| *usage != 0 && !other[2..].contains(usage)));
+        for usage in changed {
+            if let Some(name) = &names[usize::from(usage)] {
+                edge(name, down);
+            }
+        }
+    }
+}
 
 pub fn keyboard(held: &BTreeSet<String>) -> Result<[u8; KEYBOARD_REPORT_SIZE]> {
     let mut report = [0; KEYBOARD_REPORT_SIZE];
@@ -35,16 +69,7 @@ pub fn keyboard(held: &BTreeSet<String>) -> Result<[u8; KEYBOARD_REPORT_SIZE]> {
 
 pub fn mouse(held: &BTreeSet<String>, dx: i16, dy: i16, horizontal: i8, vertical: i8) -> [u8; 7] {
     let mut r = [0; 7];
-    for (bit, name) in [
-        "mouse:left",
-        "mouse:right",
-        "mouse:middle",
-        "mouse:x1",
-        "mouse:x2",
-    ]
-    .iter()
-    .enumerate()
-    {
+    for (bit, name) in MOUSE_BUTTONS.iter().enumerate() {
         if held.contains(*name) {
             r[0] |= 1 << bit;
         }

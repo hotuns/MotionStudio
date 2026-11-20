@@ -583,6 +583,7 @@ pub struct Engine {
     physical_pad: Option<PadState>,
     gyro_stick: Vec2,
     last_stick_gyro_ns: Option<u64>,
+    mouse_gyro_enabled_at: Option<u64>,
     accel: Option<(u64, Vec3)>,
     binding_states: Vec<BindingState>,
     motion_held: BTreeSet<String>,
@@ -596,6 +597,8 @@ pub struct Engine {
     rotated_stick: Option<(Stick, Vec2)>,
     turn_stick: f32,
     flick_snapshot_blocked: bool,
+    /// SDL timestamp and changed axes of the selected stick's open report.
+    flick_axis_packet: Option<(u64, u8)>,
     turn_held: Vec<bool>,
     turns: Vec<PendingTurn>,
     turn_stick_owed: f32,
@@ -751,6 +754,7 @@ impl Engine {
             bias_rad_s: [0.0; 3],
             gyro_stick: Vec2::ZERO,
             last_stick_gyro_ns: None,
+            mouse_gyro_enabled_at: None,
             accel: None,
             motion_held: BTreeSet::new(),
             motion_pad: vec![],
@@ -758,6 +762,7 @@ impl Engine {
             rotated_stick: None,
             turn_stick: 0.,
             flick_snapshot_blocked: false,
+            flick_axis_packet: None,
             turns: vec![],
             turn_stick_owed: 0.0,
             measuring: None,
@@ -1123,6 +1128,7 @@ impl Engine {
         })
     }
     pub fn reset(&mut self) {
+        self.mouse_gyro_enabled_at = None;
         self.touchpad.reset();
         self.stick_time = 0.;
         self.action_time_ns = 0;
@@ -1297,7 +1303,40 @@ impl Engine {
         .then_some(f.stick)
     }
     fn clear_flick_output(&mut self) {
-        self.jsm.clear_stick();
+        self.flick_axis_packet = None;
+        self.jsm.reset_sticks();
+    }
+
+    fn begin_flick_axis(&mut self, index: u8, time_ns: u64) {
+        let flick = &self.profile.gyro.motion.flick;
+        if !flick.enabled || index >= 4 || (index < 2) != (flick.stick == Stick::Left) {
+            return;
+        }
+        let bit = 1 << (index % 2);
+        if let Some((stamp, axes)) = &mut self.flick_axis_packet {
+            if *stamp == time_ns && *axes & bit == 0 {
+                *axes |= bit;
+                return;
+            }
+            // A new timestamp or a second update of the same component closes
+            // the previous vector, before the new axis overwrites it.
+            self.observe_flick_sample();
+        }
+        self.flick_axis_packet = Some((time_ns, bit));
+    }
+
+    fn observe_flick_sample(&mut self) {
+        let flick = &self.profile.gyro.motion.flick;
+        if !flick.enabled {
+            return;
+        }
+        let thumb = self.stick_value_radial(flick.stick);
+        if thumb.length() < self.jsm.flick_threshold() * 0.9 {
+            self.flick_snapshot_blocked = false;
+        }
+        if !self.flick_snapshot_blocked && self.flick_active() {
+            self.jsm.observe_flick(thumb);
+        }
     }
     fn clear_turn_output(&mut self) {
         self.turns.clear();
@@ -1635,6 +1674,8 @@ impl Engine {
             }
         } else if active != self.active && self.measuring.is_none() {
             if !gyro.uses_jsm_aim() { self.clock.reset(); }
+            self.mouse_gyro_enabled_at = (active && gyro.uses_jsm_aim()
+                && gyro.output == GyroOutput::Mouse && now_ns != 0).then_some(now_ns);
             if !active { self.jsm.block_gyro(); }
             self.motion.reset_filters();
             self.gyro.state.clear();
@@ -1685,7 +1726,8 @@ impl Engine {
             self.flick_snapshot_blocked = true;
         }
         if !self.flick_active() {
-            self.clear_flick_output();
+            self.flick_axis_packet = None;
+            self.jsm.clear_stick();
         }
         self.update_pad();
     }
@@ -1717,6 +1759,9 @@ impl Engine {
             }
             InputEvent::Axis { index, value, .. } => {
                 if let Some(pin) = AXES.get(index as usize) {
+                    if allow_toggle {
+                        self.begin_flick_axis(index, now_ns);
+                    }
                     let mut v = axis_from_i16(value);
                     if index == 1 || index == 3 {
                         v = -v;
@@ -1730,12 +1775,8 @@ impl Engine {
                     }
                     self.refresh_sticks(now_ns as f64 / 1e9, allow_toggle);
                     let f = &self.profile.gyro.motion.flick;
-                    let length = self.stick_value_radial(f.stick).length();
-                    if !allow_toggle && f.enabled && length >= self.jsm.flick_threshold() {
+                    if !allow_toggle && f.enabled && self.stick_value_radial(f.stick).length() >= self.jsm.flick_threshold() {
                         self.flick_snapshot_blocked = true;
-                    }
-                    if allow_toggle && length < self.jsm.flick_threshold() * 0.9 {
-                        self.flick_snapshot_blocked = false;
                     }
                     self.eval_controls(allow_toggle, now_ns);
                 }
@@ -1773,7 +1814,7 @@ impl Engine {
                     }
                 } else {
                     self.accel = None;
-                    if self.profile.gyro.needs_accel() {
+                    if self.gyro_sample_needs_accel() {
                         self.clear_gyro_motion();
                         if self.measuring.is_some() {
                             self.motion.telemetry.measurement_error =
@@ -1842,6 +1883,14 @@ impl Engine {
         })
     }
 
+    fn gyro_sample_needs_accel(&self) -> bool {
+        let gyro = &self.profile.gyro;
+        if self.measuring.is_some() || (gyro.uses_jsm_aim() && !gyro.enabled) {
+            return gyro.motion.space.uses_gravity();
+        }
+        gyro.needs_accel()
+    }
+
     fn process_gyro(&mut self, time: SampleTime, value: [f32; 3]) {
         self.gyro_events += 1;
         // A timed trial is output-driven; physical gyro samples must not add
@@ -1878,7 +1927,7 @@ impl Engine {
         }
         self.last_stick_gyro_ns = Some(time.host_ns);
         let accel = self.fresh_accel(time.host_ns);
-        if self.profile.gyro.needs_accel() && accel.is_none() {
+        if self.gyro_sample_needs_accel() && accel.is_none() {
             self.clear_gyro_motion();
             if self.measuring.is_some() {
                 self.motion.telemetry.measurement_error = Some("加速度采样中断，请重新测量".into());
@@ -1894,7 +1943,7 @@ impl Engine {
             c,
         ));
         if !self.profile.gyro.enabled {
-            self.jsm.sample(raw, accel, dt, [false; 2], false);
+            self.jsm.sample(raw, accel, dt, [false; 2], false, None);
             return;
         }
         let reset = self.pressed(&self.profile.gyro.motion.reset_input);
@@ -1954,8 +2003,25 @@ impl Engine {
         }
         if self.measuring.is_none() && self.profile.gyro.uses_jsm_aim() {
             // JSM observes gravity and smoothing even while an activation button blocks output.
-            let mouse = self.jsm.sample(raw, accel, dt, tracking, self.active);
-            if self.active { self.add_jsm_mouse(mouse); }
+            let mouse = self.jsm.sample(
+                raw,
+                accel,
+                dt,
+                tracking,
+                self.active,
+                Some((&mut self.motion.custom_filters, time)),
+            );
+            if self.active {
+                // Keep fusion and filter state on the full sensor interval. Only
+                // the portion after a button's host-time edge can move the mouse.
+                let fraction = self.mouse_gyro_enabled_at.map_or(1., |edge| {
+                    (time.host_ns.saturating_sub(edge) as f64 * 1e-9 / f64::from(dt)).min(1.) as f32
+                });
+                if fraction > 0. {
+                    self.mouse_gyro_enabled_at = None;
+                    self.add_jsm_mouse(mouse * fraction);
+                }
+            }
             self.update_pad();
             return;
         }
@@ -2318,6 +2384,8 @@ impl Engine {
         self.refresh_sticks(now_ns as f64 / 1e9, true);
         self.eval_controls(true, now_ns);
         self.advance_touch(self.action_time_ns, false);
+        self.observe_flick_sample();
+        self.flick_axis_packet = None;
     }
 
     /// Advance mapping timers through a drained input timestamp. Returns
@@ -2327,10 +2395,6 @@ impl Engine {
         let previous_held = std::mem::take(&mut self.frame.held);
         let previous_pad = self.frame.pad;
         self.tick_input(now_ns);
-        if self.flick_active() && !self.flick_snapshot_blocked {
-            let thumb = self.stick_value_radial(self.profile.gyro.motion.flick.stick);
-            self.jsm.observe_flick(thumb);
-        }
         self.frame.held != previous_held
             || self.frame.pad != previous_pad
             || self.frame.scroll != [0; 2]
@@ -2393,7 +2457,7 @@ impl Engine {
             for state in &mut self.action_states {
                 state.elapsed = 0.;
             }
-            self.jsm.clear_stick();
+            self.clear_flick_output();
             // A missed report cancels old rates. The FIFO sample clock already
             // detects sensor outages independently of display or output stalls.
             self.jsm.clear_rate();

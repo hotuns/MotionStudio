@@ -357,9 +357,10 @@ impl SensorCalibration {
 }
 impl MotionConfig {
     pub fn needs_accel(&self) -> bool {
+        self.aim_needs_accel() || self.drift_correction || self.recenter_strength > 0.0
+    }
+    pub(crate) fn aim_needs_accel(&self) -> bool {
         self.space.uses_gravity()
-            || self.drift_correction
-            || self.recenter_strength > 0.0
             || self
                 .bindings
                 .iter()

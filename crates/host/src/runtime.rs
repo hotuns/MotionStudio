@@ -2408,8 +2408,6 @@ mod tests {
             profile.gyro.counts_per_degree = 10.0;
             profile.gyro.motion.flick.enabled = flick;
             profile.gyro.motion.flick.smooth_ms = 100.0;
-            // Keep the turn linear so this test isolates the output schedule.
-            profile.gyro.motion.flick.release_ease = 0.0;
             runtime.engine = Some(Engine::new(profile.clone()).unwrap());
             runtime.output = Some(
                 Dispatcher::new(Box::new(ObserveSink) as Box<dyn Sink>).with_scheduled_output(),
@@ -2446,11 +2444,16 @@ mod tests {
             for slot in 2..=slots + 1 {
                 advance(&mut runtime, slot);
                 let counts = runtime.output.as_ref().unwrap().mouse_counts[0];
-                assert!(
-                    (1..=max_step).contains(&(counts - previous)),
-                    "flick={flick}, {hz} Hz slot {slot}, step={}",
-                    counts - previous
-                );
+                if flick {
+                    // Native mouse Flick starts at zero on engagement and pays
+                    // out a quadratic turn, including sub-counts near its end.
+                    let progress = (f64::from(slot - 2) * period.as_secs_f64() / 0.1).min(1.);
+                    let expected = expected_counts as f64 * progress * (2. - progress);
+                    assert!(counts >= previous && (counts as f64 - expected).abs() <= 1.1,
+                        "{hz} Hz slot {slot}: {counts}, expected {expected}");
+                } else {
+                    assert!((1..=max_step).contains(&(counts - previous)));
+                }
                 previous = counts;
             }
             assert!(previous.abs_diff(expected_counts) <= 1);
@@ -2459,11 +2462,10 @@ mod tests {
                 .input(axis(slot_ns * u64::from(slots + 1) + 1, 0), false)
                 .unwrap();
             advance(&mut runtime, slots + 2);
-            // 96 truncated nanosecond slots can leave one fractional count
-            // of the 100 ms Flick to finish in the next slot.
-            let remaining = u64::from(flick && hz == 960);
             let counts = runtime.output.as_ref().unwrap().mouse_counts[0];
-            assert!(counts.abs_diff(previous) <= remaining);
+            assert!(counts.abs_diff(expected_counts) <= 1);
+            advance(&mut runtime, slots + 3);
+            assert!(runtime.output.as_ref().unwrap().mouse_counts[0].abs_diff(counts) <= u64::from(flick));
         }
     }
 

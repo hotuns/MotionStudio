@@ -1,24 +1,20 @@
-import {useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState} from 'react';
+import {lazy,Suspense,useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {listen} from '@tauri-apps/api/event';
-import {Quaternion} from 'three';
 import {setLanguage,useLanguage} from '../i18n';
 import type {Device,Status} from '../types';
-import {controllerOrientation,controllerViewPose} from '../controller-pose';
 import {liveControllerStatus,type ControllerOverlayView} from '../controller-overlay';
-import Controller3D,{type ControllerPreviewFailure} from './Controller3D';
-import Controller from './Controller';
+import {KeyMouseOverlay} from './KeyMouseOverlay';
 import styles from './FloatingController.module.css';
+
+const FloatingControllerModel=lazy(()=>import('./FloatingControllerModel'));
 
 export function FloatingController() {
   useLanguage();
   const [view,setView]=useState<ControllerOverlayView>();
   const [sample,setSample]=useState<{status:Status|null;received:number}>();
-  const [failure,setFailure]=useState<ControllerPreviewFailure>();
   const [offline,setOffline]=useState(false);
   const lastDevice=useRef<Device|null>(null);
-  const origin=useRef<{key:string;rotation:Quaternion}>();
-  const unavailable=useCallback((reason:ControllerPreviewFailure)=>setFailure(reason),[]);
 
   useEffect(()=>{
     document.documentElement.dataset.controllerOverlay='true';
@@ -40,13 +36,13 @@ export function FloatingController() {
           shown=true;
         }
         // An event received while this request was in flight is newer.
-        if(serial===requestSerial)setSample({status:next.status,received:performance.now()});
+        if(!disposed&&serial===requestSerial)setSample({status:next.status,received:performance.now()-(next.status_age_ms??0)});
       }catch{
-        if(!disposed){setOffline(true);setSample(undefined);}
+        if(!disposed&&serial===requestSerial){setOffline(true);setSample(undefined);}
       }finally{pending=false;}
     };
     const subscription=listen<Status>('engine-status',({payload})=>{
-      if(!disposed){serial++;setSample({status:liveControllerStatus(payload)?payload:null,received:performance.now()});}
+      if(!disposed){serial++;setOffline(false);setSample({status:liveControllerStatus(payload)?payload:null,received:performance.now()});}
     });
     void subscription.catch(()=>{});
     void update();
@@ -62,26 +58,17 @@ export function FloatingController() {
     };
   },[]);
 
-  const live=sample?.status&&liveControllerStatus(sample.status)?sample.status:undefined;
+  const ageMs=sample?Math.max(0,performance.now()-sample.received):Infinity;
+  const live=ageMs<600&&sample?.status&&liveControllerStatus(sample.status)?sample.status:undefined;
   const device=live?.device??view?.device??lastDevice.current;
   if(device)lastDevice.current=device;
-  const key=(device?.path??'')+':'+(view?.restart_count??0)+':'+(live?.reconnects??0);
-  // Reset before the new renderer's passive effect can report a graphics error.
-  useLayoutEffect(()=>{setFailure(undefined);},[device?.path]);
-  const pose=useMemo(()=>{
-    const orientation=view?.settings.follow_motion&&device?.gyro?controllerOrientation(live):null;
-    if(!orientation){origin.current=undefined;return new Quaternion();}
-    if(origin.current?.key!==key)origin.current={key,rotation:orientation.clone()};
-    return controllerViewPose(orientation,origin.current.rotation);
-  },[live,device?.gyro,key,view?.settings.follow_motion]);
-  const notice=!live?(offline?'实时输入连接中断':'等待实时输入')
-    :failure?'三维预览不可用，已切换为二维':null;
-
-  return <main className={styles.surface} aria-label="实时悬浮手柄" style={{opacity:(view?.settings.opacity??100)/100}}>
-    {device ? failure
-      ? <div className={styles.fallback}><Controller device={device} status={live}/></div>
-      : <Controller3D device={device} status={live} pose={pose} className={styles.model} onUnavailable={unavailable}/>
-      : <p className={styles.waiting}>等待手柄输入</p>}
-    {device&&notice&&<p className={styles.state}>{notice}</p>}
+  if(!view?.settings.enabled)return null;
+  const content=view.settings.content??'controller';
+  return <main className={styles.surface} data-content={content} aria-label="桌面悬浮显示" style={{opacity:view.settings.opacity/100}}>
+    {content!=='key_mouse'&&<Suspense fallback={<div/>}>
+      <FloatingControllerModel key={device?.path} device={device} live={live} followMotion={view.settings.follow_motion}
+        restarts={view.restart_count} offline={offline}/>
+    </Suspense>}
+    {content!=='controller'&&<KeyMouseOverlay status={live} ageMs={ageMs} width={window.innerWidth}/>}
   </main>;
 }

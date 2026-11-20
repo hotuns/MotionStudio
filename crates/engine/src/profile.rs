@@ -297,8 +297,7 @@ impl Gyro {
 
     pub fn needs_accel(&self) -> bool {
         if self.uses_jsm_aim() {
-            return self.motion.space.uses_gravity()
-                || self.motion.bindings.iter().any(|b| !b.input.starts_with("imu_gyro_"));
+            return self.motion.aim_needs_accel();
         }
         self.uses_ds4_imu() || self.motion.needs_accel()
     }

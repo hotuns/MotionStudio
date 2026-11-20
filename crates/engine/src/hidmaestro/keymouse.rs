@@ -2,7 +2,7 @@
 //! Relative motion coalesces only between discrete input transitions. ACK waits
 //! and descriptor-sized splitting happen exclusively on this I/O worker.
 use crate::{
-    output::{MouseTrace, MouseTracePoint, OutputStats},
+    output::{KeyMousePreview, KeyMouseTrace, MouseTrace, MouseTracePoint, OutputStats},
     timing::{next_output_deadline, CONTINUOUS_OUTPUT_INTERVAL},
 };
 use anyhow::{bail, Context, Result};
@@ -63,6 +63,8 @@ struct State {
     error: Option<String>,
     stats: OutputStats,
     mouse_trace: MouseTrace,
+    key_mouse_trace: KeyMouseTrace,
+    last_keyboard: [u8; KEYBOARD_REPORT_SIZE],
     last_mouse: [u8; 7],
 }
 struct Shared {
@@ -231,6 +233,9 @@ impl KeyMouse {
     pub(super) fn mouse_trace(&self) -> Vec<MouseTracePoint> {
         self.shared.lock().mouse_trace.points()
     }
+    pub(super) fn key_mouse_preview(&self) -> KeyMousePreview {
+        self.shared.lock().key_mouse_trace.snapshot()
+    }
     pub(super) fn reset(&self) -> Result<()> {
         let mut s = self.shared.lock();
         if s.stopped {
@@ -316,12 +321,28 @@ fn record_write(
     if succeeded {
         if mouse {
             s.stats.mouse_reports += 1;
+            let changed = s.last_mouse[0] ^ report[0];
+            if changed != 0 {
+                for (bit, name) in super::reports::MOUSE_BUTTONS.iter().enumerate() {
+                    let mask = 1 << bit;
+                    if changed & mask != 0 {
+                        s.key_mouse_trace.button(name, report[0] & mask != 0, completed);
+                    }
+                }
+            }
+            s.key_mouse_trace.wheel([i32::from(report[6] as i8), i32::from(report[5] as i8)], completed);
             s.last_mouse.copy_from_slice(report);
             let dx = i32::from(i16::from_le_bytes([report[1], report[2]]));
             let dy = i32::from(i16::from_le_bytes([report[3], report[4]]));
             s.mouse_trace.record([dx, dy], completed);
         } else {
             s.stats.keyboard_reports += 1;
+            if s.last_keyboard.as_slice() != report {
+                super::reports::keyboard_edges(&s.last_keyboard, report, |name, down| {
+                    s.key_mouse_trace.button(name, down, completed);
+                });
+                s.last_keyboard.copy_from_slice(report);
+            }
         }
     }
 }
@@ -471,6 +492,7 @@ fn run(shared: &Shared, keyboard: impl ReportWriter) {
             s.busy = false;
             s.reset_done = generation;
             s.mouse_trace.clear();
+            s.key_mouse_trace = KeyMouseTrace::default();
             if let Err(e) = result {
                 s.error
                     .get_or_insert_with(|| format!("HIDMaestro 输出释放失败：{e:#}"));
@@ -593,6 +615,29 @@ mod tests {
             i64::from(i16::from_le_bytes([bytes[1], bytes[2]])),
             i64::from(i16::from_le_bytes([bytes[3], bytes[4]])),
         )
+    }
+
+    #[test]
+    fn preview_reflects_only_successful_wire_reports_and_keeps_brief_taps() {
+        let mut state = State::default();
+        let at = Instant::now();
+        let mut keys = [0; KEYBOARD_REPORT_SIZE];
+        keys[0] = 1; // Left Ctrl modifier.
+        keys[2] = 4; // A.
+        record_write(&mut state, &keys, false, at, at, false);
+        assert!(state.key_mouse_trace.snapshot().recent.is_empty());
+        record_write(&mut state, &keys, false, at, at, true);
+        assert_eq!(state.key_mouse_trace.snapshot().held, ["key:A", "key:CTRL"]);
+        record_write(&mut state, &[0; KEYBOARD_REPORT_SIZE], false, at, at, true);
+        let mouse = mouse_report(0b11000, 3, -2, -1, 2);
+        record_write(&mut state, &mouse, true, at, at, true);
+        let snapshot = serde_json::to_value(state.key_mouse_trace.snapshot()).unwrap();
+        assert_eq!(snapshot["held"], serde_json::json!(["mouse:x1", "mouse:x2"]));
+        let recent = snapshot["recent"].as_array().unwrap();
+        assert_eq!(recent.len(), 7);
+        assert!(recent.iter().any(|edge| edge["name"] == "key:A" && edge["down"] == false));
+        assert_eq!(recent.last().unwrap()["delta"], serde_json::json!([-1, 2]));
+        assert_eq!(state.mouse_trace.points().last().unwrap().position, [3, -2]);
     }
 
     #[test]

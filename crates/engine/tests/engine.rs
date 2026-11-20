@@ -116,8 +116,9 @@ fn held_stick_keeps_moving_without_new_axis_events_and_stops_after_reset() {
 fn smoothing_reduces_a_step_and_soft_threshold_preserves_large_motion() {
     let mut plain = Engine::new(profile()).unwrap();
     let mut filtered_profile = profile();
-    filtered_profile.gyro.smoothing_ms = 20.0;
-    filtered_profile.gyro.noise_threshold = 0.5;
+    filtered_profile.gyro.jsm_response.smooth_time_ms = Some(20.0);
+    filtered_profile.gyro.jsm_response.smooth_threshold_dps = Some(250.0);
+    filtered_profile.gyro.motion.cutoff_dps = 0.5;
     let mut filtered = Engine::new(filtered_profile).unwrap();
     for t in 1..10 {
         plain.process(&sample(t, [0.0; 3]));
@@ -361,14 +362,16 @@ fn toggle_uses_real_press_edges_and_pause_preserves_the_latch() {
     assert_eq!(e.process(&moving(4)).mouse_delta, [0.0; 2]);
     e.process(&axis(5, 4, 0));
     e.process(&axis(6, 4, 20000)); // A fresh press turns gyro on.
-    assert_eq!(e.process(&moving(7)).mouse_delta, [0.0; 2]);
+    let first = e.process(&moving(7)).mouse_delta[0];
+    // The previous sample was at 4 ms. Only the 1 ms since activation counts.
+    assert!((first - 0.9).abs() < 0.001, "{first}");
     assert!(e.process(&moving(8)).mouse_delta[0] > 0.0);
     e.process(&axis(9, 4, 16000)); // Below press, above release.
     e.process(&axis(10, 4, 21000));
     assert!(e.process(&moving(11)).mouse_delta[0] > 0.0);
     e.process(&button(1, true));
     assert_eq!(e.process(&moving(12)).mouse_delta, [0.0; 2]);
-    e.process(&button(1, false));
+    e.process(&InputEvent::Button { time: time(13), index: 1, down: false });
     assert_eq!(e.process(&moving(13)).mouse_delta, [0.0; 2]);
     assert!(e.process(&moving(14)).mouse_delta[0] > 0.0);
     e.process(&axis(15, 4, 0));
@@ -387,8 +390,10 @@ fn rws_gyro_right_stick_adds_to_physical_axes_and_releases_on_silence() {
         let mut e = Engine::new(p).unwrap();
         let moving = |ms| sample(ms, [90.0, -90.0, 0.0]);
         e.process(&axis(1, 2, 16384));
+        assert_eq!(e.advance_output(0.001, time(1).host_ns).pad.unwrap().right_x, 16384);
         assert_eq!(e.process(&moving(2)).pad.unwrap().right_x, 16384);
-        let output = e.process(&moving(3));
+        e.process(&moving(3));
+        let output = e.advance_output(0.001, time(3).host_ns);
         assert_eq!(output.mouse_delta, [0.0; 2]);
         let pad = output.pad.unwrap();
         assert!((pad.right_x - 24576).abs() <= 1, "{pad:?}");
@@ -407,12 +412,14 @@ fn rws_gyro_right_stick_adds_to_physical_axes_and_releases_on_silence() {
         );
         assert_eq!(e.frame.pad.unwrap().right_y, 0);
         assert_eq!(e.process(&moving(54)).pad.unwrap().right_x, 16384);
-        assert_eq!(e.process(&moving(55)).pad.unwrap().right_x, pad.right_x);
+        e.process(&moving(55));
+        assert_eq!(e.advance_output(0.001, time(55).host_ns).pad.unwrap().right_x, pad.right_x);
         assert_eq!(e.process(&button(1, true)).pad.unwrap().right_x, 16384);
         assert_eq!(e.process(&moving(56)).pad.unwrap().right_y, 0);
         e.process(&button(1, false));
         assert_eq!(e.process(&moving(57)).pad.unwrap().right_y, 0);
-        assert_eq!(e.process(&moving(58)).pad.unwrap().right_y, pad.right_y);
+        e.process(&moving(58));
+        assert_eq!(e.advance_output(0.001, time(58).host_ns).pad.unwrap().right_y, pad.right_y);
         assert_eq!(e.process(&moving(58)).pad.unwrap().right_y, 0);
         e.process(&InputEvent::Disconnected { time: time(59) });
         assert_eq!(e.frame.pad, Some(PadState::default()));

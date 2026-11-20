@@ -435,6 +435,9 @@ impl Sink for HidMaestroSink {
     fn mouse_trace(&self) -> Option<Vec<crate::output::MouseTracePoint>> {
         Some(self.keymouse.mouse_trace())
     }
+    fn key_mouse_preview(&self) -> crate::output::KeyMousePreview {
+        self.keymouse.key_mouse_preview()
+    }
     fn cancel_pending(&mut self) -> Result<()> {
         // Priority reset discards old motion/presses and waits for neutral.
         // Virtual-pad neutral is still attempted by Dispatcher even on error.

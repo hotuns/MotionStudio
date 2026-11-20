@@ -119,7 +119,12 @@ fn ema_weight(dt: f32, smoothing_ms: f32) -> f32 {
     1. - (-dt / (smoothing_ms / 1000.)).exp()
 }
 
-fn filter_sample(gyro_dps: Vec3, accel: Option<Vec3>, dt: f32, time: SampleTime) -> FilterSample {
+pub(crate) fn filter_sample(
+    gyro_dps: Vec3,
+    accel: Option<Vec3>,
+    dt: f32,
+    time: SampleTime,
+) -> FilterSample {
     let gyro = gyro_dps.to_array().map(f64::from);
     FilterSample {
         value: gyro,
@@ -129,6 +134,22 @@ fn filter_sample(gyro_dps: Vec3, accel: Option<Vec3>, dt: f32, time: SampleTime)
         host_ns: time.host_ns,
         sensor_ns: time.sensor_ns,
     }
+}
+
+pub(crate) fn filter_screen_rate(
+    chain: &mut FilterChain,
+    stage: FilterStage,
+    sample: FilterSample,
+    rate: Vec2,
+) -> Vec2 {
+    let value = chain.process(
+        stage,
+        FilterSample {
+            value: [f64::from(rate.x), f64::from(rate.y), 0.],
+            ..sample
+        },
+    );
+    Vec2::new(value[0] as f32, value[1] as f32)
 }
 
 fn suppress_idle(g: &Gyro, mut rate: Vec2, sensor_noise: f32) -> Vec2 {
@@ -336,7 +357,9 @@ impl MotionRuntime {
         time: SampleTime,
         apply_custom: bool,
     ) -> MotionSample {
-        self.custom_filters.begin_sample();
+        if apply_custom {
+            self.custom_filters.begin_sample();
+        }
         let custom_sample = filter_sample(gyro * BUS_GYRO_DPS, accel, dt, time);
         let gyro = if apply_custom && self.custom_filters.has_stage(FilterStage::RawGyro) {
             Vec3::from_array(
@@ -428,14 +451,12 @@ impl MotionRuntime {
         // Positive screen Y points down; the canonical pitch is nose-up.
         let mut rate = Vec2::new(raw.x, -raw.y);
         if apply_custom && self.custom_filters.has_stage(FilterStage::BeforeBuiltin) {
-            let value = self.custom_filters.process(
+            rate = filter_screen_rate(
+                &mut self.custom_filters,
                 FilterStage::BeforeBuiltin,
-                FilterSample {
-                    value: [f64::from(rate.x), f64::from(rate.y), 0.],
-                    ..custom_sample
-                },
+                custom_sample,
+                rate,
             );
-            rate = Vec2::new(value[0] as f32, value[1] as f32);
         }
         rate = suppress_idle(g, rate, sensor_noise);
         let settings = cc_settings(g);
@@ -483,14 +504,12 @@ impl MotionRuntime {
             rate.y = -rate.y;
         }
         if apply_custom && self.custom_filters.has_stage(FilterStage::AfterBuiltin) {
-            let value = self.custom_filters.process(
+            rate = filter_screen_rate(
+                &mut self.custom_filters,
                 FilterStage::AfterBuiltin,
-                FilterSample {
-                    value: [f64::from(rate.x), f64::from(rate.y), 0.],
-                    ..custom_sample
-                },
+                custom_sample,
+                rate,
             );
-            rate = Vec2::new(value[0] as f32, value[1] as f32);
         }
         MotionSample {
             rate,
