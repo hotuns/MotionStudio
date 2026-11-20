@@ -1,4 +1,4 @@
-import {useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode} from 'react';
+import {useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode} from 'react';
 import {ActionMappings, type ActionMappingsProps} from './ActionMappings';
 import {FeedbackSettings, TouchpadSettings} from './PeripheralSettings';
 import {Dialog} from './Controls';
@@ -108,7 +108,11 @@ export function GameProfilesPage(props: Props) {
     onTab(next);
   };
 
-  return <SettingContext.Provider value={{layer:props.editingLayer,blocked:blocked||!!capture||!!status?.binding_capture||measuring,restore:props.onRestoreSetting,request:props.settingRequest}}>
+  const settingsBlocked = blocked || !!capture || !!status?.binding_capture || measuring;
+  const settingContext = useMemo(() => ({
+    layer: props.editingLayer, blocked: settingsBlocked, restore: props.onRestoreSetting, request: props.settingRequest,
+  }), [props.editingLayer, settingsBlocked, props.onRestoreSetting, props.settingRequest]);
+  return <SettingContext.Provider value={settingContext}>
   <div className={styles.page} ref={pageRef}>
     <div className={styles.profileNavigation} ref={navigationRef}>
       <section className={styles.profileHeader} aria-label="游戏配置与输出">

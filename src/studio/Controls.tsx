@@ -1,4 +1,4 @@
-import { useContext, useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { GamepadTarget } from '../types';
 import { StudioIcon } from './StudioIcon';
 import dialogStyles from './CreateProfileDialog.module.css';
@@ -105,7 +105,7 @@ export function Dialog({ title, onClose, onSubmit, actions, children, descriptio
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
-  useEffect(() => {
+  useLayoutEffect(() => {
     const dialog=ref.current;if(!dialog)return;
     if(!dialog.open)dialog.showModal();
     if(document.documentElement.dataset.gamepad==='on'){

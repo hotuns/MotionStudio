@@ -1,3 +1,5 @@
+import {memo} from 'react';
+import {useLanguage} from '../i18n';
 import {Range,Toggle} from './Controls';
 import {OptionPicker} from './OptionPicker';
 import {FlickStickSettings,type MotionUpdate} from './AdvancedMotion';
@@ -9,7 +11,8 @@ import styles from './MotionControls.module.css';
 
 const stickChoices=[{options:[{value:'left',label:'左摇杆'},{value:'right',label:'右摇杆'}]}];
 
-export function StickSettings({profile,update}:{profile:Profile;update:MotionUpdate}) {
+export const StickSettings = memo(function StickSettings({profile,update}:{profile:Profile;update:MotionUpdate}) {
+  useLanguage();
   const stick=profile.stick_mouse;
   const zones=profile.stick_zones??{left_outer:0.85,right_outer:0.85,hysteresis:0.05};
   return <div className={settingStyles.page}>
@@ -39,4 +42,4 @@ export function StickSettings({profile,update}:{profile:Profile;update:MotionUpd
     </SettingSection>
     <StickCalibrationSettings profile={profile} update={update}/>
   </div>;
-}
+});

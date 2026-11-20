@@ -12,15 +12,22 @@ type Choice={element:HTMLSelectElement;options:{value:string;label:string;disabl
 export function GamepadNavigation({status,foreground,blocked,onSave,onPlay,onDisable,canPlay,canSave}:{status?:Status;foreground:boolean;blocked:boolean;onSave:()=>void;onPlay:()=>void;onDisable:()=>void;canPlay:boolean;canSave:boolean}) {
   const [hint,setHint]=useState(''),[edit,setEdit]=useState<Edit|null>(null),[keyboard,setKeyboard]=useState<Keyboard|null>(null),[choice,setChoice]=useState<Choice|null>(null),[quick,setQuick]=useState(false),[caps,setCaps]=useState(false);
   const enabled=!!status?.ui_navigation&&!!status.device&&foreground;
-  const latest=useRef({status,blocked,enabled,onSave,onPlay,onDisable,canPlay,canSave});latest.current={status,blocked,enabled,onSave,onPlay,onDisable,canPlay,canSave};
+  const axis=status?.axes[3]??0;
+  const scrollAxis=!edit&&!keyboard&&!choice&&Math.abs(axis)>0.35 ? axis : 0;
+  const scrolling=scrollAxis!==0;
+  const latest=useRef({status,blocked,enabled,onSave,onPlay,onDisable,canPlay,canSave,scrollAxis});latest.current={status,blocked,enabled,onSave,onPlay,onDisable,canPlay,canSave,scrollAxis};
   const baseline=useRef<number|null>(null),pending=useRef<NavCommand[]>([]),repeat=useRef<{command:NavCommand;next:number}|null>(null),lastFrame=useRef(0),lastDevice=useRef(''),lastZone=useRef('toolbar');
+  const animationFrame=useRef<number|null>(null);
   const restore=(el:HTMLElement)=>requestAnimationFrame(()=>{if(el.isConnected)dom.focus(el);});
   useEffect(()=>{
     document.documentElement.dataset.gamepad=enabled?'on':'off';
     baseline.current=status?.navigation_serial??0;pending.current=[];repeat.current=null;
-    if(enabled){requestAnimationFrame(()=>{const root=dom.scope();if(!dom.targets(root).includes(document.activeElement as HTMLElement))dom.focus(root.querySelector<HTMLElement>('[data-workbench-home]')??dom.targets(root)[0]);});}
-    else{setChoice(null);setKeyboard(null);setQuick(false);setEdit(null);}
-    return()=>{delete document.documentElement.dataset.gamepad;};
+    const frame=enabled?requestAnimationFrame(()=>{
+      const root=dom.scope();
+      if(!dom.focusedTarget(root))dom.focus(root.querySelector<HTMLElement>('[data-workbench-home]')??dom.targets(root)[0]);
+    }):undefined;
+    if(!enabled){setChoice(null);setKeyboard(null);setQuick(false);setEdit(null);}
+    return()=>{if(frame!==undefined)cancelAnimationFrame(frame);delete document.documentElement.dataset.gamepad;};
   },[enabled,status?.device?.path]);
   useEffect(()=>{
     const serial=status?.navigation_serial??0,path=status?.device?.path??'';
@@ -31,9 +38,20 @@ export function GamepadNavigation({status,foreground,blocked,onSave,onPlay,onDis
   useEffect(()=>{
     if(!enabled)return;
     const update=()=>{setHint(dom.label(document.activeElement));lastZone.current=document.activeElement?.closest<HTMLElement>('[data-pad-zone]')?.dataset.padZone??lastZone.current;};document.addEventListener('focusin',update);update();
-    const observer=new MutationObserver(()=>{requestAnimationFrame(()=>{if(!latest.current.enabled||latest.current.blocked)return;const root=dom.scope();if(!dom.targets(root).includes(document.activeElement as HTMLElement)){const zone=root.querySelector<HTMLElement>('[data-pad-zone="'+lastZone.current+'"]')??root.querySelector<HTMLElement>('[data-pad-zone="dialog-body"]')??root;dom.focus(dom.targets(zone)[0]);}});});
-    observer.observe(document.body,{childList:true,subtree:true});
-    return()=>{observer.disconnect();document.removeEventListener('focusin',update);};
+    let repairFrame:number|undefined;
+    const observer=new MutationObserver(()=>{
+      if(repairFrame!==undefined||latest.current.blocked)return;
+      repairFrame=requestAnimationFrame(()=>{
+        repairFrame=undefined;
+        if(!latest.current.enabled||latest.current.blocked)return;
+        const root=dom.scope();
+        if(dom.focusedTarget(root))return;
+        const zone=root.querySelector<HTMLElement>('[data-pad-zone="'+lastZone.current+'"]')??root.querySelector<HTMLElement>('[data-pad-zone="dialog-body"]')??root;
+        dom.focus(dom.targets(zone)[0]);
+      });
+    });
+    observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['hidden','inert','open','disabled','aria-disabled']});
+    return()=>{observer.disconnect();if(repairFrame!==undefined)cancelAnimationFrame(repairFrame);document.removeEventListener('focusin',update);};
   },[enabled]);
   useEffect(()=>{
     if(edit?.element.isConnected)edit.element.dataset.padEditing='true';
@@ -71,7 +89,8 @@ export function GamepadNavigation({status,foreground,blocked,onSave,onPlay,onDis
     if(command==='menu'){if(!(root instanceof HTMLDialogElement))setQuick(true);return;}
     if(command==='confirm'||command==='edit'){
       if(edit){setEdit(null);return;}
-      if(!dom.targets(root).includes(element as HTMLElement)){dom.focus(dom.targets(root)[0]);return;}
+      element=dom.focusedTarget(root);
+      if(!element){dom.focus(dom.targets(root)[0]);return;}
       if(element instanceof HTMLSelectElement){openChoice(element);return;}
       if(element instanceof HTMLInputElement||element instanceof HTMLTextAreaElement){
         if(element.readOnly)return;
@@ -83,20 +102,34 @@ export function GamepadNavigation({status,foreground,blocked,onSave,onPlay,onDis
   };
   const action=useRef(act);action.current=act;
   useEffect(()=>{
-    let frame=0;const tick=(now:number)=>{
+    if(!enabled||blocked){
+      if(animationFrame.current!==null)cancelAnimationFrame(animationFrame.current);
+      animationFrame.current=null;lastFrame.current=0;pending.current=[];repeat.current=null;
+      return;
+    }
+    if(animationFrame.current!==null||(!pending.current.length&&!repeat.current&&!scrolling))return;
+    const tick=(now:number)=>{
+      animationFrame.current=null;
       const state=latest.current;
-      if(!state.enabled||state.blocked){pending.current=[];repeat.current=null;lastFrame.current=now;frame=requestAnimationFrame(tick);return;}
+      if(!state.enabled||state.blocked){lastFrame.current=0;return;}
       if(lastFrame.current&&now-lastFrame.current>250){pending.current=[];repeat.current=null;baseline.current=state.status?.navigation_serial??0;}
-      const dt=Math.min((now-lastFrame.current)/1000,0.05);lastFrame.current=now;
+      const dt=lastFrame.current?Math.min((now-lastFrame.current)/1000,0.05):0;lastFrame.current=now;
       const command=pending.current.shift();
       if(command){action.current(command);repeat.current=directions.includes(command)?{command,next:now+360}:null;}
       const held=state.status?.navigation_held??[];
       if(repeat.current&&!held.includes(repeat.current.command))repeat.current=null;
       if(!command&&repeat.current&&now>=repeat.current.next){action.current(repeat.current.command);repeat.current.next=now+110;}
-      if(!edit&&!keyboard&&!choice){const axis=state.status?.axes[3]??0;if(Math.abs(axis)>0.35){const root=dom.scope();const scroll=root instanceof HTMLDialogElement?root.querySelector<HTMLElement>('[data-pad-zone="dialog-body"]'):document.querySelector<HTMLElement>('[data-pad-scroll]');scroll?.scrollBy({top:axis*750*dt});}}
-      frame=requestAnimationFrame(tick);
-    };frame=requestAnimationFrame(tick);return()=>cancelAnimationFrame(frame);
-  },[edit,keyboard,choice]);
+      if(state.scrollAxis){
+        const root=dom.scope();
+        const scroll=root instanceof HTMLDialogElement?root.querySelector<HTMLElement>('[data-pad-zone="dialog-body"]'):document.querySelector<HTMLElement>('[data-pad-scroll]');
+        scroll?.scrollBy({top:state.scrollAxis*750*dt});
+      }
+      if(pending.current.length||repeat.current||state.scrollAxis)animationFrame.current=requestAnimationFrame(tick);
+      else lastFrame.current=0;
+    };
+    animationFrame.current=requestAnimationFrame(tick);
+  },[enabled,blocked,status?.navigation_serial,scrolling]);
+  useEffect(()=>()=>{if(animationFrame.current!==null)cancelAnimationFrame(animationFrame.current);animationFrame.current=null;lastFrame.current=0;},[]);
   const closeKeyboard=()=>{if(keyboard)restore(keyboard.element);setKeyboard(null);};
   const closeChoice=()=>{if(choice)restore(choice.element);setChoice(null);};
   const append=(text:string)=>setKeyboard(current=>{if(!current)return current;const value=current.value+text;return current.element.maxLength>=0&&value.length>current.element.maxLength?current:{...current,value};});

@@ -1,6 +1,15 @@
 const selector='button,a[href],input:not([type="hidden"]),select,textarea,summary,[tabindex]:not([tabindex="-1"])';
+function available(el:Element): el is HTMLElement {
+  return el instanceof HTMLElement && !el.matches(':disabled,[aria-disabled="true"]') &&
+    !el.closest('[hidden],[inert]') && el.getClientRects().length>0 && getComputedStyle(el).visibility!=='hidden';
+}
 export function targets(root:ParentNode):HTMLElement[] {
-  return Array.from(root.querySelectorAll<HTMLElement>(selector)).filter(el=>el instanceof HTMLElement&&!el.matches(':disabled,[aria-disabled="true"]')&&!el.closest('[hidden],[inert]')&&el.getClientRects().length>0&&getComputedStyle(el).visibility!=='hidden');
+  return Array.from(root.querySelectorAll(selector)).filter(available);
+}
+export function focusedTarget(root:HTMLElement) {
+  const active = document.activeElement;
+  const control = active instanceof HTMLOptionElement ? active.closest('select') : active;
+  return control && root.contains(control) && control.matches(selector) && available(control) ? control : null;
 }
 export function scope():HTMLElement {
   const active=document.activeElement?.closest<HTMLElement>('dialog[open]');
@@ -10,8 +19,8 @@ export function focus(el:HTMLElement|undefined) {
   if(!el)return;el.focus({preventScroll:true});el.scrollIntoView({block:'nearest',inline:'nearest'});
 }
 export function move(direction:'up'|'down'|'left'|'right') {
-  const root=scope(),all=targets(root),current=document.activeElement as HTMLElement;
-  if(!all.includes(current)){focus(all[0]);return;}
+  const root=scope(),all=targets(root),current=focusedTarget(root);
+  if(!current){focus(all[0]);return;}
   const from=current.getBoundingClientRect(),x=from.x+from.width/2,y=from.y+from.height/2;
   const horizontal=direction==='left'||direction==='right',sign=direction==='left'||direction==='up'?-1:1;
   const choose=(items:HTMLElement[])=>items.filter(el=>el!==current).map(el=>{

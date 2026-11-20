@@ -6,6 +6,28 @@
 :root { color-scheme: dark; }
 :root[data-theme='light'] { color-scheme: light; }
 
+/* Use the WebView's native top-layer list for all ordinary dropdowns. */
+@supports (appearance: base-select) and selector(::picker(select)) {
+  select:not([multiple]):is(:not([size]), [size="1"]) {
+    appearance: base-select;
+    &::picker(select) {
+      appearance: base-select;
+      max-block-size: min(24rem, 65dvh);
+      padding: 3px;
+      border: 1px solid var(--panel-border);
+      border-radius: var(--control-radius);
+      background: var(--bg-2);
+      color: var(--text-strong);
+      box-shadow: var(--popover-shadow);
+      animation: none;
+      transition: none;
+    }
+    option { padding: 6px 9px; border-radius: 4px; }
+    option:enabled:is(:hover, :focus-visible) { background: var(--bg-btn-hover); }
+    option:disabled { color: var(--text-muted); }
+  }
+}
+
 :where(.app-card) {
   display: flex;
   flex-direction: column;

@@ -1,8 +1,10 @@
+import {memo} from 'react';
 import {Range, Toggle} from './Controls';
 import {applyJsmResponse,isJsmResponse,usesJsmAim} from '../motion-presets';
-import type {Device, Ds4ImuFilter, Gyro, Profile} from '../types';
+import type {Ds4ImuFilter, FilterStatus, Gyro, Profile} from '../types';
+import {useLanguage} from '../i18n';
 import styles from './MotionControls.module.css';
-import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice, type GameCalibrationProps} from './AdvancedMotion';
+import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice} from './AdvancedMotion';
 import {CustomFilters} from './CustomFilters';
 import type {GyroBindingField, GyroBindingRecording} from '../pad-capture';
 import {GyroBindingInput} from './GyroBindingInput';
@@ -11,20 +13,26 @@ import {SettingField, SettingLabel, SettingSection, settingStyles} from './Setti
 type Update=(update:(profile:Profile)=>void)=>void;
 const smoothingPresets=[['JSM 线性',0],['均衡',16],['更稳',32]] as const;
 
-export function MotionSettings({profile,profileId,update,device,recording,canRecord,onRecord,
-  onCancelRecording,onOpenDevice,onPreviewOutput,status,onMotionAction,deviceNoise}: {
+export const MotionSettings = memo(function MotionSettings({profile,profileId,update,split,missingImu,recording,canRecord,onRecord,
+  bindingLocked,onCancelRecording,onOpenDevice,onPreviewOutput,filtersRunning,filterStatuses,onMotionAction,deviceNoise}: {
   profile:Profile;
   profileId:string;
   update:Update;
-  device?:Device|null;
+  split:boolean;
+  missingImu:boolean;
   deviceNoise?:number;
   recording?:GyroBindingRecording;
   canRecord:boolean;
+  bindingLocked:boolean;
   onRecord:(field:GyroBindingField)=>void;
   onCancelRecording:()=>void;
   onOpenDevice:()=>void;
   onPreviewOutput:()=>void;
-}&Pick<GameCalibrationProps,'status'|'onMotionAction'>) {
+  filtersRunning:boolean;
+  filterStatuses?:FilterStatus[];
+  onMotionAction:(action:string)=>void;
+}) {
+  useLanguage();
   const gyro=profile.gyro;
   const passthrough=gyro.output==='ds4_imu';
   const jsm=usesJsmAim(gyro);
@@ -34,8 +42,6 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
     draft.gyro.ds4_imu_filter={...draft.gyro.ds4_imu_filter,...change};
   });
   const activation=gyro.activation==='always'?'always':gyro.activation_mode;
-  const bindingLocked=!!recording||!!status?.binding_capture||!!status?.motion?.measuring;
-  const split=(device?.touchpads??0)>=2;
   const preset=gyro.motion.smoothing==='ema'?smoothingPresets.find(([,ms])=>ms===gyro.smoothing_ms&&(ms!==0||isJsmResponse(gyro))):undefined;
 
   return <div className={settingStyles.page}>
@@ -87,7 +93,7 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
       </>}
       {passthrough?<>
         <p className={styles.hint}>使用同时支持陀螺仪和加速度计的实体手柄。设备静止校准和安装方向可在「设备与输入」调整。</p>
-        {device&&(!device.gyro||!device.accelerometer)&&<p className={settingStyles.notice}>虚拟 PS4 传感器直通需要支持陀螺仪和加速度计的体感接口</p>}
+        {missingImu&&<p className={settingStyles.notice}>虚拟 PS4 传感器直通需要支持陀螺仪和加速度计的体感接口</p>}
         <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
         <div className="studio-actions"><button type="button" className="secondary-btn" onClick={onOpenDevice}>打开设备校准</button></div>
       </>:<div className="studio-actions"><button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button></div>}
@@ -115,14 +121,14 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
         </>:<SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>}
         {jsm?<p className={styles.hint}>JSM 直接处理校准后的采样。切回 Studio 可继续使用已保存的自定义滤波和边缘转向。</p>:<SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
           <CustomFilters key={profileId} profile={profile} update={update} embedded rawGyroOnly={passthrough}
-            running={(!passthrough||!!ds4Filter?.use_custom_filters)&&status?.profile_id===profileId&&['running','observing'].includes(status.state)}
-            statuses={status?.profile_id===profileId?status.motion?.filters:undefined}
+            running={(!passthrough||!!ds4Filter?.use_custom_filters)&&filtersRunning}
+            statuses={filterStatuses}
             onReset={()=>onMotionAction('reset_filters')}/>
         </SettingField>}
       </SettingSection>
     </>}
   </div>;
-}
+});
 
 function SampleClock({value,onChange}:{value:Gyro['timestamp_source'];onChange:(value:Gyro['timestamp_source'])=>void}) {
   return <MotionChoice label="采样时钟" value={value}

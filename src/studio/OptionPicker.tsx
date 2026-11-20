@@ -1,6 +1,6 @@
-import {useId, useRef, useState} from 'react';
+import {memo, useId, useRef, useState} from 'react';
 import {createPortal} from 'react-dom';
-import {t} from '../i18n';
+import {t, useLanguage} from '../i18n';
 import {Dialog} from './Controls';
 import {StudioIcon, type StudioIconName} from './StudioIcon';
 import styles from './OptionPicker.module.css';
@@ -29,18 +29,58 @@ type OptionListProps = {
   selectedLabel?: string;
 };
 
+// Live pages can recreate equivalent option data on each controller snapshot.
+// Compare the displayed and searchable fields before rebuilding the dialog rows.
+function sameGroups(previous: PickerGroup[], next: PickerGroup[]) {
+  return previous === next || (previous.length === next.length && previous.every((group, index) => {
+    const other = next[index];
+    return group.label === other.label && (group.options === other.options ||
+      (group.options.length === other.options.length && group.options.every((option, i) => {
+        const item = other.options[i];
+        return option.value === item.value && option.label === item.label && option.search === item.search &&
+          option.disabled === item.disabled && option.localize === item.localize;
+      })));
+  }));
+}
+
+type ResultsProps = Pick<OptionListProps, 'value'|'groups'|'emptyMessage'|'layout'|'icon'|'selectedLabel'> & {query:string; gamepad:boolean};
+const OptionResults = memo(function OptionResults({value, groups, query, gamepad, emptyMessage, layout, icon, selectedLabel}: ResultsProps) {
+  useLanguage();
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const sections = groups.map((group, index) => {
+    const heading = group.label && t(group.label);
+    const buttons = group.options.flatMap(option => {
+      const label = display(option);
+      if (terms.length) {
+        const text = [option.label, label, option.value, option.search, group.label, heading].join(' ').toLowerCase();
+        if (!terms.every(term => text.includes(term))) return [];
+      }
+      return <button type="button" className="secondary-btn" key={option.value} value={option.value}
+        aria-pressed={option.value === value} autoFocus={gamepad && option.value === value && !option.disabled}
+        disabled={option.disabled}>
+        {layout === 'list' && icon && <span className={styles.optionIcon}><StudioIcon name={icon} size={18}/></span>}
+        <span className={layout === 'list' ? styles.optionName : undefined} title={label} translate="no">{label}</span>
+        {layout === 'list' && option.value === value && <>
+          {selectedLabel && <span className={styles.selectedLabel}>{selectedLabel}</span>}
+          <StudioIcon name="check" size={17}/>
+        </>}
+      </button>;
+    });
+    if (!buttons.length) return null;
+    return <section key={index} aria-label={group.label}>
+      {group.label && <h3>{group.label}</h3>}
+      <div className={layout === 'list' ? styles.options+' '+styles.listOptions : styles.options}>{buttons}</div>
+    </section>;
+  });
+  return sections.some(Boolean) ? <>{sections}</> : <p role="status">{emptyMessage}</p>;
+}, (a,b) => a.query === b.query && a.value === b.value && a.gamepad === b.gamepad && a.layout === b.layout &&
+  a.icon === b.icon && a.selectedLabel === b.selectedLabel && a.emptyMessage === b.emptyMessage && sameGroups(a.groups, b.groups));
+
 export function OptionList({value, groups, onChoose, onClose, searchLabel = '搜索选项',
   searchPlaceholder = '搜索名称或按键', emptyMessage = '没有匹配的选项。', layout = 'grid', icon, selectedLabel}: OptionListProps) {
   const [query, setQuery] = useState('');
   const results = useRef<HTMLDivElement>(null);
   const gamepad = document.documentElement.dataset.gamepad === 'on';
-  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = groups.map(group => ({...group, options:group.options.filter(option => {
-    const text = [option.label, display(option), option.value, option.search, group.label, group.label && t(group.label)]
-      .join(' ').toLowerCase();
-    return terms.every(term => text.includes(term));
-  })})).filter(group => group.options.length > 0);
-
   return <>
     <label className={styles.search}>
       <StudioIcon name="search" size={16}/>
@@ -59,23 +99,12 @@ export function OptionList({value, groups, onChoose, onClose, searchLabel = '搜
           if (event.key === 'Enter') { event.preventDefault(); first?.click(); }
         }}/>
     </label>
-    <div ref={results} className={styles.results}>
-      {matches.map((group, index) => <section key={index} aria-label={group.label}>
-        {group.label && <h3>{group.label}</h3>}
-        <div className={[styles.options, layout === 'list' ? styles.listOptions : ''].filter(Boolean).join(' ')}>
-          {group.options.map(option => <button type="button" className="secondary-btn" key={option.value}
-            aria-pressed={option.value === value} autoFocus={gamepad && option.value === value && !option.disabled}
-            disabled={option.disabled} onClick={() => onChoose(option.value)}>
-            {layout === 'list' && icon && <span className={styles.optionIcon}><StudioIcon name={icon} size={18}/></span>}
-            <span className={layout === 'list' ? styles.optionName : undefined} title={display(option)} translate="no">{display(option)}</span>
-            {layout === 'list' && option.value === value && <>
-              {selectedLabel && <span className={styles.selectedLabel}>{selectedLabel}</span>}
-              <StudioIcon name="check" size={17}/>
-            </>}
-          </button>)}
-        </div>
-      </section>)}
-      {!matches.length && <p role="status">{emptyMessage}</p>}
+    <div ref={results} className={styles.results} onClick={event => {
+      const option = event.target instanceof Element ? event.target.closest('button') : null;
+      if (option && event.currentTarget.contains(option) && !option.matches(':disabled')) onChoose(option.value);
+    }}>
+      <OptionResults value={value} groups={groups} query={query} gamepad={gamepad} layout={layout}
+        icon={icon} selectedLabel={selectedLabel} emptyMessage={emptyMessage}/>
     </div>
   </>;
 }
@@ -99,8 +128,11 @@ export function OptionPicker({label, value, groups, onChange, disabled, placehol
   const [open, setOpen] = useState(false);
   const trigger = useRef<HTMLButtonElement>(null);
   const valueId = useId();
-  const current = groups.flatMap(group => group.options).find(option => option.value === value);
-  const shown = current ? display(current) : value || t(placeholder);
+  let shown = value || t(placeholder);
+  for (const group of groups) {
+    const current = group.options.find(option => option.value === value);
+    if (current) { shown = display(current); break; }
+  }
   const close = () => { setOpen(false); requestAnimationFrame(() => trigger.current?.focus()); };
 
   return <>

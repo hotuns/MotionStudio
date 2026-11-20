@@ -96,7 +96,7 @@ export function StudioShell(props: Props) {
     }
   }, [theme]);
   useEffect(() => { scrollArea.current?.scrollTo(0, 0); }, [props.page, props.gameTab]);
-  useEffect(() => { if (searchOpen && !palette.current?.open) palette.current?.showModal(); }, [searchOpen]);
+  useLayoutEffect(() => { if (searchOpen && !palette.current?.open) palette.current?.showModal(); }, [searchOpen]);
   const openSearch = () => { setQuery(''); setSearchOpen(true); };
   const openUpdates = () => {
     props.onNavigate('settings');
@@ -132,14 +132,14 @@ export function StudioShell(props: Props) {
     { label: '打开配置文件夹', icon: 'folder', run: props.onOpenFolder },
     { label: '帮助与快捷键', icon: 'help', run: props.onHelp },
   ];
-  const allCommands: Command[] = [
+  const allCommands: Command[] = searchOpen ? [
     ...(Object.keys(pages) as StudioPage[]).map(page => ({ ...pages[page], run: () => props.onNavigate(page) })),
     ...gameTabs.map(tab => ({ label: tab.shortcut, icon: tab.icon, run: () => props.onGameTab(tab.id) })),
     ...tools.filter(command => command.label !== '搜索设置和操作'),
     ...(query.trim()?settingsCatalog.map(target=>({label:target.label,icon:'settings' as const,
       keywords:[target.path,target.keywords??'',t(target.keywords??'')].join(' '),context:gameTabs.find(tab=>tab.id===target.tab)?.label,
       run:()=>props.onSetting(target),disabled:props.settingsBlocked})):[]),
-  ];
+  ] : [];
   const words=query.trim().toLowerCase().split(/\s+/);
   const commands=allCommands.filter(command=>{
     const haystack=[command.label,t(command.label),command.keywords??'',t(command.keywords??''),command.context??'',t(command.context??''),

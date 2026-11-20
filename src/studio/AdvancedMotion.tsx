@@ -1,4 +1,6 @@
-import type { MotionConfig, Profile, Status } from '../types';
+import {memo} from 'react';
+import type { MotionConfig, Profile } from '../types';
+import {useLanguage} from '../i18n';
 import {usesJsmAim} from '../motion-presets';
 import { Range, Toggle } from './Controls';
 import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
@@ -316,14 +318,12 @@ export function FlickStickSettings({profile,update}:Props) {
   </SettingSection>;
 }
 
-export type GameCalibrationProps = {
-  status?: Status;
+type GameCalibrationProps = {
   canMeasure: boolean;
-  onMotionAction: (action: string) => void;
   onOpenCalibration: () => void;
 };
 
-export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'> & {profile:Profile}) {
+export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: GameCalibrationProps & {profile:Profile}) {
   return <>
     <p className={styles.hint}>保存并应用基础层配置，启用映射后打开悬浮窗。对准参照物试转 360°，直接调整数值后再次试转，满意后保存。原来的手动转动测量保留在「更多校准方式」。</p>
     {profile.gyro.output==='right_stick'&&<p className={styles.hint}>{usesJsmAim(profile.gyro)
@@ -336,8 +336,9 @@ export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: P
     </>;
 }
 
-export function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,ds4Required}:
-  Props&Pick<GameCalibrationProps,'canMeasure'|'onOpenCalibration'>&{vigemGamepad:boolean;ds4Required:boolean}) {
+export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,ds4Required}:
+  Props&GameCalibrationProps&{vigemGamepad:boolean;ds4Required:boolean}) {
+  useLanguage();
   const gyro=profile.gyro;
   const passthrough=gyro.output==='ds4_imu';
   const isDs4=profile.virtual_gamepad==='dualshock_4';
@@ -387,4 +388,4 @@ export function MotionOutputSettings({profile,update,canMeasure,onOpenCalibratio
       onChange={v=>update(p=>{p.gyro.counts_per_degree=v;})} help="每旋转一度产生的基础鼠标计数，再乘以体感灵敏度。"/>}
     {!passthrough&&<GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>}
   </SettingSection>;
-}
+});
