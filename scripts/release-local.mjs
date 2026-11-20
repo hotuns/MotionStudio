@@ -84,11 +84,8 @@ export async function main(args = process.argv.slice(2)) {
     runNode([npmCli, 'ci']);
     if (args.includes('--skip-tests')) console.log('Regression tests skipped by explicit maintainer choice; build and signature checks remain required.');
     else runNode(['scripts/check-mapping.mjs']);
-    // The Windows desktop dependency build can crash in parallel motion-core
-    // code generation. Keep its optimization level and serialize just that
-    // crate's codegen; the separately built input engine keeps its own settings.
     runNode([tauri, 'build', '--ci', '--bundles', 'nsis', '--config', 'src-tauri/tauri.release.conf.json',
-      '--', '--locked', '--config', 'profile.release.package.motion-core.codegen-units=1'], buildEnv);
+      '--', '--locked'], buildEnv);
     if (cleanCommit() !== commit) throw new Error('Source changed during the build');
     runNode(['scripts/package-update.mjs']);
     const files = readReleaseAssets(config);

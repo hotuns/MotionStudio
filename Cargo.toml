@@ -36,8 +36,12 @@ lto = false
 codegen-units = 16
 strip = "debuginfo"
 
-# Avoid the MSVC rustc heap-corruption crash during parallel optimized desktop
-# code generation. The separate input engine retains the release settings above.
+# The shared mapping crate can crash rustc during parallel MSVC code generation,
+# including when built for the static-CRT engine. Keep its release optimization.
+[profile.release.package.motion-core]
+codegen-units = 1
+
+# The desktop shell also needs a lower optimization level on MSVC.
 [profile.release.package.motion-studio]
 opt-level = 1
 codegen-units = 1
