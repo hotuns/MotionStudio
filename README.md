@@ -130,6 +130,8 @@ Motion Studio is the successor to JSM Studio. It is a Windows controller mapper 
 
 FlexInput 源码固定在 c69f53ad3bca4ed34ef5f2d63509addaa7c767be，保留 MIT 许可。Motion Studio 直接复用核心数据和求值器、SDL 输入、物理源预处理、JSM Config 双段扳机、节点描述、HIDMaestro 和 ViGEm 手柄设备。Studio 管理配置、设备、输出生命周期和界面。
 
-SDL3 3.4.18 使用未经修改的官方 Windows x64 DLL 和配套导入库。Apex 6 Pro 固件修复轴向问题后，已撤掉原 Flydigi device 150 陀螺仪换轴补丁。来源、固定哈希及补丁退役记录见 [vendor/sdl3/](vendor/sdl3/README.md)。引擎保留标准 SDL 到 FlexInput 的坐标转换，不添加厂商专用换轴。
+SDL3 使用官方主线的 3.5.0 Windows x64 开发构建和配套导入库。Apex 6 Pro 固件修复轴向问题后，已撤掉原 Flydigi device 150 陀螺仪换轴补丁。来源、固定哈希及补丁退役记录见 [vendor/sdl3/](vendor/sdl3/README.md)。引擎使用标准 SDL 到 FlexInput 的坐标转换。
+
+高级用户可以完全退出 Motion Studio，备份并替换安装或解包目录里的 `resources/SDL3.dll`，然后重新启动。替换的 DLL 需要是 Windows x64 的 SDL3，并提供引擎使用的接口。运行时接受兼容 DLL，官方打包时校验随包提供的文件。软件更新后，如需继续使用自选 DLL，请在新版目录再次替换。
 
 依赖来源、移植改动和架构详见 docs/architecture.md、THIRD_PARTY_NOTICES.md 和 vendor/flexinput/manifest.json。

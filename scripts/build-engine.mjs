@@ -66,7 +66,8 @@ const manifest=JSON.stringify({
   peripheralRouting:{feedback:'native poll_outputs -> selected SDL DeviceBackend::send',touchpad:'native eval_graph_tick / route_touchpad'},
   hidmaestro:{sdkVersion:'2.0.1',driverVersion:'2.0.0.2201',client:'FlexInput c69f53ad',payloads:JSON.parse(readFileSync(resolve(root,'vendor/flexinput/manifest.json'),'utf8')).files.filter(f=>/^crates\/hidmaestro\/driver\/.*\.(dll|inf)$/.test(f.path)).map(f=>({name:f.path.split('/').at(-1),sha256:f.vendoredSha256}))},
   sdlVersion:sdlManifest.version,sdlPatch:null,
-  sdlSource:{repository:sdlManifest.repository,tag:sdlManifest.tag,commit:sdlManifest.commit,modified:sdlManifest.modified},
+  sdlSource:{repository:sdlManifest.repository,tag:sdlManifest.tag,branch:sdlManifest.branch,
+    commit:sdlManifest.commit,workflowRun:sdlManifest.workflowRun,modified:sdlManifest.modified},
   files:[{name:'motion-engine.exe',sha256:engineHash},{name:'SDL3.dll',sha256:sha(sdl)}],
 },null,2)+'\n';
 const manifestStaging=manifestPath+'.'+randomUUID()+'.tmp';

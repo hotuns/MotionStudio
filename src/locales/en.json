@@ -1859,7 +1859,6 @@
   "社区投稿说明": "How to contribute a profile",
   "输出信号包含无效数值": "The output signal contains an invalid value",
   "不支持此输出通道": "This output channel is unsupported",
-  "手柄输入需要 SDL 3.4.18，检测到版本编号 {0}": "Controller input requires SDL 3.4.18. Detected version number {0}",
   "手柄输入会话已在运行": "A controller input session is already running",
   "手柄输入事件积压，无法继续处理": "The controller input queue overflowed",
   "手柄映射概览": "Controller mapping overview",

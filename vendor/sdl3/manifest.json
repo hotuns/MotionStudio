@@ -1,37 +1,37 @@
 {
   "repository": "https://github.com/libsdl-org/SDL",
-  "version": "3.4.18",
-  "tag": "release-3.4.18",
-  "commit": "829a65d769d935c4852f8159e964312c0957260a",
+  "version": "3.5.0",
+  "branch": "main",
+  "commit": "e21b424c76b3c27cf07b420cfd565292c876d554",
+  "workflowRun": 44651637592,
   "modified": false,
   "archives": [
     {
-      "name": "SDL3-3.4.18-win32-x64.zip",
-      "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-3.4.18-win32-x64.zip",
-      "size": 1165205,
-      "sha256": "75c2c0fc74e7d1206aaedc22893a35887332f4f85f5c8b74fddc10d177985f2c"
-    },
-    {
-      "name": "SDL3-devel-3.4.18-VC.zip",
-      "url": "https://github.com/libsdl-org/SDL/releases/download/release-3.4.18/SDL3-devel-3.4.18-VC.zip",
-      "size": 16902234,
-      "sha256": "78d84602ae616cfe26b33a73b7d3b9b6b56e8a6650e53d92c9c6ca938f747acd"
+      "name": "SDL-VC-x64.zip",
+      "url": "https://api.github.com/repos/libsdl-org/SDL/actions/artifacts/14590928613/zip",
+      "size": 221760123,
+      "sha256": "536c6693642cb9a20f4baf863b2412bd174d0c230eb27efe88d805dd9c6c35f2",
+      "package": {
+        "entry": "dist/SDL3-3.5.0-Windows-VC.zip",
+        "size": 223022638,
+        "sha256": "a7716138b9733250aa886dfc821efd9135a7eb6e88ff3aee7bca820821e2c006"
+      }
     }
   ],
   "files": [
     {
       "path": "src-tauri/resources/SDL3.dll",
-      "archive": "SDL3-3.4.18-win32-x64.zip",
-      "entry": "SDL3.dll",
-      "size": 2848256,
-      "sha256": "2b4b128d8d510cc2d442693cf848c050d700d43dc667afe9e5fd82b0570d667e"
+      "archive": "SDL-VC-x64.zip",
+      "entry": "SDL3-3.5.0-Windows-VC/bin/SDL3.dll",
+      "size": 5324800,
+      "sha256": "4d237fa2afa7d0d5456894ce20e509fe5c3a9c9d5ac1377b9ff39afe0976c095"
     },
     {
       "path": "vendor/sdl3/SDL3.lib",
-      "archive": "SDL3-devel-3.4.18-VC.zip",
-      "entry": "SDL3-3.4.18/lib/x64/SDL3.lib",
-      "size": 283572,
-      "sha256": "c60802d826fe9a724f824ecdeac1f422bdf53a53705ef32eb12dd73e5d566e2c"
+      "archive": "SDL-VC-x64.zip",
+      "entry": "SDL3-3.5.0-Windows-VC/lib/SDL3.lib",
+      "size": 296536,
+      "sha256": "25fc3cfb729089910527789e5705aef1e35261d4a4c3e3ee5431db95d1b4a7d7"
     }
   ]
 }

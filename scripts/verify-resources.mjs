@@ -23,7 +23,7 @@ for(const entry of manifest.files){
   if(sha(file)!==entry.vendoredSha256)throw new Error('Vendored source integrity check failed: '+entry.path);
 }
 const sdlManifest=JSON.parse(readFileSync(resolve(root,'vendor/sdl3/manifest.json'),'utf8'));
-if(sdlManifest.modified!==false)throw new Error('SDL must be an unmodified official release');
+if(sdlManifest.modified!==false)throw new Error('SDL must be an unmodified upstream build');
 for(const path of ['src-tauri/resources/SDL3.dll','vendor/sdl3/SDL3.lib']){
   const entry=sdlManifest.files.find(file=>file.path===path);
   const file=resolve(root,path);

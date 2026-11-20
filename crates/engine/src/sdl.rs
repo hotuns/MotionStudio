@@ -1,5 +1,5 @@
 //! Thin Studio DTO/lifecycle adapter over the pinned FlexInput SDL provider.
-//! The one verified DLL is preloaded absolutely before delayed Rust SDL calls.
+//! The selected DLL is preloaded by absolute path before delayed Rust SDL calls.
 use crate::engine::InputEvent;
 use crate::profile::BUTTONS;
 use crate::timing::SampleTime;
@@ -122,11 +122,6 @@ fn load_dll(path: &Path) -> Result<(PathBuf, &'static Library)> {
         return Ok((current.clone(), *library));
     }
     let library = unsafe { Library::new(&path) }.context("Load Studio SDL3.dll")?;
-    let version = unsafe { library.get::<unsafe extern "C" fn() -> i32>(b"SDL_GetVersion\0")?() };
-    anyhow::ensure!(
-        version == 3_004_018,
-        "手柄输入需要 SDL 3.4.18，检测到版本编号 {version}"
-    );
     let library: &'static Library = Box::leak(Box::new(library));
     *loaded = Some((path.clone(), library));
     Ok((path, library))
