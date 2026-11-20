@@ -281,6 +281,8 @@ pub struct Gyro {
     pub smoothing_ms: f32,
     pub noise_threshold: f32,
     pub acceleration: GyroAcceleration,
+    #[serde(skip_serializing_if = "Ds4ImuFilter::is_default")]
+    pub ds4_imu_filter: Ds4ImuFilter,
     pub motion: crate::motion_config::MotionConfig,
 }
 impl Gyro {
@@ -318,6 +320,7 @@ impl Default for Gyro {
             smoothing_ms: 0.0,
             noise_threshold: 0.0,
             acceleration: GyroAcceleration::default(),
+            ds4_imu_filter: Ds4ImuFilter::default(),
             motion: Default::default(),
         }
     }
@@ -330,6 +333,30 @@ pub enum GyroOutput {
     Mouse,
     RightStick,
     Ds4Imu,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Ds4ImuFilter {
+    pub smoothing_ms: f32,
+    pub noise_gate: f32,
+    pub use_custom_filters: bool,
+}
+
+impl Ds4ImuFilter {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !(0.0..=120.0).contains(&self.smoothing_ms) {
+            bail!("DS4 IMU smoothing must be between 0 and 120 ms");
+        }
+        if !(0.0..=5.0).contains(&self.noise_gate) {
+            bail!("DS4 IMU noise gate must be between 0 and 5");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -617,6 +644,7 @@ impl Profile {
         }
         g.motion.validate()?;
         g.acceleration.validate()?;
+        g.ds4_imu_filter.validate()?;
         let needs_pad = g.motion.mode != crate::motion_config::MotionMode::Pointer
             || g.motion
                 .turns

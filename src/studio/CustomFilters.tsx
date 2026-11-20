@@ -10,8 +10,13 @@ const stages:[FilterStage,string][]=[['raw_gyro','原始角速度'],['before_bui
 type Draft={filter:CustomFilter;parameters:{key:string;value:string}[]};
 const draftOf=(filter:CustomFilter):Draft=>({filter:structuredClone(filter),parameters:Object.entries(filter.params).map(([key,value])=>({key,value:String(value)}))});
 
-export function CustomFilters({profile,update,statuses=[],running=false,onReset,embedded=false}:{profile:Profile;update:(change:(profile:Profile)=>void)=>void;statuses?:FilterStatus[];running?:boolean;onReset:()=>void;embedded?:boolean}) {
+export function CustomFilters({profile,update,statuses=[],running=false,onReset,embedded=false,rawGyroOnly=false}:{
+  profile:Profile; update:(change:(profile:Profile)=>void)=>void; statuses?:FilterStatus[];
+  running?:boolean; onReset:()=>void; embedded?:boolean; rawGyroOnly?:boolean;
+}) {
   const filters=profile.gyro.motion.custom_filters??[];
+  const shownStages=rawGyroOnly?stages.filter(([stage])=>stage==='raw_gyro'):stages;
+  const hasShownFilters=rawGyroOnly?filters.some(filter=>filter.stage==='raw_gyro'):filters.length>0;
   const [editing,setEditing]=useState<Draft|null>(null),[removing,setRemoving]=useState<string|null>(null);
   const [template,setTemplate]=useState('passthrough'),[signal,setSignal]=useState('noise'),[axis,setAxis]=useState(0);
   const [preview,setPreview]=useState<FilterPreview|null>(null),[error,setError]=useState<string|null>(null),[previewing,setPreviewing]=useState(false);
@@ -48,22 +53,23 @@ export function CustomFilters({profile,update,statuses=[],running=false,onReset,
   const shown=preview?.points??[],peak=Math.max(0.1,...shown.flatMap(point=>[Math.abs(point.input[axis]),Math.abs(point.output[axis])]));
   const line=(output:boolean)=>shown.map((point,index)=>`${20+index/Math.max(1,shown.length-1)*860},${90-(output?point.output[axis]:point.input[axis])/peak*70}`).join(' ');
   const Container=embedded?'div':'details';
-  return <Container className={styles.root+(embedded?' '+styles.embedded:'')} {...(!embedded?{open:filters.length>0}:{})}>
+  return <Container className={styles.root+(embedded?' '+styles.embedded:'')} {...(!embedded?{open:hasShownFilters}:{})}>
     {embedded?<h3>自定义处理链（Rhai）</h3>:<summary>高级：自定义处理链（Rhai）</summary>}
     <p>添加自己的防抖和滤波脚本。按传感器样本处理，状态与参数独立；修改随当前配置保存。</p>
     <div className={styles.toolbar}>
-      <button type="button" className="secondary-btn" disabled={filters.length>=4} onClick={()=>open({api_version:1,id:crypto.randomUUID(),name:t('自定义滤波'),enabled:true,stage:'before_builtin',source:filterTemplates[0].source,params:{}})}>添加滤波器</button>
-      <button type="button" className="ghost-btn" disabled={!running||!filters.length} onClick={onReset}>重置脚本状态</button>
+      <button type="button" className="secondary-btn" disabled={filters.length>=4} onClick={()=>open({api_version:1,id:crypto.randomUUID(),name:t('自定义滤波'),enabled:true,stage:rawGyroOnly?'raw_gyro':'before_builtin',source:filterTemplates[0].source,params:{}})}>添加滤波器</button>
+      <button type="button" className="ghost-btn" disabled={!running||!hasShownFilters} onClick={onReset}>重置脚本状态</button>
     </div>
-    <p>不同阶段按管线顺序执行，同阶段按列表顺序执行。最多添加 4 个。</p>
-    {profile.gyro.motion.mode==='steering'&&<p>姿态控制模式只经过原始角速度阶段。</p>}
-    {stages.map(([stage,label])=>{
+    <p>{rawGyroOnly?'直通启用脚本后，原始角速度脚本按列表顺序执行。每个配置最多保存 4 个滤波器。':'不同阶段按管线顺序执行，同阶段按列表顺序执行。最多添加 4 个。'}</p>
+    {!rawGyroOnly&&profile.gyro.motion.mode==='steering'&&<p>姿态控制模式只经过原始角速度阶段。</p>}
+    {shownStages.map(([stage,label])=>{
       const items=filters.filter(filter=>filter.stage===stage);
+      const inactive=rawGyroOnly?!profile.gyro.ds4_imu_filter?.use_custom_filters:profile.gyro.motion.mode==='steering'&&stage!=='raw_gyro';
       return <section key={stage} className={styles.stage}><h4>{label}</h4>{!items.length?<p>此阶段没有自定义滤波器。</p>:items.map((filter,index)=>{
         const live=running?statuses.find(status=>status.id===filter.id):undefined;
         return <article key={filter.id} className={styles.card}>
           <div className={styles.identity}><label><input type="checkbox" aria-label={'启用滤波器 '+filter.name} checked={filter.enabled} onChange={event=>mutate(filters=>{const item=filters.find(item=>item.id===filter.id);if(item)item.enabled=event.target.checked;})}/><strong translate="no">{filter.name}</strong></label>
-            <span className={styles.status} data-fault={live?.bypassed} title={live?.error??undefined}>{!filter.enabled?'已关闭':profile.gyro.motion.mode==='steering'&&filter.stage!=='raw_gyro'?'此模式未执行':live?.bypassed?'已旁路':live?.calls?'运行中':live?'待采样':'保存后应用'}{live&&<> · {live.last_us} µs / {live.max_us} µs</>}</span>
+            <span className={styles.status} data-fault={live?.bypassed} title={live?.error??undefined}>{!filter.enabled?'已关闭':inactive?'此模式未执行':live?.bypassed?'已旁路':live?.calls?'运行中':live?'待采样':'保存后应用'}{live&&<> · {live.last_us} µs / {live.max_us} µs</>}</span>
           </div>
           <div className={styles.actions}>
             <button type="button" className="ghost-btn" aria-label={'上移滤波器 '+filter.name} disabled={index===0} onClick={()=>reorder(filter.id,-1)}>↑</button>
@@ -79,7 +85,7 @@ export function CustomFilters({profile,update,statuses=[],running=false,onReset,
     {editing&&<Dialog title="编辑自定义滤波器" className={styles.editor} onClose={close} onSubmit={submit} error={error??undefined}
       actions={<><button type="button" className="secondary-btn" onClick={close}>取消</button><button type="submit" className="primary-btn" disabled={previewing}>完成</button></>}>
       <div className={styles.fields}><label>滤波器名称<input aria-label="滤波器名称" autoFocus value={editing.filter.name} maxLength={100} onChange={event=>patch({name:event.target.value})}/></label>
-        <label>接入阶段<select aria-label="滤波器接入阶段" value={editing.filter.stage} onChange={event=>patch({stage:event.target.value as FilterStage})}>{stages.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label></div>
+        {!rawGyroOnly&&<label>接入阶段<select aria-label="滤波器接入阶段" value={editing.filter.stage} onChange={event=>patch({stage:event.target.value as FilterStage})}>{stages.map(([value,label])=><option key={value} value={value}>{label}</option>)}</select></label>}</div>
       <label className="studio-toggle-row"><span>需要加速度计</span><input aria-label="滤波器需要加速度计" type="checkbox" checked={editing.filter.requires_accel??false} onChange={event=>patch({requires_accel:event.target.checked})}/></label>
       <div className={styles.editorTools}><div className={styles.actions}><select aria-label="滤波脚本模板" value={template} onChange={event=>setTemplate(event.target.value)}>{filterTemplates.map(template=><option value={template.id} key={template.id}>{template.name}</option>)}</select>
         <button type="button" className="secondary-btn" onClick={()=>{const value=filterTemplates.find(item=>item.id===template)!;setEditing(current=>current&&{...draftOf({...current.filter,source:value.source,params:value.params})});setPreview(null);setError(null);}}>载入模板</button></div>

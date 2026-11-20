@@ -1,6 +1,6 @@
 import {Range, Toggle} from './Controls';
 import {applyJsmResponse,isJsmResponse} from '../motion-presets';
-import type {Device, Gyro, Profile} from '../types';
+import type {Device, Ds4ImuFilter, Gyro, Profile} from '../types';
 import styles from './MotionControls.module.css';
 import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice, type GameCalibrationProps} from './AdvancedMotion';
 import {CustomFilters} from './CustomFilters';
@@ -27,7 +27,11 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
 }&Pick<GameCalibrationProps,'status'|'onMotionAction'>) {
   const gyro=profile.gyro;
   const passthrough=gyro.output==='ds4_imu';
+  const ds4Filter=gyro.ds4_imu_filter;
   const setGyro=<K extends keyof Gyro>(key:K,value:Gyro[K])=>update(draft=>{draft.gyro[key]=value;});
+  const setDs4Filter=(change:Ds4ImuFilter)=>update(draft=>{
+    draft.gyro.ds4_imu_filter={...draft.gyro.ds4_imu_filter,...change};
+  });
   const activation=gyro.activation==='always'?'always':gyro.activation_mode;
   const bindingLocked=!!recording||!!status?.binding_capture||!!status?.motion?.measuring;
   const split=(device?.touchpads??0)>=2;
@@ -81,18 +85,34 @@ export function MotionSettings({profile,profileId,update,device,recording,canRec
         <div className="studio-actions"><button type="button" className="secondary-btn" onClick={onOpenDevice}>打开设备校准</button></div>
       </>:<div className="studio-actions"><button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button></div>}
     </SettingSection>
-    {gyro.enabled&&!passthrough&&<><StabilitySettings profile={profile} update={update} onOpenDevice={onOpenDevice} deviceNoise={deviceNoise}/>
-    <AccelerationSettings profile={profile} update={update}/>
-    <MotionBehavior profile={profile} update={update}/>
-    <SettingSection id="motion-filters" title="采样与扩展滤波" summary={<>{gyro.motion.custom_filters?.length??0} 个滤波器</>} lazy>
-      <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
-      <SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
-        <CustomFilters key={profileId} profile={profile} update={update} embedded
-          running={status?.profile_id===profileId&&['running','observing'].includes(status.state)}
-          statuses={status?.profile_id===profileId?status.motion?.filters:undefined}
-          onReset={()=>onMotionAction('reset_filters')}/>
-      </SettingField>
-    </SettingSection>
+    {gyro.enabled&&<>
+      {!passthrough&&<>
+        <StabilitySettings profile={profile} update={update} onOpenDevice={onOpenDevice} deviceNoise={deviceNoise}/>
+        <AccelerationSettings profile={profile} update={update}/>
+        <MotionBehavior profile={profile} update={update}/>
+      </>}
+      <SettingSection key={passthrough?'ds4':'aim'} id={passthrough?'motion-ds4-filters':'motion-filters'}
+        title={passthrough?'直通滤波':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
+        summary={!passthrough&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
+        {passthrough?<>
+          <p className={styles.hint}>发送给虚拟 DS4 前可处理三轴角速度。加速度计数据沿用设备校准。</p>
+          <Range label="直通平滑时间" value={ds4Filter?.smoothing_ms??0} min={0} max={120} step={1} unit=" ms"
+            onChange={smoothing_ms=>setDs4Filter({smoothing_ms})}
+            help="平滑值越大，角速度越平稳，快速转动的响应也会变慢。0 关闭平滑。"/>
+          <Range label="直通噪声抑制倍率" value={ds4Filter?.noise_gate??0} min={0} max={5} step={0.1} unit="×"
+            onChange={noise_gate=>setDs4Filter({noise_gate})}
+            help="按设备静止校准得到的噪声底抑制小幅波动。0 关闭噪声抑制。"/>
+          <Toggle label="直通应用原始角速度脚本" value={ds4Filter?.use_custom_filters??false}
+            onChange={use_custom_filters=>setDs4Filter({use_custom_filters})}
+            help="在直通时应用下方已启用的 Rhai 脚本。"/>
+        </>:<SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>}
+        <SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
+          <CustomFilters key={profileId} profile={profile} update={update} embedded rawGyroOnly={passthrough}
+            running={(!passthrough||!!ds4Filter?.use_custom_filters)&&status?.profile_id===profileId&&['running','observing'].includes(status.state)}
+            statuses={status?.profile_id===profileId?status.motion?.filters:undefined}
+            onReset={()=>onMotionAction('reset_filters')}/>
+        </SettingField>
+      </SettingSection>
     </>}
   </div>;
 }

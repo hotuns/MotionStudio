@@ -5,7 +5,7 @@ use crate::{
     engine::{node, GraphRunner},
     motion_config::*,
     motion_curves as cc,
-    profile::{Gyro, GyroAcceleration},
+    profile::{Ds4ImuFilter, Gyro, GyroAcceleration},
 };
 use flexinput_core::{
     imu::{ImuEstimator, ImuReading, BUS_ACCEL_G, BUS_GYRO_DPS},
@@ -62,6 +62,7 @@ pub struct MotionRuntime {
     pub reading: ImuReading,
     pub telemetry: MotionTelemetry,
     smoothing: AimSmoothing,
+    ds4_smoothed_gyro: Option<Vec3>,
     brake: cc::Brake,
     recovery: f32,
     history: VecDeque<(Vec2, f32)>,
@@ -91,7 +92,7 @@ impl AimSmoothing {
                     rate = self
                         .ema
                         .unwrap_or(rate)
-                        .lerp(rate, 1. - (-dt / (g.smoothing_ms / 1000.)).exp());
+                        .lerp(rate, ema_weight(dt, g.smoothing_ms));
                 }
                 self.ema = Some(rate);
                 rate
@@ -111,6 +112,22 @@ impl AimSmoothing {
                 self.one_euro[1].filter(rate.y, dt, m.one_euro_cutoff, m.one_euro_beta),
             ),
         }
+    }
+}
+
+fn ema_weight(dt: f32, smoothing_ms: f32) -> f32 {
+    1. - (-dt / (smoothing_ms / 1000.)).exp()
+}
+
+fn filter_sample(gyro_dps: Vec3, accel: Option<Vec3>, dt: f32, time: SampleTime) -> FilterSample {
+    let gyro = gyro_dps.to_array().map(f64::from);
+    FilterSample {
+        value: gyro,
+        raw: gyro,
+        accel_g: accel.map(|a| [a.x, -a.y, -a.z].map(|v| f64::from(v * BUS_ACCEL_G))),
+        dt: f64::from(dt),
+        host_ns: time.host_ns,
+        sensor_ns: time.sensor_ns,
     }
 }
 
@@ -233,6 +250,7 @@ impl MotionRuntime {
             reading: ImuReading::default(),
             telemetry: MotionTelemetry::default(),
             smoothing: AimSmoothing::default(),
+            ds4_smoothed_gyro: None,
             brake: cc::Brake::default(),
             recovery: 0.0,
             history: VecDeque::new(),
@@ -255,12 +273,48 @@ impl MotionRuntime {
     pub fn reset_filters(&mut self) {
         self.custom_filters.reset_state();
         self.smoothing = AimSmoothing::default();
+        self.ds4_smoothed_gyro = None;
         self.brake = cc::Brake::default();
         self.recovery = 0.;
         self.history.clear();
         self.coast = Vec2::ZERO;
         self.was_tracking = [false; 2];
         self.rotation = StickRotation::default();
+    }
+    /// Filter the calibrated three-axis gyro while preserving the DS4 sensor basis.
+    pub(crate) fn filter_ds4_gyro(
+        &mut self,
+        settings: &Ds4ImuFilter,
+        gyro: Vec3,
+        accel: Vec3,
+        dt: f32,
+        time: SampleTime,
+        sensor_noise: f32,
+    ) -> [f32; 3] {
+        let mut rate = gyro * BUS_GYRO_DPS;
+        if settings.use_custom_filters && self.custom_filters.has_stage(FilterStage::RawGyro) {
+            self.custom_filters.begin_sample();
+            let sample = filter_sample(rate, Some(accel), dt, time);
+            rate = Vec3::from_array(
+                self.custom_filters
+                    .process(FilterStage::RawGyro, sample)
+                    .map(|v| v as f32),
+            );
+        }
+        if settings.noise_gate > 0. && sensor_noise > 0. {
+            rate *= flexinput_engine::eval::gyro_dz_ease(
+                rate.length(),
+                sensor_noise * settings.noise_gate,
+            );
+        }
+        if settings.smoothing_ms > 0. {
+            rate = self
+                .ds4_smoothed_gyro
+                .unwrap_or(rate)
+                .lerp(rate, ema_weight(dt, settings.smoothing_ms));
+            self.ds4_smoothed_gyro = Some(rate);
+        }
+        rate.to_array()
     }
     pub fn measurement_mode(&mut self) {
         self.graph.graph.nodes[1]
@@ -283,14 +337,7 @@ impl MotionRuntime {
         apply_custom: bool,
     ) -> MotionSample {
         self.custom_filters.begin_sample();
-        let custom_sample = FilterSample {
-            value: gyro.to_array().map(|v| f64::from(v * BUS_GYRO_DPS)),
-            raw: gyro.to_array().map(|v| f64::from(v * BUS_GYRO_DPS)),
-            accel_g: accel.map(|a| [a.x, -a.y, -a.z].map(|v| f64::from(v * BUS_ACCEL_G))),
-            dt: f64::from(dt),
-            host_ns: time.host_ns,
-            sensor_ns: time.sensor_ns,
-        };
+        let custom_sample = filter_sample(gyro * BUS_GYRO_DPS, accel, dt, time);
         let gyro = if apply_custom && self.custom_filters.has_stage(FilterStage::RawGyro) {
             Vec3::from_array(
                 self.custom_filters
@@ -355,6 +402,13 @@ impl MotionRuntime {
             .unwrap_or(Vec3::ZERO)
             .to_array()
             .map(|v| v * BUS_ACCEL_G);
+        if g.uses_ds4_imu() {
+            return MotionSample {
+                rate: Vec2::ZERO,
+                physical_rate: Vec2::ZERO,
+                steering: None,
+            };
+        }
         if m.mode == MotionMode::Steering {
             let signs = Vec2::new(
                 if m.invert_x { -1. } else { 1. },

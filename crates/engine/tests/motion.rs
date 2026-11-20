@@ -5,6 +5,7 @@ use motion_core::{
     storage::parse_profile,
     timing::SampleTime,
 };
+use motion_filters::{FilterConfig, Stage};
 
 fn profile() -> Profile {
     let mut p = parse_profile(include_str!("../../../examples/gyro-mouse.toml")).unwrap();
@@ -60,6 +61,13 @@ fn ds4_sensor_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
     p.gyro.pause_input = Some("south".into());
     p.gyro.sensitivity = 3.;
     p.gyro.motion.cutoff_dps = 100.;
+    p.gyro.motion.custom_filters.push(FilterConfig {
+        id: "aim-raw".into(),
+        name: "Aim raw filter".into(),
+        stage: Stage::RawGyro,
+        source: "fn process(s, p) { [0.0, 0.0, 0.0] }".into(),
+        ..Default::default()
+    });
     let mut e = Engine::new(p).unwrap();
     assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
 
@@ -86,6 +94,72 @@ fn ds4_sensor_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
     assert!(matches!(e.frame.ds4_imu, Ds4ImuState::Sample(_)));
     e.advance_output(0.001, 60_000_000);
     assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+}
+
+#[test]
+fn ds4_filters_three_axes_only_while_enabled_and_restart_after_a_toggle() {
+    let mut p = profile();
+    p.virtual_gamepad = GamepadTarget::DualShock4;
+    p.gyro.output = GyroOutput::Ds4Imu;
+    p.gyro.activation = "south".into();
+    p.gyro.activation_mode = GyroActivationMode::Toggle;
+    p.gyro.ds4_imu_filter.smoothing_ms = 10.;
+    p.gyro.ds4_imu_filter.use_custom_filters = true;
+    for (id, stage, source) in [
+        ("raw", Stage::RawGyro, "fn process(s, p) { [s.x*2.0, s.y*2.0, s.z*2.0] }"),
+        ("aim", Stage::AfterBuiltin, "fn process(s, p) { [0.0, 0.0, 0.0] }"),
+    ] {
+        p.gyro.motion.custom_filters.push(FilterConfig {
+            id: id.into(),
+            name: id.into(),
+            stage,
+            source: source.into(),
+            ..Default::default()
+        });
+    }
+    let mut e = Engine::new(p.clone()).unwrap();
+    let check = |e: &Engine, ms, expected: [f32; 3]| {
+        let Ds4ImuState::Sample(sample) = e.frame.ds4_imu else {
+            panic!("missing filtered sample");
+        };
+        assert_eq!(sample.timestamp_ns, time(ms).sensor_ns);
+        for (actual, expected) in sample.gyro_dps.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
+        }
+        assert!((sample.accel_g[2] - 1.).abs() < 1e-5);
+    };
+
+    accel(&mut e, 10, [0., 0., 1.]);
+    gyro(&mut e, 11, 2., 4., 6.);
+    gyro(&mut e, 12, 2., 4., 6.);
+    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    assert_eq!(e.motion.custom_filters.statuses()[0].calls, 0);
+
+    button(&mut e, 0, true);
+    gyro(&mut e, 13, 2., 4., 6.);
+    gyro(&mut e, 14, 2., 4., 6.);
+    check(&e, 14, [4., 8., 12.]);
+    gyro(&mut e, 24, 4., 8., 12.);
+    check(&e, 24, [4., 8., 12.].map(|v| v * (2. - (-1.0_f32).exp())));
+    let status = e.motion.custom_filters.statuses();
+    assert_eq!(status[0].calls, 2);
+    assert_eq!(status[1].calls, 0);
+
+    button(&mut e, 0, false);
+    button(&mut e, 0, true);
+    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    button(&mut e, 0, false);
+    button(&mut e, 0, true);
+    gyro(&mut e, 25, 5., 10., 15.);
+    gyro(&mut e, 26, 5., 10., 15.);
+    check(&e, 26, [10., 20., 30.]);
+
+    p.gyro.ds4_imu_filter.noise_gate = 2.;
+    e.sensor_calibration.gyro_noise_dps = 1.;
+    e.apply_layer(p).unwrap();
+    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    gyro(&mut e, 27, 0.1, 0.2, 0.3);
+    check(&e, 27, [0.; 3]);
 }
 
 #[test]

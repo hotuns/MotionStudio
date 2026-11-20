@@ -952,9 +952,9 @@ impl Engine {
             self.controls = controls;
             self.mapped_actions = actions;
         }
-        if std::mem::discriminant(&profile.gyro.timestamp_source)
-            != std::mem::discriminant(&self.profile.gyro.timestamp_source)
-        {
+        let gyro_clock_changed = std::mem::discriminant(&profile.gyro.timestamp_source)
+            != std::mem::discriminant(&self.profile.gyro.timestamp_source);
+        if gyro_clock_changed {
             self.clock = SampleClock::new(profile.gyro.timestamp_source);
         }
         let motion = serde_json::to_value(&profile.gyro.motion)?;
@@ -998,6 +998,14 @@ impl Engine {
         let gyro_output_changed = profile.gyro.output != self.profile.gyro.output;
         if gyro_disabled || gyro_output_changed {
             self.frame.ds4_imu = Ds4ImuState::Off;
+        } else if profile.gyro.uses_ds4_imu()
+            && (gyro_clock_changed
+                || profile.gyro.ds4_imu_filter != self.profile.gyro.ds4_imu_filter
+                || (profile.gyro.ds4_imu_filter.use_custom_filters
+                    && motion["custom_filters"] != previous_motion["custom_filters"]))
+        {
+            self.motion.reset_filters();
+            self.frame.ds4_imu = Ds4ImuState::Neutral;
         }
         if gyro_output_changed {
             if profile.gyro.uses_ds4_imu() || self.profile.gyro.uses_ds4_imu() {
@@ -1966,15 +1974,22 @@ impl Engine {
             self.measuring.is_none() && !direct,
         );
         if direct {
-            // The 3DOF result is still available for device telemetry. Forward
-            // calibrated sensor axes before any aiming projection or filtering.
+            // Device telemetry uses the physical sample. Filters act on the
+            // outgoing gyro in the original sensor basis.
             self.frame.ds4_imu = if let Some(accel) = accel.filter(|_| self.active) {
                 Ds4ImuState::Sample(Ds4ImuSample {
                     timestamp_ns: match self.profile.gyro.timestamp_source {
                         TimestampSource::Host => time.host_ns,
                         TimestampSource::Sensor => time.sensor_ns,
                     },
-                    gyro_dps: (raw * BUS_GYRO_DPS).to_array(),
+                    gyro_dps: self.motion.filter_ds4_gyro(
+                        &self.profile.gyro.ds4_imu_filter,
+                        raw,
+                        accel,
+                        dt,
+                        time,
+                        c.gyro_noise_dps,
+                    ),
                     accel_g: (accel * BUS_ACCEL_G).to_array(),
                 })
             } else {

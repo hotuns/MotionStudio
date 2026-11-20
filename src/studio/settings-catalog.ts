@@ -42,6 +42,9 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('motion','motion-brake','gyro.motion.',[['brake_strength','减速刹车强度'], ['brake_threshold','刹车触发减速量']]),
   ...group('motion','motion-direction-stability','gyro.motion.',[['angle_snap','水平／垂直吸附角'], ['angle_snap_ease','柔和进入角度吸附'], ['drift_correction','使用重力修正姿态漂移']]),
   ...group('motion','motion-filters','gyro.',[['timestamp_source','采样时钟'], ['motion.custom_filters','自定义滤波']]),
+  ...group('motion','motion-ds4-filters','gyro.ds4_imu_filter.',[
+    ['smoothing_ms','直通平滑时间'], ['noise_gate','直通噪声抑制倍率'], ['use_custom_filters','直通应用原始角速度脚本','Rhai'],
+  ]),
   ...group('motion','motion-calibration','gyro.',[
     ['output','体感输出','DS4 传感器直通 ViGEm IMU'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),

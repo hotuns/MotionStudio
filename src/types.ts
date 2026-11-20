@@ -15,6 +15,7 @@ export type AimOutput='mouse'|'right_stick'|'both';
 export type MotionBinding={name:string;input:string;output:string;range:number;threshold:number;mode:'hold'|'toggle'|'turbo';turbo_ms:number;curve:number[][]};
 export type FilterStage='raw_gyro'|'before_builtin'|'after_builtin';
 export type CustomFilter={api_version:number;id:string;name:string;enabled:boolean;requires_accel?:boolean;stage:FilterStage;source:string;params:Record<string,number>};
+export type Ds4ImuFilter={smoothing_ms?:number;noise_gate?:number;use_custom_filters?:boolean};
 export type FilterStatus={id:string;name:string;stage:FilterStage;enabled:boolean;bypassed:boolean;error:string|null;calls:number;last_us:number;max_us:number};
 export type FilterPreview={points:{t:number;input:number[];output:number[]}[];status:FilterStatus};
 export type TurnBinding={name:string;input:string;degrees:number;duration_ms:number;output:AimOutput};
@@ -44,6 +45,7 @@ export type Gyro = {
   vertical_ratio:number;
   invert_y:boolean;
   timestamp_source:'host'|'sensor';
+  ds4_imu_filter?:Ds4ImuFilter;
   smoothing_ms:number;
   noise_threshold:number;
   acceleration:{fast_multiplier:number;start_dps:number;full_dps:number;curve:'linear'|'natural'|'power'|'quadratic'|'sigmoid'|'jump'|'custom';natural_half:number;power_reference:number;power_exponent:number;sigmoid_mid:number;sigmoid_width:number;jump_width:number;points:number[][]};

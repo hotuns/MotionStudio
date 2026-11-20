@@ -2668,5 +2668,14 @@
   "虚拟 PS4 传感器直通需要支持陀螺仪和加速度计的体感接口": "Virtual PS4 sensor passthrough requires a controller interface with a gyroscope and accelerometer",
   "传感器直通由游戏处理，无需校准游戏转角。": "The game handles sensor passthrough and does not require Studio turn calibration.",
   "传感器直通需要选择虚拟 DualShock 4": "Sensor passthrough requires a virtual DualShock 4",
-  "按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。": "Send calibrated sensor data to the virtual controller using the selected activation mode."
+  "按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。": "Send calibrated sensor data to the virtual controller using the selected activation mode.",
+  "直通滤波": "Passthrough filters",
+  "发送给虚拟 DS4 前可处理三轴角速度。加速度计数据沿用设备校准。": "Optional processing for three-axis angular velocity before sending it to the virtual DS4. Acceleration uses the device calibration.",
+  "直通平滑时间": "Passthrough smoothing time",
+  "平滑值越大，角速度越平稳，快速转动的响应也会变慢。0 关闭平滑。": "A longer smoothing time steadies angular velocity and slows the response to quick turns. Set it to 0 to disable smoothing.",
+  "直通噪声抑制倍率": "Passthrough noise suppression multiplier",
+  "按设备静止校准得到的噪声底抑制小幅波动。0 关闭噪声抑制。": "Suppress small fluctuations using the noise floor measured during stationary device calibration. Set it to 0 to disable suppression.",
+  "直通应用原始角速度脚本": "Apply raw gyroscope scripts to passthrough",
+  "在直通时应用下方已启用的 Rhai 脚本。": "Apply the enabled Rhai scripts below during passthrough.",
+  "直通启用脚本后，原始角速度脚本按列表顺序执行。每个配置最多保存 4 个滤波器。": "When enabled, passthrough runs raw gyroscope scripts in list order. Each profile can store up to four filters."
 }
