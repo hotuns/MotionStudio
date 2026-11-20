@@ -962,7 +962,7 @@ export default function App() {
         : <section className="app-card"><h2>创建你的第一份游戏配置</h2>
             <p className="studio-muted">选择合适的模板后，就可以按游戏动作配置手柄。</p>
             <div className="studio-actions"><button type="button" className="primary-btn" onClick={() => openCreate('shooter')}>新建游戏配置</button>
-            <button type="button" className="secondary-btn" onClick={openJsmImport}>导入 JSM 配置</button>
+            <button type="button" className="secondary-btn" onClick={openJsmImport}>导入文本配置</button>
             <button type="button" className="secondary-btn" onClick={() => navigate('profiles')}>配置库</button></div>
           </section>)}
       {page === 'controllerStatus' && <Suspense fallback={<p className="studio-muted">正在载入设备状态…</p>}>

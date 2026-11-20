@@ -24,7 +24,7 @@ function decodeConfig(bytes: Uint8Array) {
 }
 
 export async function pickImportFile(kind: 'toml' | 'jsm' | 'jsm-related') {
-  const title = t(kind === 'toml' ? '选择 Motion Studio 配置' : '选择 JSM 配置文件');
+  const title = t(kind === 'toml' ? '选择 Motion Studio 配置' : '选择文本配置文件');
   const extensions = kind === 'toml' ? ['toml'] : ['txt', 'jsm', 'cfg', 'conf'];
   if (kind === 'jsm') extensions.push('toml');
   const path = await open({ title, filters: [{ name: t('配置文件列表'), extensions }] });

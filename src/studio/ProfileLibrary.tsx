@@ -49,7 +49,7 @@ export function ProfileLibrary({ entries, selected, activeId, blocked, dirty, vi
           if ((event.target as Element).closest('button')) event.currentTarget.closest('details')?.removeAttribute('open');
         }}>
           <button type="button" disabled={blocked} onClick={onImport}>导入 TOML 配置</button>
-          <button type="button" disabled={blocked} onClick={onImportJsm}>导入 JSM 配置</button>
+          <button type="button" disabled={blocked} onClick={onImportJsm}>导入文本配置</button>
           <button type="button" onClick={onFolder}>打开配置文件夹</button>
           <button type="button" onClick={onSwitching}>自动切换</button>
         </div>

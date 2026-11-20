@@ -60,6 +60,7 @@ const manifest=JSON.stringify({
   inputProvider:{crate:'flexinput-devices',backend:'SDL3',timestampedEvents:true,touchEvents:true,sdlRuntime:'shared verified DLL',...sdlLinkage},
   physicalProcessing:{crate:'flexinput-engine',entry:'eval_graph_tick / device_cal',sharedStickInput:true},
   jsmImport:{format:'Studio profile',triggerParser:'FlexInput JSM Config'},
+  angularAiming:{modules:['jsm/aim','jsm/analog','jsm/motion','jsm/pad'],gravity:'GamepadMotionHelpers',gravityCommit:JSON.parse(readFileSync(resolve(root,'vendor/gamepadmotionhelpers/manifest.json'),'utf8')).commit,timestampedGyro:true},
   triggerStages:{entry:'jsm/analog.rs',calibratedTravel:true},
   gamepadOutputs:{crate:'flexinput-virtual',devices:['VirtualXInput','VirtualDS4','HidMaestroDevice','CompositeDevice'],defaultBackend:'vigem',checkedReadiness:true},
   audioHaptics:{virtualTarget:'DualSense USB/IP',physicalTargets:['APEX 6 Pro','APEX 6 Pro Phantom Blade Zero'],experimental:true,pcm:'48000 Hz s16 4ch -> 1000 Hz stereo',packetMs:8,queueMs:40,transport:'verified shared SDL HID API',adaptiveTriggers:false,speakerForwarding:false},

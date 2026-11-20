@@ -267,8 +267,9 @@ where
 #[serde(default, deny_unknown_fields)]
 pub struct Gyro {
     pub enabled: bool,
-    #[serde(skip_serializing_if = "AimEngine::is_studio")]
-    pub aim_engine: AimEngine,
+    /// Accepted on import from builds that offered an engine selector.
+    #[serde(rename = "aim_engine", skip_serializing)]
+    pub legacy_aim_engine: LegacyAimEngine,
     #[serde(skip_serializing_if = "JsmResponse::is_default")]
     pub jsm_response: JsmResponse,
     pub output: GyroOutput,
@@ -296,15 +297,14 @@ impl Gyro {
 
     pub fn needs_accel(&self) -> bool {
         if self.uses_jsm_aim() {
-            return matches!(self.motion.space, crate::motion_config::Space::Player | crate::motion_config::Space::World)
+            return self.motion.space.uses_gravity()
                 || self.motion.bindings.iter().any(|b| !b.input.starts_with("imu_gyro_"));
         }
         self.uses_ds4_imu() || self.motion.needs_accel()
     }
 
     pub fn uses_jsm_aim(&self) -> bool {
-        self.aim_engine == AimEngine::Jsm && !self.uses_ds4_imu()
-            && self.motion.mode == crate::motion_config::MotionMode::Pointer
+        !self.uses_ds4_imu() && self.motion.mode == crate::motion_config::MotionMode::Pointer
     }
 
     pub(crate) fn flick_available(&self) -> bool {
@@ -319,7 +319,7 @@ impl Default for Gyro {
         let jsm = flexinput_engine::eval::JsmAimSettings::default();
         Self {
             enabled: false,
-            aim_engine: AimEngine::Studio,
+            legacy_aim_engine: LegacyAimEngine::default(),
             jsm_response: JsmResponse::default(),
             output: GyroOutput::Mouse,
             activation: "always".into(),
@@ -350,24 +350,24 @@ pub enum GyroOutput {
     Ds4Imu,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AimEngine {
+pub enum LegacyAimEngine {
     #[default]
+    #[serde(alias = "jsm")]
     Studio,
-    Jsm,
 }
 
-impl AimEngine {
-    fn is_studio(&self) -> bool {
-        *self == Self::Studio
-    }
-}
-
-/// Native response controls. Absent smoothing overrides inherit the Studio form.
+/// Native defaults apply unless the profile has a legacy smoothing window or an override.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct JsmResponse {
+    pub auto_calibrate_gyro: bool,
+    /// Local JSM axis flags (X=1, Y=2, Z=4). Omitted axes use the selected local preset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mouse_x_axes: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mouse_y_axes: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub smooth_time_ms: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -389,13 +389,16 @@ impl JsmResponse {
 
     pub(crate) fn validate(&self) -> Result<()> {
         use crate::motion_config::range;
+        if self.mouse_x_axes.into_iter().chain(self.mouse_y_axes).any(|mask| mask > 7) {
+            bail!("瞄准输入轴组合值需在 0 到 7 之间");
+        }
         if let Some(time) = self.smooth_time_ms {
-            range("JSM 平滑窗口", time, 0., 2000.)?;
+            range("平滑窗口", time, 0., 2000.)?;
         }
         if let Some(threshold) = self.smooth_threshold_dps {
-            range("JSM 平滑阈值", threshold, 0., 2000.)?;
+            range("平滑阈值", threshold, 0., 2000.)?;
         }
-        range("JSM 完全恢复转速", self.cutoff_recovery_dps, 0., 2000.)?;
+        range("完全恢复转速", self.cutoff_recovery_dps, 0., 2000.)?;
         range("右摇杆内死区补偿", self.right_undeadzone_inner, 0., 0.99)?;
         range("右摇杆外死区补偿", self.right_undeadzone_outer, 0., 0.99)?;
         range("右摇杆响应指数", self.right_unpower, 0., 10.)?;

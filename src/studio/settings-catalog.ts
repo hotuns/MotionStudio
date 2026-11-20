@@ -7,14 +7,17 @@ const group = (tab: GameTab, section: string, prefix: string, fields: [string, s
 
 export const settingsCatalog: SettingTarget[] = [
   ...group('motion','motion-main','gyro.',[
-    ['aim_engine','瞄准引擎','JSM'],
     ['enabled','启用体感'], ['activation','开启按键'], ['activation_mode','开启方式'], ['pause_input','按住暂停'],
     ['activation_threshold','扳机与摇杆阈值'], ['sensitivity','体感灵敏度'], ['vertical_ratio','垂直灵敏度比例'],
   ]),
-  ...group('motion','motion-idle','gyro.jsm_response.',[['cutoff_recovery_dps','JSM 完全恢复转速']]),
+  ...group('motion','motion-idle','gyro.jsm_response.',[['cutoff_recovery_dps','完全恢复转速']]),
+  ...group('motion','motion-direction','gyro.jsm_response.',[
+    ['mouse_x_axes','水平瞄准输入轴','MOUSE_X_FROM_GYRO_AXIS'], ['mouse_y_axes','垂直瞄准输入轴','MOUSE_Y_FROM_GYRO_AXIS'],
+  ]),
+  ...group('motion','motion-filters','gyro.jsm_response.',[['auto_calibrate_gyro','自动校准陀螺仪偏移','AUTO_CALIBRATE_GYRO']]),
   ...group('motion','motion-direction','gyro.',[['invert_y','反转垂直方向']]),
   ...group('motion','motion-direction','gyro.motion.',[
-    ['space','体感坐标'], ['invert_x','反转水平方向'], ['roll_contribution','横滚参与水平转向'], ['hold_angles','习惯握持角度'],
+    ['space','体感坐标','PLAYER_TURN PLAYER_LEAN WORLD_TURN WORLD_LEAN YAW_PLUS_ROLL'], ['invert_x','反转水平方向'], ['roll_contribution','横滚参与水平转向'], ['hold_angles','习惯握持角度'],
   ]),
   ...group('motion','motion-posture','gyro.motion.',[
     ['mode','控制方式'], ['reset_input','姿态归零按键'], ['neutral_input','设置正前方按键'],
@@ -26,10 +29,6 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('motion','motion-inertia','gyro.motion.trackball.',[
     ['horizontal_input','保持水平惯性'], ['vertical_input','保持垂直惯性'], ['decay','惯性衰减'],
   ]),
-  ...group('motion','motion-edge','gyro.motion.edge.',[
-    ['mode','边缘转向方式'], ['zone','开始持续转向的角度'], ['blend','接管过渡区间'], ['ramp','达到最大速度的区间'],
-    ['max_dps','最大持续转速'], ['momentum','出界速度保留倍率'], ['decay_s','惯性衰减时间'], ['gyro_keep','边缘处保留手腕控制'], ['horizontal_only','只作用于水平方向'],
-  ]),
   ...group('motion','motion-acceleration','gyro.acceleration.',[
     ['fast_multiplier','快速转动倍率'], ['start_dps','加速起点'], ['full_dps','达到最高倍率'], ['curve','加速度曲线'],
     ['natural_half','达到半程倍率的速度'], ['power_reference','参考转速'], ['power_exponent','幂指数'], ['sigmoid_mid','过渡中点'],
@@ -37,7 +36,7 @@ export const settingsCatalog: SettingTarget[] = [
   ]),
   ...group('motion','motion-smoothing','gyro.',[['smoothing_ms','平滑时间']]),
   ...group('motion','motion-smoothing','gyro.jsm_response.',[
-    ['decay_smoothing','JSM 前置平滑'], ['smooth_time_ms','JSM 平滑窗口'], ['smooth_threshold_dps','JSM 平滑阈值'], ['one_euro','叠加 One Euro 滤波'],
+    ['decay_smoothing','前置平滑方式'], ['smooth_time_ms','平滑窗口'], ['smooth_threshold_dps','平滑阈值'], ['one_euro','叠加 One Euro 滤波'],
   ]),
   ...group('motion','motion-smoothing','gyro.motion.',[
     ['smoothing','平滑方式','One Euro 自适应滤波'], ['decay_threshold','退出平滑的转速'], ['one_euro_cutoff','最低截止频率'], ['one_euro_beta','速度响应系数'],
@@ -61,15 +60,14 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('sticks','stick-input','', [['stick_rebound_ms','防回弹窗口','启用摇杆防回弹']]),
   ...group('sticks','stick-mouse','stick_mouse.',[['enabled','启用摇杆鼠标'], ['stick','摇杆鼠标使用的摇杆'], ['speed','最大移动速度'], ['exponent','摇杆鼠标响应']]),
   ...group('sticks','flick-main','gyro.motion.flick.',[
-    ['only','仅拨动（关闭外圈转动）','FLICK_ONLY'], ['snap_mode','拨动角度吸附','FLICK_SNAP_MODE'], ['snap_strength','拨动角度吸附强度','FLICK_SNAP_STRENGTH'],
-    ['enabled','启用拨动／转动','快速转向 Flick Stick'], ['smooth_ms','180° 基准释放时间','转角释放时间 转身完成时间'], ['time_exponent','按转角调整时间','拨动时间指数 FLICK_TIME_EXPONENT'], ['release_ease','转角缓出强度'], ['stick','拨动使用的摇杆'], ['deadzone','拨动转身阈值'],
+    ['only','仅拨动','FLICK_ONLY'], ['rotate_only','仅转动','ROTATE_ONLY'], ['rotate_smooth_override','外圈转动平滑阈值','ROTATE_SMOOTH_OVERRIDE'], ['snap_mode','拨动角度吸附','FLICK_SNAP_MODE'], ['snap_strength','拨动角度吸附强度','FLICK_SNAP_STRENGTH'],
+    ['enabled','启用拨动／转动','快速转向 Flick Stick'], ['smooth_ms','180° 基准释放时间','转角释放时间 转身完成时间'], ['time_exponent','按转角调整时间','拨动时间指数 FLICK_TIME_EXPONENT'], ['stick','拨动使用的摇杆'], ['deadzone','拨动转身阈值'],
   ]),
   ...group('sticks','flick-main','gyro.motion.flick.',[
     ['standalone','关闭体感时也启用'],
     ['enable_input','按住启用（不设置则常开）'], ['pause_input','按住暂停拨动','暂停摇杆瞄准'], ['suppress','原始摇杆输出'],
   ]),
-  ...group('sticks','flick-main','gyro.motion.flick.',[['release_ratio','追踪下限比例'], ['disengage_ms','拨动退出延时'], ['stabilise_ms','转动方向稳定']]),
-  ...group('sticks','flick-main','gyro.motion.flick.',[['forward_deadzone','正前方死角'], ['speed_gate_ms','拨动判定时间'], ['slow_lock','慢推锁定为连续瞄准']]),
+  ...group('sticks','flick-main','gyro.motion.flick.',[['forward_deadzone','正前方死角']]),
   ...group('sticks','flick-main','gyro.motion.flick.',[['stick_aim','启用配套摇杆瞄准'], ['aim_sensitivity','摇杆瞄准倍率'], ['max_dps','连续瞄准基础转速'], ['vertical_ratio','摇杆纵向比例']]),
   ...group('triggers','trigger-stages','trigger_stages.',[
     ['left_mode','左扳机全拉模式'], ['right_mode','右扳机全拉模式'], ['soft_threshold','轻拉阈值','随扳机移动触发轻拉'], ['skip_delay_ms','快速全拉时间窗'],

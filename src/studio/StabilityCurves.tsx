@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { memo, useEffect, useId, useState } from 'react';
 import { useLanguage } from '../i18n';
 import type { Gyro } from '../types';
-import {usesJsmAim} from '../motion-presets';
 import styles from './MotionControls.module.css';
 
 type Point = [x: number, reference: number, processed: number];
@@ -22,7 +21,7 @@ export function useStabilityPreview(gyro: Gyro, deviceNoise?: number) {
   // Send only the controls that change these curves, including when editing a layer.
   const request = JSON.stringify({
     gyro: {
-      aim_engine: usesJsmAim(gyro)?'jsm':'studio',
+      output: gyro.output,
       jsm_response: {
         cutoff_recovery_dps:gyro.jsm_response?.cutoff_recovery_dps,
         smooth_time_ms:gyro.jsm_response?.smooth_time_ms,
@@ -33,6 +32,7 @@ export function useStabilityPreview(gyro: Gyro, deviceNoise?: number) {
       smoothing_ms: gyro.smoothing_ms,
       noise_threshold: gyro.noise_threshold,
       motion: {
+        mode: m.mode,
         smoothing: m.smoothing,
         decay_threshold: m.decay_threshold,
         one_euro_cutoff: m.one_euro_cutoff,

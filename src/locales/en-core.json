@@ -50,7 +50,7 @@
   "创建你的第一份游戏配置": "Create your first game profile",
   "选择合适的模板后，就可以按游戏动作配置手柄。": "Choose a template, then map your controller to the game's actions.",
   "新建游戏配置": "New game profile",
-  "导入 JSM 配置": "Import JSM profile",
+  "导入文本配置": "Import text profile",
   "配置库": "Profile library",
   "设备校准已保存": "Device calibration saved",
   "请先选择或新建游戏配置。": "Select or create a game profile first.",

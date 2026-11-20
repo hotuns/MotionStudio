@@ -355,6 +355,11 @@ impl Default for Aim {
 }
 
 impl Aim {
+    /// Whether the stick is still in the outer ring of its native Flick gesture.
+    pub fn flick_engaged(&self, side: usize) -> bool {
+        self.sticks.get(side).is_some_and(|stick| stick.flick.flicking)
+    }
+
     /// Is this stick's flick still being paid out? A modeshift can't take the
     /// stick out of flick mode mid-turn: JSM degrades it to `FLICK_ONLY` so the
     /// turn finishes instead of stopping halfway round.
@@ -464,12 +469,7 @@ impl Aim {
         let sample_dt = clock.interval(dt);
         if let Some(seconds) = sample_dt {
             self.sampled_gyro = self.gyro_sample(s, p, m, c, gravity, seconds, gyro, actions, blocked);
-        } else if blocked {
-            self.one_euro_x.reset();
-            self.one_euro_y.reset();
-            self.brake.reset();
-            self.sampled_gyro = GyroAim::default();
-        }
+        } else if blocked { self.block_sampled_gyro(); }
         let Vec2 { x: vel_x, y: vel_y } = self.sampled_gyro.velocity;
 
         // ── the sticks ───────────────────────────────────────────────────────
@@ -520,9 +520,9 @@ impl Aim {
     pub fn sample_motion(
         &mut self, s: &Settings, p: &pad::Settings, m: &super::motion::Settings,
         c: &super::cc::Settings, gravity: super::motion::Gravity, dt: f32,
-        gyro: Gyro, actions: &HashSet<GyroAction>,
+        gyro: Gyro, actions: &HashSet<GyroAction>, blocked: bool,
     ) -> Vec2 {
-        self.sampled_gyro = self.gyro_sample(s, p, m, c, gravity, dt, gyro, actions, false);
+        self.sampled_gyro = self.gyro_sample(s, p, m, c, gravity, dt, gyro, actions, blocked);
         if p.gyro_dest == Dest::Mouse { self.gyro_mouse_delta(s, dt) } else { Vec2::ZERO }
     }
 
@@ -530,6 +530,15 @@ impl Aim {
         let calibration = s.real_world_calibration / s.in_game_sens.max(1e-6);
         let v = self.sampled_gyro.velocity;
         Vec2::new(v.x * calibration * seconds, -(v.y * calibration * seconds))
+    }
+
+    /// Mute the retained camera rate immediately on a button edge. The rolling
+    /// history and gravity keep advancing on physical samples while blocked.
+    pub fn block_sampled_gyro(&mut self) {
+        self.one_euro_x.reset();
+        self.one_euro_y.reset();
+        self.brake.reset();
+        self.sampled_gyro = GyroAim::default();
     }
 
     pub fn reset_sampled_gyro(&mut self) {
@@ -542,28 +551,18 @@ impl Aim {
         self.last_abs_x = 0.0;
         self.last_abs_y = 0.0;
         self.decay.reset();
-        self.one_euro_x.reset();
-        self.one_euro_y.reset();
-        self.brake.reset();
-        self.sampled_gyro = GyroAim::default();
+        self.block_sampled_gyro();
     }
 
     pub fn reset_sticks(&mut self) {
         self.sticks = Default::default();
     }
 
-    fn gyro_sample(
-        &mut self,
-        s: &Settings,
-        p: &pad::Settings,
-        m: &super::motion::Settings,
-        c: &super::cc::Settings,
-        gravity: super::motion::Gravity,
-        dt: f32,
-        gyro: Gyro,
-        actions: &HashSet<GyroAction>,
-        blocked: bool,
-    ) -> GyroAim {
+    /// Unfiltered screen-axis rotation in degrees/s, also used by game-angle calibration.
+    pub fn project_motion(
+        s: &Settings, m: &super::motion::Settings, c: &super::cc::Settings,
+        gravity: super::motion::Gravity, gyro: Gyro,
+    ) -> (f32, f32) {
         // JSM's frame, from the note at the top of this file.
         let (in_x, in_y, in_z) = (gyro.pitch, -gyro.yaw, gyro.roll);
 
@@ -584,7 +583,7 @@ impl Aim {
             if m.z { v += -x_sign * in_z; }
             v
         };
-        let (mut gx, mut gy) = if m.space == super::motion::Space::YawPlusRoll {
+        if m.space == super::motion::Space::YawPlusRoll {
             // The custom-curve fork's space: pitch on the vertical, yaw with a share
             // of roll mixed into the turn. See `cc.rs`.
             super::cc::yaw_plus_roll(c, glam::Vec3::new(in_x, in_y, in_z))
@@ -604,7 +603,22 @@ impl Aim {
                 local.z,
                 c.roll_contribution,
             )
-        };
+        }
+    }
+
+    fn gyro_sample(
+        &mut self,
+        s: &Settings,
+        p: &pad::Settings,
+        m: &super::motion::Settings,
+        c: &super::cc::Settings,
+        gravity: super::motion::Gravity,
+        dt: f32,
+        gyro: Gyro,
+        actions: &HashSet<GyroAction>,
+        blocked: bool,
+    ) -> GyroAim {
+        let (mut gx, mut gy) = Self::project_motion(s, m, c, gravity, gyro);
 
         // ── smoothing ────────────────────────────────────────────────────────
         if c.decay_smoothing {
@@ -901,7 +915,8 @@ impl Aim {
                     (flick_speed_constant * s.rotate_smooth_override,
                      flick_speed_constant * s.rotate_smooth_override * 2.0)
                 };
-                let samples = FLICK_SAMPLES.min(64);
+                // JoyShock::handleFlickStick targets 64 ms at the turn clock's cadence.
+                let samples = ((0.064 / dt.max(1e-6)).ceil() as usize).clamp(1, FLICK_SAMPLES);
                 cam = self.smooth_rotation(side, speed, smooth.0, smooth.1, samples);
                 if to_stick {
                     // Radians this tick into degrees per second.

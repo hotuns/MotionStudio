@@ -148,7 +148,7 @@ export function GameProfilesPage(props: Props) {
               if ((event.target as Element).closest('button')) event.currentTarget.closest('details')?.removeAttribute('open');
             }}>
               <button type="button" disabled={blocked || !!capture || measuring} onClick={()=>setFeedbackOpen(true)}>震动与灯光</button>
-              <button type="button" disabled={blocked || measuring} onClick={props.onImportJsm}>导入 JSM 配置</button>
+              <button type="button" disabled={blocked || measuring} onClick={props.onImportJsm}>导入文本配置</button>
               <button type="button" disabled={blocked || measuring} onClick={props.onExport}>导出配置</button>
               <button type="button" disabled={measuring} onClick={()=>props.onNavigate('profiles')}>配置库</button>
               <button type="button" onClick={props.onOpenFolder}>配置文件夹</button>

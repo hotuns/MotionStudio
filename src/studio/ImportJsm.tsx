@@ -3,12 +3,13 @@ import {invoke} from '@tauri-apps/api/core';
 import type {Entry, JsmFile, JsmReport} from '../types';
 import {Dialog} from './Controls';
 import {pickImportFile} from '../import-file';
+import {t} from '../i18n';
 import styles from './ImportJsm.module.css';
 
 const statusNames = {converted:'已转换', approximate:'需要核验', skipped:'未迁移', ignored:'程序设置', overridden:'已覆盖', included:'已展开'};
 
 export function ImportJsm({onClose, onImported}: {onClose: () => void; onImported: (entry: Entry) => Promise<void>}) {
-  const [files, setFiles] = useState<JsmFile[]>([{name:'JSM 配置.txt', text:''}]);
+  const [files, setFiles] = useState<JsmFile[]>(() => [{name:t('手柄配置.txt'), text:''}]);
   const [selected, setSelected] = useState(0);
   const [name, setName] = useState('');
   const [encoding, setEncoding] = useState('');
@@ -74,9 +75,9 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
 
   const lines = report?.lines.filter(line => filter === 'all'
     || (filter === 'review' && ['approximate', 'skipped'].includes(line.status)) || filter === line.status) ?? [];
-  return <Dialog title="导入 JSM 配置" onClose={onClose} error={error}
+  return <Dialog title="导入文本配置" onClose={onClose} error={error}
     onSubmit={() => { if (!busy) void (report ? create() : preview()); }}
-    description="将支持的设置转换成可在 Studio 动作列表里编辑的配置。"
+    description="选择文本文件或粘贴映射命令，预览后保存为可编辑的游戏配置。"
     actions={<>
       <button type="button" className="secondary-btn" onClick={onClose}>取消导入</button>
       {report
@@ -85,12 +86,12 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
     </>}>
     {!report ? <>
       <div className={styles.tools}>
-        <button type="button" className="secondary-btn" disabled={busy} onClick={() => void choose('main')}>选择 JSM 文件</button>
+        <button type="button" className="secondary-btn" disabled={busy} onClick={() => void choose('main')}>选择主文件</button>
         {!legacy && <button type="button" className="secondary-btn" disabled={busy || files.length >= 16}
-          onClick={() => void choose('related')}>添加关联 JSM 文件</button>}
+          onClick={() => void choose('related')}>添加关联文件</button>}
       </div>
       {legacy ? <p><strong translate="no">{files[0].name}</strong><br/>旧版配置及内含的关联文件会一起转换。</p> : <>
-        {files.length > 1 && <div className={styles.tabs} role="group" aria-label="JSM 文件">
+        {files.length > 1 && <div className={styles.tabs} role="group" aria-label="待转换文件">
           {files.map((file, i) => <button key={i} type="button" className="secondary-btn" aria-pressed={i === selected}
             disabled={busy} onClick={() => setSelected(i)}>
             {i === 0 && <span>主文件 · </span>}<span translate="no">{file.name}</span>
@@ -100,12 +101,12 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
             setSelected(selected - 1);
           }}>移除关联文件</button>}
         </div>}
-        <label className={styles.field}>JSM 配置内容
-          <textarea aria-label="JSM 配置内容" rows={12} spellCheck={false} value={file.text} disabled={busy}
+        <label className={styles.field}>配置文本
+          <textarea aria-label="配置文本" rows={12} spellCheck={false} value={file.text} disabled={busy}
             placeholder={'TRIGGER_THRESHOLD = 0.25\nZR_MODE = NO_SKIP\nZR = RMOUSE\nZRF = LMOUSE'}
             onChange={event => setFiles(files.map((file, i) => i === selected ? {...file, text:event.target.value} : file))}/>
         </label>
-        <p>可以粘贴配置，或选择文件。主文件引用的配置可作为关联文件添加。</p>
+        <p>支持 TXT、CFG 等文本配置。主文件引用其他配置时，请一并添加。</p>
       </>}
     </> : <>
       <div className={styles.source}><strong translate="no">{files[0].name}</strong><span>{encoding}</span>
@@ -121,7 +122,7 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
         <option value="converted">已转换</option><option value="skipped">未迁移</option>
         <option value="included">已展开</option><option value="ignored">程序设置</option><option value="overridden">已被覆盖</option>
       </select></label>
-      <div className={styles.report} aria-label="JSM 转换报告">{lines.map((line, index) => <article key={index} data-status={line.status}>
+      <div className={styles.report} aria-label="配置转换报告">{lines.map((line, index) => <article key={index} data-status={line.status}>
         <div><strong><span translate="no">{line.file}</span>{' · '}{'第 '+line.line+' 行'}</strong><span>{statusNames[line.status]}</span></div>
         <code translate="no">{line.source}</code><p>{line.message}</p>
       </article>)}{!lines.length && <p>没有此类项目。</p>}</div>

@@ -38,8 +38,6 @@ pub struct GameAngleMeasurement {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MotionTelemetry {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub aim_engine: Option<crate::profile::AimEngine>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub filters: Vec<FilterStatus>,
     pub accel_g: [f32; 3],
@@ -206,10 +204,10 @@ impl MotionRuntime {
             (
                 "axis".into(),
                 json!(match m.space {
-                    Space::PitchYaw => "pitch_yaw",
+                    Space::PitchYaw | Space::YawPlusRoll => "pitch_yaw",
                     Space::PitchRoll => "pitch_roll",
-                    Space::Player => "player",
-                    Space::World => "world",
+                    Space::Player | Space::PlayerLean => "player",
+                    Space::World | Space::WorldLean => "world",
                 }),
             ),
             ("hold_pitch".into(), json!(m.hold_angles[0])),

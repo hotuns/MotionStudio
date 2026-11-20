@@ -1,6 +1,6 @@
 import {memo} from 'react';
 import {Range, Toggle} from './Controls';
-import {applyJsmResponse,isJsmResponse,usesJsmAim} from '../motion-presets';
+import {applyJsmResponse,isJsmResponse,nativeSmoothing,usesJsmAim} from '../motion-presets';
 import type {Ds4ImuFilter, FilterStatus, Gyro, Profile} from '../types';
 import {useLanguage} from '../i18n';
 import styles from './MotionControls.module.css';
@@ -11,7 +11,7 @@ import {GyroBindingInput} from './GyroBindingInput';
 import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
 
 type Update=(update:(profile:Profile)=>void)=>void;
-const smoothingPresets=[['JSM 线性',0],['均衡',16],['更稳',32]] as const;
+const smoothingPresets=[['线性',0],['均衡',16],['更稳',32]] as const;
 
 export const MotionSettings = memo(function MotionSettings({profile,profileId,update,split,missingImu,recording,canRecord,onRecord,
   bindingLocked,onCancelRecording,onOpenDevice,onPreviewOutput,filtersRunning,filterStatuses,onMotionAction,deviceNoise}: {
@@ -42,17 +42,14 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
     draft.gyro.ds4_imu_filter={...draft.gyro.ds4_imu_filter,...change};
   });
   const activation=gyro.activation==='always'?'always':gyro.activation_mode;
-  const preset=gyro.motion.smoothing==='ema'?smoothingPresets.find(([,ms])=>ms===gyro.smoothing_ms&&(ms!==0||isJsmResponse(gyro))):undefined;
+  const smooth=nativeSmoothing(gyro);
+  const preset=smoothingPresets.find(([,ms])=>ms===0?isJsmResponse(gyro):jsm
+    ?smooth.window===ms&&smooth.threshold===60&&!smooth.decay&&!smooth.oneEuro
+    :gyro.motion.smoothing==='ema'&&gyro.smoothing_ms===ms);
 
   return <div className={settingStyles.page}>
     <SettingSection id="motion-main" title={passthrough?'DS4 传感器直通':'体感瞄准'} defaultOpen
       summary={gyro.enabled?(passthrough?'已启用':<>{gyro.sensitivity}×</>):'关闭'}>
-      {!passthrough&&<>
-        <MotionChoice label="瞄准引擎" value={jsm?'jsm':'studio'} disabled={gyro.motion.mode!=='pointer'}
-          options={[['studio','Studio'],['jsm','JSM 原生']]} onChange={v=>setGyro('aim_engine',v as Gyro['aim_engine'])}/>
-        {gyro.motion.mode!=='pointer'?<p className={styles.hint}>选择角速度瞄准后可切换引擎。</p>
-          :jsm&&<p className={styles.hint}>体感和快速转向使用 JSM 的响应。切换引擎后应用修改，即可用同一套键位和游戏校准对比。</p>}
-      </>}
       <Toggle label="启用体感" value={gyro.enabled} onChange={value=>setGyro('enabled',value)}
         help={passthrough?'按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。':undefined}/>
       {gyro.enabled&&<>
@@ -84,11 +81,17 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
           onChange={value=>setGyro('sensitivity',value)} help="转得太慢就调高，容易转过头就调低。"/>
         <Range label="垂直灵敏度比例" value={gyro.vertical_ratio} min={0.1} max={2} step={0.05} unit="×"
           onChange={value=>setGyro('vertical_ratio',value)}/>
-        {!jsm&&<><div className={settingStyles.row}><span>防抖预设</span><div className={styles.activationModes} role="group" aria-label="防抖预设">
+        <div className={settingStyles.row}><span>防抖预设</span><div className={styles.activationModes} role="group" aria-label="防抖预设">
           {smoothingPresets.map(([label,ms])=><button key={ms} type="button" className="secondary-btn" aria-pressed={preset?.[1]===ms}
-            onClick={()=>update(draft=>{if(ms===0)applyJsmResponse(draft.gyro);else{draft.gyro.motion.smoothing='ema';draft.gyro.smoothing_ms=ms;}})}>{label}</button>)}
+            onClick={()=>update(draft=>{
+              if(ms===0)applyJsmResponse(draft.gyro);
+              else if(jsm)draft.gyro.jsm_response={...draft.gyro.jsm_response,smooth_time_ms:ms,smooth_threshold_dps:60,decay_smoothing:false,one_euro:false};
+              else {draft.gyro.motion.smoothing='ema';draft.gyro.smoothing_ms=ms;}
+            })}>{label}</button>)}
         </div></div>
-        <p className={styles.hint}>JSM 线性：加速倍率 1×，关闭额外平滑、低速抑制、吸附与刹车。保留当前灵敏度、坐标、转角校准和自定义滤波。</p></>}
+        <p className={styles.hint}>线性预设使用固定灵敏度，并关闭平滑、低速抑制、吸附和刹车。</p>
+        {jsm&&(gyro.motion.edge.mode!=='off'||gyro.motion.custom_filters?.some(filter=>filter.enabled))&&
+          <p className={settingStyles.notice}>角速度瞄准会跳过此配置中保存的脚本滤波和边缘转向。</p>}
         </>}
       </>}
       {passthrough?<>
@@ -105,7 +108,7 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
         <MotionBehavior profile={profile} update={update}/>
       </>}
       <SettingSection key={passthrough?'ds4':'aim'} id={passthrough?'motion-ds4-filters':'motion-filters'}
-        title={passthrough?'直通滤波':jsm?'采样时钟':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
+        title={passthrough?'直通滤波':jsm?'采样与校准':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
         summary={!passthrough&&!jsm&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
         {passthrough?<>
           <p className={styles.hint}>发送给虚拟 DS4 前可处理三轴角速度。加速度计数据沿用设备校准。</p>
@@ -119,7 +122,9 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
             onChange={use_custom_filters=>setDs4Filter({use_custom_filters})}
             help="在直通时应用下方已启用的 Rhai 脚本。"/>
         </>:<SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>}
-        {jsm?<p className={styles.hint}>JSM 直接处理校准后的采样。切回 Studio 可继续使用已保存的自定义滤波和边缘转向。</p>:<SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
+        {jsm?<Toggle label="自动校准陀螺仪偏移" value={gyro.jsm_response?.auto_calibrate_gyro??false}
+          onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,auto_calibrate_gyro:v};})}
+          help="手柄静止时自动估计陀螺仪的残余偏移。默认关闭。"/>:<SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
           <CustomFilters key={profileId} profile={profile} update={update} embedded rawGyroOnly={passthrough}
             running={(!passthrough||!!ds4Filter?.use_custom_filters)&&filtersRunning}
             statuses={filterStatuses}

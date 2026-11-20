@@ -142,7 +142,7 @@ fn smoothing(gyro: &Gyro) -> Vec<Point> {
         g.motion.decay_threshold = gyro.motion.decay_threshold;
         g.motion.one_euro_cutoff = gyro.motion.one_euro_cutoff;
         g.motion.one_euro_beta = gyro.motion.one_euro_beta;
-        crate::engine::jsm::JsmAim::new(&g)
+        crate::engine::jsm::JsmAim::new(&g, 0.)
     });
     (0..=200)
         .map(|index| {
@@ -154,7 +154,7 @@ fn smoothing(gyro: &Gyro) -> Vec<Point> {
                 _ => 0.,
             };
             let output = if let Some(jsm) = &mut native {
-                jsm.sample(Vec3::Z * (input / BUS_GYRO_DPS), None, 0.002, [false; 2]).x / 0.002
+                jsm.sample(Vec3::Z * (input / BUS_GYRO_DPS), None, 0.002, [false; 2], true).x / 0.002
             } else { filter.tick(gyro, Vec2::new(input, 0.), 0.002).x };
             [time_ms as f32, input, output]
         })

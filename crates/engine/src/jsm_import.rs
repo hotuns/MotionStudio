@@ -70,7 +70,7 @@ fn base(name: &str) -> Profile {
     let mut p: Profile = toml::from_str(include_str!("../../../examples/blank.toml")).unwrap();
     p.name = name.chars().take(100).collect();
     if p.name.trim().is_empty() {
-        p.name = "导入的 JSM 配置".into();
+        p.name = "导入的手柄配置".into();
     }
     // JSM RESET_MAPPINGS: gyro sensitivity is zero, calibration is 40, game sens is 1.
     p.gyro.counts_per_degree = 40.;
@@ -200,7 +200,7 @@ fn outputs(value: &str) -> Result<String> {
         bail!("缺少输出");
     }
     if tokens.len() > 1 && tokens.iter().any(|v| !v.ends_with('\\')) {
-        bail!("多个未标注输出在 JSM 中表示轻按／长按，不能转换为同时按下；请手动补配");
+        bail!("多个未标注的输出分别对应轻按和长按。请在动作映射中分开设置。");
     }
     let mut values = vec![];
     for token in tokens {
@@ -312,14 +312,14 @@ pub fn import(content: &str, filename: &str) -> Result<JsmImport> {
 }
 
 pub fn import_files(files: &[JsmFile]) -> Result<JsmImport> {
-    let (main, related) = files.split_first().context("请选择 JSM 主配置文件")?;
+    let (main, related) = files.split_first().context("请选择主配置文件")?;
     if !main.name.to_ascii_lowercase().ends_with(".toml") {
         return convert_files(files);
     }
     ensure!(related.is_empty(), "旧版配置已包含关联文件，请单独导入");
     ensure!(main.text.len() <= MAX_BYTES, "配置文件超过 512 KB");
-    let legacy: LegacyProfile = toml::from_str(&main.text).context("请选择旧版 JSM 原文配置")?;
-    ensure!(legacy.schema_version == 1, "请选择旧版 JSM 原文配置");
+    let legacy: LegacyProfile = toml::from_str(&main.text).context("请选择包含原始命令的旧版配置文件")?;
+    ensure!(legacy.schema_version == 1, "请选择包含原始命令的旧版配置文件");
     let mut report = convert_files(&legacy.jsm.files)?;
     report.profile.name = legacy.name.trim().chars().take(100).collect();
     report.profile.validate()?;
@@ -334,7 +334,7 @@ pub fn import_files(files: &[JsmFile]) -> Result<JsmImport> {
 fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
     ensure!(
         (1..=MAX_FILES).contains(&files.len()),
-        "JSM 配置需要 1–16 个文件"
+        "每次可导入 1–16 个配置文件"
     );
     let mut names = HashSet::new();
     let mut bytes = 0;
@@ -345,19 +345,19 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 && file.name.chars().count() <= 180
                 && !file.name.contains(['/', '\\'])
                 && !file.name.chars().any(char::is_control),
-            "JSM 文件名无效"
+            "配置文件名无效"
         );
         let name = jsm_tab_name(&file.name);
-        ensure!(!name.is_empty(), "JSM 文件名无效");
+        ensure!(!name.is_empty(), "配置文件名无效");
         ensure!(
             names.insert(name.to_ascii_lowercase()),
-            "JSM 文件名重复：{name}"
+            "多个配置文件使用了相同的名称「{name}」"
         );
         ensure!(!file.text.contains('\0'), "配置包含空字符，请选择文本配置");
         bytes += file.text.len();
         count += file.text.lines().count();
         ensure!(bytes <= MAX_BYTES, "配置文件超过 512 KB");
-        ensure!(count <= MAX_LINES, "JSM 配置最多 4096 行");
+        ensure!(count <= MAX_LINES, "配置文本合计最多 4096 行");
     }
     let filename = &files[0].name;
     // Flatten one level of explicitly supplied files at the reference site.
@@ -399,7 +399,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                     .map(|(index, line)| (related.name.as_str(), index + 1, line, false)),
             );
         }
-        ensure!(source.len() <= MAX_LINES, "JSM 配置最多 4096 行");
+        ensure!(source.len() <= MAX_LINES, "配置文本合计最多 4096 行");
     }
     let mut name = filename
         .rsplit_once('.')
@@ -545,7 +545,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
         let sticks = ["LEFT_STICK_MODE", "RIGHT_STICK_MODE"].map(|name| {
             settings.get(name).map(|s| s.value.as_str())
         });
-        let aim_mode = |mode| matches!(mode, Some("AIM" | "FLICK" | "FLICK_ONLY"));
+        let aim_mode = |mode| matches!(mode, Some("AIM" | "FLICK" | "FLICK_ONLY" | "ROTATE_ONLY"));
         let aim_stick = match sticks {
             [left, Some("RIGHT_STICK")] if aim_mode(left) => Some("left_stick"),
             [Some("LEFT_STICK"), right] if aim_mode(right) => Some("right_stick"),
@@ -779,21 +779,39 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "GYRO_SPACE" => {
                     g.motion.space = match v {
                         "LOCAL" => Space::PitchYaw,
+                        "YAW_PLUS_ROLL" => Space::YawPlusRoll,
                         "PLAYER" | "PLAYER_TURN" => Space::Player,
+                        "PLAYER_LEAN" => Space::PlayerLean,
+                        "WORLD_LEAN" => Space::WorldLean,
                         "WORLD" | "WORLD_TURN" => Space::World,
                         _ => bail!("此坐标模式暂不支持"),
                     };
-                    (v != "LOCAL").then_some("已转换到对应坐标模式；姿态估计与上游手感需真机核验")
+                    None
                 }
-                "MOUSE_X_FROM_GYRO_AXIS" => {
-                    g.motion.space = match v {
-                        "Y" => g.motion.space,
-                        "Z" if g.motion.space == Space::PitchYaw => Space::PitchRoll,
-                        _ => bail!("仅支持默认偏航或本地横滚轴"),
+                "MOUSE_X_FROM_GYRO_AXIS" | "MOUSE_Y_FROM_GYRO_AXIS" => {
+                    let cfg = jsm_compile(&format!("{} = {v}", s.key), &[]);
+                    ensure!(cfg.lines.first().is_some_and(|line| matches!(line.status, JsmLineStatus::Ok)), "命令参数无效");
+                    let horizontal = s.key == "MOUSE_X_FROM_GYRO_AXIS";
+                    let axis = if horizontal { cfg.aim.mouse_x_from } else { cfg.aim.mouse_y_from };
+                    let mask = u8::from(axis.x) | (u8::from(axis.y) << 1) | (u8::from(axis.z) << 2);
+                    if horizontal { g.jsm_response.mouse_x_axes = Some(mask); }
+                    else { g.jsm_response.mouse_y_axes = Some(mask); }
+                    None
+                }
+                "LOCAL_AXIS_OFFSET" => {
+                    g.motion.hold_angles[0] = scalar(v)?;
+                    None
+                }
+                "ROLL_CONTRIBUTION" => {
+                    g.motion.roll_contribution = scalar(v)?;
+                    None
+                }
+                "AUTO_CALIBRATE_GYRO" => {
+                    g.jsm_response.auto_calibrate_gyro = match v {
+                        "ON" => true, "OFF" => false, _ => bail!("需要 ON 或 OFF"),
                     };
                     None
                 }
-                "MOUSE_Y_FROM_GYRO_AXIS" if v == "X" => None,
                 "GYRO_AXIS_X" | "GYRO_AXIS_Y" => {
                     let invert = match v {
                         "STANDARD" | "1" => false,
@@ -820,7 +838,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 | "RIGHT_STICK_UNDEADZONE_OUTER" | "RIGHT_STICK_UNPOWER" => {
                     let cfg = jsm_compile(&format!("{} = {v}", s.key), &[]);
                     ensure!(cfg.lines.first().is_some_and(|l| matches!(l.status, JsmLineStatus::Ok)),
-                        "JSM 参数无效");
+                        "命令参数无效");
                     let right = cfg.pad.out[1];
                     match s.key.as_str() {
                         "GYRO_CUTOFF_RECOVERY" => g.jsm_response.cutoff_recovery_dps = cfg.aim.cutoff_recovery,
@@ -828,11 +846,11 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                         "RIGHT_STICK_UNDEADZONE_OUTER" => g.jsm_response.right_undeadzone_outer = right.undeadzone_outer,
                         _ => g.jsm_response.right_unpower = right.unpower,
                     }
-                    Some("参数已保存在 Studio 配置中，选择 JSM 原生瞄准引擎后生效")
+                    None
                 }
                 "GYRO_CUTOFF_SPEED" => {
                     g.motion.cutoff_dps = scalar(v)?;
-                    Some("已设置低速截止；平滑与截止恢复算法可能不同")
+                    None
                 }
                 "GYRO_SMOOTH_TIME" => {
                     let ms = scalar(v)? * 1000.;
@@ -840,7 +858,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                     if ms <= 50. {
                         g.smoothing_ms = ms;
                     }
-                    Some("JSM 使用导入的平滑窗口，Studio 平滑时间最多为 50 ms")
+                    None
                 }
                 "GYRO_SMOOTHING_DECAY" => {
                     g.motion.smoothing = match v {
@@ -849,7 +867,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                         _ => bail!("需要 ON 或 OFF"),
                     };
                     g.jsm_response.decay_smoothing = Some(v == "ON");
-                    Some("已保留 JSM 的阈值或衰减平滑方式")
+                    Some("已按原配置设置前置平滑方式")
                 }
                 "GYRO_SMOOTH_THRESHOLD" => {
                     let threshold = scalar(v)?;
@@ -857,7 +875,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                     if threshold >= 0.1 {
                         g.motion.decay_threshold = threshold;
                     }
-                    Some("JSM 使用导入的平滑阈值，设为 0 可关闭前置平滑")
+                    Some("已导入平滑阈值，设为 0 可关闭前置平滑")
                 }
                 "GYRO_ANGLE_SNAP" => {
                     g.motion.angle_snap = scalar(v)?;
@@ -882,7 +900,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "ONE_EURO_FILTER" => {
                     g.motion.smoothing = crate::motion_config::Smoothing::OneEuro;
                     g.jsm_response.one_euro = Some(true);
-                    Some("已启用 One Euro，在 JSM 中可与前置平滑同时使用")
+                    Some("已启用 One Euro，可与前置平滑叠加使用")
                 }
                 "ACCEL_CURVE" => {
                     g.acceleration.curve = match v {
@@ -894,7 +912,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                         "JUMP" => crate::motion_config::Curve::Jump,
                         _ => bail!("此加速曲线暂不支持"),
                     };
-                    Some("已转换曲线类型；非零 MIN_GYRO_THRESHOLD 下的曲线区间请核验")
+                    None
                 }
                 "ACCEL_NATURAL_VHALF" => {
                     g.acceleration.natural_half = scalar(v)?;
@@ -939,7 +957,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "STICK_DEADZONE_INNER" => {
                     p.stick_deadzone = scalar(v)?;
                     p.stick_mouse.deadzone = p.stick_deadzone;
-                    Some("统一用于方向映射与摇杆鼠标；外死区与特殊死区需核验")
+                    None
                 }
                 "LEFT_STICK_DEADZONE_INNER" | "RIGHT_STICK_DEADZONE_INNER" => {
                     let value = scalar(v)?;
@@ -948,6 +966,16 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                     } else {
                         p.input.deadzone_right = Some(value);
                     }
+                    None
+                }
+                "STICK_DEADZONE_OUTER" | "LEFT_STICK_DEADZONE_OUTER" | "RIGHT_STICK_DEADZONE_OUTER" => {
+                    // Apply the effective setting to the chosen thumb after its mode is resolved.
+                    let outer = scalar(v)?;
+                    ensure!((0. ..=0.95).contains(&outer), "命令参数无效");
+                    return Ok(None);
+                }
+                "ROTATE_SMOOTH_OVERRIDE" => {
+                    g.motion.flick.rotate_smooth_override = scalar(v)?;
                     None
                 }
                 "FLICK_TIME" => {
@@ -965,8 +993,8 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "FLICK_SNAP_MODE" => {
                     g.motion.flick.snap_mode = match v {
                         "NONE" => crate::motion_config::FlickSnap::None,
-                        "4" => crate::motion_config::FlickSnap::Four,
-                        "8" => crate::motion_config::FlickSnap::Eight,
+                        "4" | "FOUR" => crate::motion_config::FlickSnap::Four,
+                        "8" | "EIGHT" => crate::motion_config::FlickSnap::Eight,
                         _ => bail!("拨动角度吸附仅支持 NONE、4 或 8"),
                     };
                     None
@@ -982,7 +1010,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "LEFT_STICK_MODE" | "RIGHT_STICK_MODE" | "STICK_SENS" => return Ok(None), // Applied together below.
                 "AUTOCONNECT" | "AUTOLOAD" | "TELEMETRY_ENABLED" | "TELEMETRY_PORT"
                 | "TICK_TIME" | "LIGHT_BAR" | "RUMBLE" | "HIDE_MINIMIZED" | "JSM_DIRECTORY" => {
-                    bail!("JSM 程序设置不写入 Motion Studio 游戏配置")
+                    bail!("程序级设置已跳过")
                 }
                 _ => bail!("此设置、按住切换设置或输入暂不支持"),
             };
@@ -1004,7 +1032,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 &mut lines,
                 s.index,
                 "ignored",
-                "本机 JSM 程序设置，未执行也未写入游戏配置",
+                "已跳过仅适用于原程序的本机设置",
             );
         }
     }
@@ -1183,9 +1211,9 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
         let note = if full_disabled {
             full_note
         } else if approximate {
-            "已转为同时按住组合；原 JSM 的按下顺序／同时按压时间窗未保留"
+            "已转为同时按住组合，请核对按键顺序和同时按压的时间要求"
         } else if directional {
-            "已采用 JSM 八向重叠判定；斜向同时输出相邻两键，输入死区与其他摇杆模式需核验"
+            "已使用八向重叠判定。斜向同时输出相邻两键，请核对输入死区和其他摇杆模式。"
         } else if input.contains("stick_") {
             "已转为摇杆区域输入；区域边界需核验"
         } else if input == "touchpad" {
@@ -1226,8 +1254,8 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "LEFT_STICK" | "RIGHT_STICK" if p.virtual_gamepad != GamepadTarget::None => {
                     return Ok(None)
                 }
-                "AIM" | "FLICK" | "FLICK_ONLY" if !chosen => {}
-                "AIM" | "FLICK" | "FLICK_ONLY" => bail!("当前只能把一个摇杆用于瞄准／拨动，请手动选择"),
+                "AIM" | "FLICK" | "FLICK_ONLY" | "ROTATE_ONLY" if !chosen => {}
+                "AIM" | "FLICK" | "FLICK_ONLY" | "ROTATE_ONLY" => bail!("当前只能把一个摇杆用于瞄准／拨动，请手动选择"),
                 _ => bail!("该摇杆模式暂不能迁移"),
             }
             if gyro_blocked {
@@ -1240,8 +1268,9 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
             } else {
                 Stick::Right
             };
-            f.enabled = matches!(s.value.as_str(), "FLICK" | "FLICK_ONLY");
+            f.enabled = matches!(s.value.as_str(), "FLICK" | "FLICK_ONLY" | "ROTATE_ONLY");
             f.only = s.value == "FLICK_ONLY";
+            f.rotate_only = s.value == "ROTATE_ONLY";
             if f.enabled {
                 f.release_ease = 0.5;
             }
@@ -1258,9 +1287,18 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
                 "已转换为摇杆瞄准／拨动；摇杆加速度、门限和独立轴设置需核验",
             ))
         });
-        if lines[s.index].status != "skipped" && matches!(s.value.as_str(), "AIM" | "FLICK" | "FLICK_ONLY") {
+        if lines[s.index].status != "skipped" && matches!(s.value.as_str(), "AIM" | "FLICK" | "FLICK_ONLY" | "ROTATE_ONLY") {
             chosen = true;
         }
+    }
+    // Outer-deadzone assignments apply in file order, including shared assignments.
+    let side_outer = if p.gyro.motion.flick.stick == Stick::Left { "LEFT_STICK_DEADZONE_OUTER" } else { "RIGHT_STICK_DEADZONE_OUTER" };
+    let outer = ["STICK_DEADZONE_OUTER", side_outer, "FLICK_THRESHOLD"].into_iter()
+        .filter_map(|key| settings.get(key))
+        .filter(|setting| lines[setting.index].status != "skipped")
+        .max_by_key(|setting| setting.index);
+    if let Some(setting) = outer.filter(|setting| setting.key != "FLICK_THRESHOLD") {
+        p.gyro.motion.flick.deadzone = 1. - scalar(&setting.value)?;
     }
     if let Some(s) = settings.get("STICK_SENS") {
         if p.gyro.motion.flick.enabled && !aim_requested {
@@ -1304,7 +1342,7 @@ fn convert_files(files: &[JsmFile]) -> Result<JsmImport> {
     p.materialize_gamepad_bindings();
     p.validate().context("转换后的配置校验失败")?;
     if lines.is_empty() {
-        bail!("没有找到 JSM 配置命令");
+        bail!("没有找到可转换的配置命令");
     }
     let converted = lines.iter().filter(|l| l.status == "converted").count();
     let approximate = lines.iter().filter(|l| l.status == "approximate").count();

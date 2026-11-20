@@ -176,7 +176,6 @@
   "转角缓出强度": "Flick ease-out strength",
   "转角缓出强度滑块": "Flick ease-out strength slider",
   "Flick 缓出强度": "Flick ease-out strength",
-  "0% 匀速释放，50% 使用 JSM 缓出（默认）。高于 50% 起步更快，100% 使用三次缓出。": "0% releases at a constant rate. 50% uses JSM ease-out (default). Above 50%, the turn starts faster. 100% uses cubic ease-out.",
   "匀速参考": "Linear reference",
   "当前释放曲线": "Current release curve",
   "Flick 转角释放": "Flick angle release",

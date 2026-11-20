@@ -6,6 +6,12 @@ const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const sha=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
 const vendorRoot=resolve(root,'vendor/flexinput');
 const manifest=JSON.parse(readFileSync(resolve(vendorRoot,'manifest.json'),'utf8'));
+const motionRoot=resolve(root,'vendor/gamepadmotionhelpers');
+const motion=JSON.parse(readFileSync(resolve(motionRoot,'manifest.json'),'utf8'));
+for(const [name,hash] of Object.entries(motion.files)){
+  if(sha(resolve(motionRoot,name))!==hash)throw new Error('GamepadMotionHelpers source integrity check failed: '+name);
+}
+if(sha(resolve(root,'licenses/GamepadMotionHelpers-MIT.txt'))!==motion.files.LICENSE)throw new Error('GamepadMotionHelpers distribution license mismatch');
 const modelRoot=resolve(root,'src/studio/controller-models');
 const modelManifest=JSON.parse(readFileSync(resolve(modelRoot,'manifest.json'),'utf8'));
 const { app: { security: { csp } } }=JSON.parse(readFileSync(resolve(root,'src-tauri/tauri.conf.json'),'utf8'));

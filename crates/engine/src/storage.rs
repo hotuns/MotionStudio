@@ -360,7 +360,7 @@ pub fn decode_profile(text: &str) -> Result<Profile> {
         }
         Err(error) => {
             if toml::from_str::<toml::Table>(text).is_ok_and(|table| table.contains_key("jsm")) {
-                bail!("旧版 JSM 配置需要转换。请在「导入 JSM 配置」中选择此 TOML 文件");
+                bail!("这份旧版配置需要转换。请在「导入文本配置」中选择此 TOML 文件。");
             }
             Err(error).context("配置格式错误")
         }

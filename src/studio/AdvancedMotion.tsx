@@ -1,7 +1,7 @@
 import {memo} from 'react';
 import type { MotionConfig, Profile } from '../types';
 import {useLanguage} from '../i18n';
-import {usesJsmAim} from '../motion-presets';
+import {nativeSmoothing,usesJsmAim} from '../motion-presets';
 import { Range, Toggle } from './Controls';
 import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
 import {PadInputPicker} from './PadInputPicker';
@@ -25,21 +25,49 @@ function ControlInput({label,value,onChange}:{label:string;value:string|null;onC
     groups={[{options:[{value:'',label:'不设置'}]}, ...padChoices()]} onChange={v=>onChange(v||null)}/></div></SettingField>;
 }
 const sticks:[string,string][]=[['right','右摇杆'],['left','左摇杆']];
-const spaces:[string,string][]=[['pitch_yaw','本地：俯仰与偏航'],['pitch_roll','本地：俯仰与横滚'],['player','玩家坐标'],['world','世界坐标']];
+const localSpaces = [['pitch_yaw','本地：俯仰与偏航'],['pitch_roll','本地：俯仰与横滚']] as const;
+const aimSpaces = [['pitch_yaw','本地坐标'], ['yaw_plus_roll','偏航与横滚合成'], ['player','玩家空间（转动）'], ['player_lean','玩家空间（侧倾）'],
+  ['world','世界空间（转动）'], ['world_lean','世界空间（侧倾）']] as const;
+const postureSpaces = [...localSpaces, ['player','玩家坐标'], ['world','世界坐标']] as const;
+const axisOptions = [['0','关闭'], ['1','X'], ['2','Y'], ['4','Z'], ['3','X + Y'], ['5','X + Z'], ['6','Y + Z'], ['7','X + Y + Z']] as const;
+const spaceHelp = {
+  player: '左右转动手柄控制水平瞄准，上下瞄准跟随手柄自身的俯仰。',
+  player_lean: '向两侧倾斜手柄控制水平瞄准，上下瞄准跟随手柄自身的俯仰。',
+  world: '绕重力竖轴转动控制水平瞄准，上下瞄准也以地面为参考。',
+  world_lean: '向两侧倾斜手柄控制水平瞄准，水平和垂直两个方向都以地面为参考。',
+};
 const mutate=(update:MotionUpdate,key:string,value:unknown)=>update(p=>{(p.gyro.motion as unknown as Record<string,unknown>)[key]=value;});
-const nested=(update:MotionUpdate,group:'edge'|'rotation'|'flick'|'trackball',key:string,value:unknown)=>update(p=>{(p.gyro.motion[group] as unknown as Record<string,unknown>)[key]=value;});
+const nested=(update:MotionUpdate,group:'rotation'|'flick'|'trackball',key:string,value:unknown)=>update(p=>{(p.gyro.motion[group] as unknown as Record<string,unknown>)[key]=value;});
 
 export function MotionBehavior({profile,update}:Props) {
   const m=profile.gyro.motion;const set=(k:string,v:unknown)=>mutate(update,k,v);
   const jsm=usesJsmAim(profile.gyro);
+  const spaces=jsm?aimSpaces:postureSpaces;
+  const space=jsm?(m.space==='pitch_roll'?'pitch_yaw':m.space):({player_lean:'player',world_lean:'world',yaw_plus_roll:'pitch_yaw'} as Record<string,string>)[m.space]??m.space;
+  const local=space.startsWith('pitch_');
+  const response=profile.gyro.jsm_response;
+  const setAxis=(key:'mouse_x_axes'|'mouse_y_axes',value:string)=>update(p=>{
+    p.gyro.jsm_response={...p.gyro.jsm_response,[key]:Number(value)};
+  });
   return <>
-    <SettingSection id="motion-direction" title="方向与握持方式" summary={spaces.find(([value])=>value===m.space)?.[1]}>
-      <Choice label="体感坐标" value={m.space} options={spaces} onChange={v=>set('space',v)}/>
-      <p className={styles.hint}>{jsm?'JSM 的玩家和世界坐标都使用加速度计估计重力方向。':'玩家和世界坐标依靠加速度计估计重力方向。世界坐标的重力参考变化更缓慢。'}</p>
+    <SettingSection id="motion-direction" title="方向与握持方式" summary={spaces.find(([value])=>value===space)?.[1]}>
+      <Choice label="体感坐标" value={space} options={spaces} onChange={v=>update(p=>{
+        if(jsm&&p.gyro.motion.space==='pitch_roll'&&p.gyro.jsm_response?.mouse_x_axes==null) {
+          p.gyro.jsm_response={...p.gyro.jsm_response,mouse_x_axes:4};
+        }
+        p.gyro.motion.space=v as MotionConfig['space'];
+      })}/>
+      {jsm&&space in spaceHelp&&<p className={styles.hint}>{spaceHelp[space as keyof typeof spaceHelp]}</p>}
+      {jsm&&local&&<div className={settingStyles.columns}>
+        <Choice label="水平瞄准输入轴" settingPath="gyro.jsm_response.mouse_x_axes"
+          value={String(response?.mouse_x_axes??(m.space==='pitch_roll'?4:2))} options={axisOptions} onChange={v=>setAxis('mouse_x_axes',v)}/>
+        <Choice label="垂直瞄准输入轴" settingPath="gyro.jsm_response.mouse_y_axes"
+          value={String(response?.mouse_y_axes??1)} options={axisOptions} onChange={v=>setAxis('mouse_y_axes',v)}/>
+      </div>}
       <Toggle label="反转垂直方向" value={profile.gyro.invert_y} onChange={v=>update(p=>{p.gyro.invert_y=v;})}/>
       <Toggle label="反转水平方向" value={m.invert_x} onChange={v=>set('invert_x',v)}/>
-      {m.space==='pitch_yaw'&&<Range label="横滚参与水平转向" value={m.roll_contribution} min={-100} max={100} step={1} unit="%" onChange={v=>set('roll_contribution',v)}/>}
-      {(!jsm||m.space.startsWith('pitch_'))&&<SettingField label="习惯握持角度" path="gyro.motion.hold_angles">
+      {(jsm?space==='yaw_plus_roll':space==='pitch_yaw')&&<Range label="横滚参与水平转向" value={m.roll_contribution} min={-100} max={100} step={1} unit="%" onChange={v=>set('roll_contribution',v)}/>}
+      {(!jsm||local)&&<SettingField label="习惯握持角度" path="gyro.motion.hold_angles">
         {(jsm?['俯仰']:['俯仰','偏航','横滚']).map((label,i)=><Range key={label} label={label+'补偿'} settingPath={[]} slider={false} value={m.hold_angles[i]} min={-180} max={180} step={1} unit="°" onChange={v=>update(p=>{p.gyro.motion.hold_angles[i]=v;})}/>)}
       </SettingField>}
     </SettingSection>
@@ -59,7 +87,6 @@ export function MotionBehavior({profile,update}:Props) {
         <ControlInput label="保持垂直惯性" value={m.trackball.vertical_input} onChange={v=>nested(update,'trackball','vertical_input',v)}/>
         <Range label="惯性衰减" value={m.trackball.decay} min={0} max={20} step={0.1} onChange={v=>nested(update,'trackball','decay',v)} help="按住指定按键后沿之前的方向继续转动；0 表示保持速度。松开后恢复手腕控制。"/>
     </SettingSection>
-    {!jsm&&<EdgeTurning profile={profile} update={update}/>}
   </>;
 }
 export function AccelerationSettings({profile,update}:Props) {
@@ -77,7 +104,7 @@ export function AccelerationSettings({profile,update}:Props) {
       <Range label="达到最高倍率" value={a.full_dps} min={1} max={2000} step={1} unit=" °/s" slider={false} onChange={v=>set('full_dps',v)}/>
     </>}
     <Choice label="加速度曲线" value={jsm&&a.curve==='custom'?'linear':a.curve} options={curves} onChange={v=>set('curve',v)}/>
-    {jsm&&a.curve==='custom'&&<p className={styles.hint}>此配置保存了 Studio 自定义控制点，JSM 当前使用线性加速。</p>}
+    {jsm&&a.curve==='custom'&&<p className={styles.hint}>这份配置保存了自定义控制点，角速度瞄准当前使用线性曲线。</p>}
     {a.curve==='natural'&&<Numbers object={a} specs={[["natural_half","达到半程倍率的速度",0.01,4000,1," °/s"]]} onChange={set}/>}
     {a.curve==='power'&&<Numbers object={a} specs={[["power_reference","参考转速",0.01,4000,1," °/s"],["power_exponent","幂指数",0.01,10,0.1]]} onChange={set}/>}
     {a.curve==='sigmoid'&&<Numbers object={a} specs={[["sigmoid_mid","过渡中点",0,4000,1," °/s"],["sigmoid_width","过渡宽度",0.01,2000,1," °/s"]]} onChange={set}/>}
@@ -91,8 +118,7 @@ export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Prop
   const m = gyro.motion;
   const jsm=usesJsmAim(gyro);
   const response=gyro.jsm_response;
-  const nativeWindow=response?.smooth_time_ms??(m.smoothing==='one_euro'?0:gyro.smoothing_ms);
-  const nativeDecay=response?.decay_smoothing??(m.smoothing==='decay');
+  const {window:nativeWindow,threshold:nativeThreshold,decay:nativeDecay}=nativeSmoothing(gyro);
   const oneEuro=jsm?(response?.one_euro??(m.smoothing==='one_euro')):m.smoothing==='one_euro';
   const setResponse=(change:NonNullable<typeof response>)=>update(p=>{
     p.gyro.jsm_response={...p.gyro.jsm_response,...change};
@@ -111,16 +137,16 @@ export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Prop
     {m.mode==='steering' && <p className="studio-muted">姿态控制摇杆模式下，角速度曲线用于对照，倾斜误差曲线展示姿态估计。</p>}
 
     <SettingSection id="motion-smoothing" title="防抖与平滑" defaultOpen
-      summary={jsm?<>{nativeDecay?'Decay':'JSM 阈值平滑'} · {nativeWindow} ms{oneEuro?' + One Euro':''}</>
+      summary={jsm?<>{nativeDecay?'Decay':'阈值平滑'} · {nativeWindow} ms{oneEuro?' + One Euro':''}</>
         :oneEuro?<>One Euro · {m.one_euro_cutoff} Hz</>:<>{m.smoothing==='ema'?'EMA':'Decay'} · {gyro.smoothing_ms} ms</>}>
       <div className={settingStyles.columns + ' ' + styles.smoothingPair}>
         <div>
           {jsm?<>
-            <Choice label="JSM 前置平滑" value={nativeDecay?'decay':'rolling'}
-              options={[['rolling','JSM 阈值平滑'],['decay','随速度衰减的平滑']]} onChange={v=>setResponse({decay_smoothing:v==='decay'})}/>
-            <Range label="JSM 平滑窗口" value={nativeWindow} min={0} max={2000} step={1} unit=" ms" slider={false}
+            <Choice label="前置平滑方式" value={nativeDecay?'decay':'rolling'}
+              options={[['rolling','阈值平滑'],['decay','随速度衰减的平滑']]} onChange={v=>setResponse({decay_smoothing:v==='decay'})}/>
+            <Range label="平滑窗口" value={nativeWindow} min={0} max={2000} step={1} unit=" ms" slider={false}
               onChange={v=>setResponse({smooth_time_ms:v})}/>
-            <Range label="JSM 平滑阈值" value={response?.smooth_threshold_dps??m.decay_threshold} min={0} max={2000} step={0.1} unit=" °/s" slider={false}
+            <Range label="平滑阈值" value={nativeThreshold} min={0} max={2000} step={0.1} unit=" °/s" slider={false}
               onChange={v=>setResponse({smooth_threshold_dps:v})} help="转速达到阈值后直接响应。窗口或阈值为 0 时关闭前置平滑。"/>
             <Toggle label="叠加 One Euro 滤波" value={oneEuro} onChange={v=>setResponse({one_euro:v})}/>
           </>:<>
@@ -140,7 +166,7 @@ export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Prop
     <SettingSection id="motion-idle" title="静止抑制与恢复" summary={jsm?<>{m.cutoff_dps} °/s</>:<>{gyro.noise_threshold} °/s · {m.recovery_ms} ms</>}>
       {jsm?<div className={settingStyles.columns}><div>
         <Numbers object={m} specs={[["cutoff_dps","低速截止",0,100,0.1," °/s"]]} onChange={set}/>
-        <Range label="JSM 完全恢复转速" value={gyro.jsm_response?.cutoff_recovery_dps??0} min={0} max={2000} step={0.1} unit=" °/s" slider={false}
+        <Range label="完全恢复转速" value={gyro.jsm_response?.cutoff_recovery_dps??0} min={0} max={2000} step={0.1} unit=" °/s" slider={false}
           onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,cutoff_recovery_dps:v};})}
           help="高于低速截止时，两者之间的角速度会逐步恢复到完整输出。"/>
       </div><ResponseCurve title="低速抑制曲线" points={curves?.idle} xLabel="输入转速（°/s）" yLabel="稳态输出转速（°/s）"/></div>:<div className={styles.stabilityGrid}>
@@ -214,20 +240,6 @@ export function AdvancedTurning({profile,update}:Props) {
     </>}
   </>;
 }
-function EdgeTurning({profile,update}:Props) {
-  const m=profile.gyro.motion;
-  return <SettingSection id="motion-edge" title="边缘持续转向" summary={m.edge.mode==='off'?'关闭':'已启用'}>
-      {m.mode==='pointer'?<>
-        <Choice label="边缘转向方式" value={m.edge.mode} options={[["off","关闭"],["ramp","随转角提速"],["momentum","保持出界速度"],["both","提速与惯性"]]} onChange={v=>nested(update,'edge','mode',v)}/>
-        {m.edge.mode!=='off'&&<>
-          <Numbers object={m.edge} specs={[["zone","开始持续转向的角度",0,170,1,"°"],["blend","接管过渡区间",0,170,1,"°"],["ramp","达到最大速度的区间",0,170,1,"°"],["max_dps","最大持续转速",0,4000,1," °/s"],["momentum","出界速度保留倍率",0,10,0.1,"×"],["decay_s","惯性衰减时间",0,30,0.1," s"],["gyro_keep","边缘处保留手腕控制",0,1,0.05]]} onChange={(k,v)=>nested(update,'edge',k,v)}/>
-          <Toggle label="只作用于水平方向" value={m.edge.horizontal_only} onChange={v=>nested(update,'edge','horizontal_only',v)}/>
-          <p className={styles.hint}>先用姿态归零键确定中立位。手腕超过边界后继续转向，向中心回拉可制动。</p>
-        </>}
-      </>:<p className={styles.hint}>在「控制方式与姿态」选择角速度瞄准后，可配置边缘转向。</p>}
-    </SettingSection>;
-}
-
 export function FlickStickSettings({profile,update}:Props) {
   if(profile.gyro.output==='ds4_imu')return <SettingSection id="flick-main" title="快速转向" summary="传感器直通期间停用">
     <p className={styles.hint}>切换到鼠标或虚拟右摇杆体感输出后，可使用拨动和配套摇杆瞄准。</p>
@@ -239,65 +251,42 @@ export function FlickStickSettings({profile,update}:Props) {
     flick[key]=value;
     if(value)flick[key==='enable_input'?'pause_input':'enable_input']=null;
   });
-  const active=f.enabled||f.stick_aim;
-  const jsm=usesJsmAim(profile.gyro);
-  const nativePad=jsm&&profile.gyro.output==='right_stick';
-  const continuous=f.stick_aim&&(!jsm||!f.enabled);
-  const release=Math.min(f.deadzone,Math.max(Math.min(0.15,f.deadzone),f.deadzone*(f.release_ratio??0.5)));
-  return <SettingSection id="flick-main" title="快速转向" defaultOpen
-    summary={active?<>{f.enabled?<>{f.only?'仅拨动':'拨动／转动'}{!nativePad&&<> · {f.smooth_ms} ms</>}</>:null}{f.enabled&&continuous?' · ':null}{continuous?'配套摇杆瞄准':null}</>:'关闭'}>
-      {jsm?<Choice label="JSM 摇杆模式" value={f.enabled?'flick':continuous?'aim':'off'}
-        settingPath={['gyro.motion.flick.enabled','gyro.motion.flick.stick_aim']}
-        options={[['off','关闭'],['flick','拨动／转动'],['aim','连续摇杆瞄准']]}
-        onChange={mode=>update(p=>{p.gyro.motion.flick.enabled=mode==='flick';p.gyro.motion.flick.stick_aim=mode==='aim';})}/>:<div className={styles.flickSwitches}>
-        <Toggle label="启用拨动／转动" value={f.enabled} onChange={v=>change('enabled',v)}/>
-        <Toggle label="启用配套摇杆瞄准" value={f.stick_aim} onChange={v=>change('stick_aim',v)}/>
-      </div>}
+  const mode=f.enabled?(f.rotate_only?'rotate_only':f.only?'flick_only':'flick'):f.stick_aim?'aim':'off';
+  const active=mode!=='off';
+  const nativePad=profile.gyro.output==='right_stick';
+  const continuous=mode==='aim';
+  const modes=[['off','关闭'],['flick','拨动／转动'],['flick_only','仅拨动'],['rotate_only','仅转动'],['aim','连续摇杆瞄准']] as const;
+  return <SettingSection id="flick-main" title="快速转向" defaultOpen summary={modes.find(([value])=>value===mode)?.[1]}>
+      <Choice label="摇杆模式" value={mode} options={modes}
+        settingPath={['gyro.motion.flick.enabled','gyro.motion.flick.only','gyro.motion.flick.rotate_only','gyro.motion.flick.stick_aim']}
+        onChange={v=>update(p=>{Object.assign(p.gyro.motion.flick,{
+          enabled:v==='flick'||v==='flick_only'||v==='rotate_only', only:v==='flick_only', rotate_only:v==='rotate_only', stick_aim:v==='aim',
+        });})}/>
       {active&&<Choice label="拨动使用的摇杆" value={f.stick} options={sticks} onChange={v=>change('stick',v)}/>}
       {f.enabled&&<>
-      <section className={styles.flickGroup}>
+      <Range label="拨动转身阈值" value={f.deadzone} min={0.05} max={1} step={0.01} onChange={v=>change('deadzone',v)}/>
+      {!f.rotate_only&&<section className={styles.flickGroup}>
         <h3>拨动</h3>
-        <p className={styles.hint}>拨动选择朝向，沿摇杆外圈转动控制镜头。</p>
-        <Toggle label="仅拨动（关闭外圈转动）" value={f.only??false} onChange={v=>change('only',v)}
-          help={jsm?'启用后只响应初始拨动。回中后可再次拨动。':'拨动摇杆时转到目标方向；保持在外圈并转动时不再转向。回中后可以再次拨动。配套摇杆瞄准独立设置。'}/>
+        <Numbers object={f} specs={[["forward_deadzone","正前方死角",0,180,1,"°"]]} onChange={change}/>
         <Choice label="拨动角度吸附" value={f.snap_mode??'none'}
           options={[["none","不吸附"],["four","四向（每 90°）"],["eight","八向（每 45°）"]]} onChange={v=>change('snap_mode',v)}/>
         {(f.snap_mode??'none')!=='none'&&<Range label="拨动角度吸附强度" value={(f.snap_strength??1)*100} min={0} max={100} step={1} unit="%"
           onChange={v=>change('snap_strength',v/100)} help="100% 对齐最近方向，0% 保留原始角度，中间值柔和偏向最近方向。只作用于初始拨动，转动保持连续。"/>}
-        <Range label="拨动转身阈值" value={f.deadzone} min={0.05} max={0.99} step={0.01} onChange={v=>change('deadzone',v)}/>
-        {nativePad?<p className={styles.hint}>{`JSM 按游戏满杆角速度输出。以当前校准值转过 90° 约需 ${Math.round(90000/profile.gyro.stick_full_scale_dps)} ms。`}</p>:<div className={settingStyles.columns}>
+        {nativePad?<p className={styles.hint}>{`按当前游戏满杆角速度，转过 90° 约需 ${Math.round(90000/profile.gyro.stick_full_scale_dps)} ms。`}</p>:<div className={settingStyles.columns}>
           <div>
             <Numbers object={f} specs={[["smooth_ms","180° 基准释放时间",0,2000,1," ms"]]} onChange={change}/>
             <Range label="按转角调整时间" value={f.time_exponent??0} min={0} max={2} step={0.05} onChange={v=>change('time_exponent',v)}
               help="时间指数：0 为固定时间（默认），1 按转角等比例缩短，2 让小角度转身更快。上方释放时间以 180° 为基准，只影响初始拨动，不影响转动。"/>
             <p className={styles.hint}>预计转角释放时间：45° {Number((f.smooth_ms*Math.pow(0.25,f.time_exponent??0)).toFixed(1))} ms · 90° {Number((f.smooth_ms*Math.pow(0.5,f.time_exponent??0)).toFixed(1))} ms · 180° {f.smooth_ms} ms</p>
-            {!jsm&&<Range label="转角缓出强度" value={(f.release_ease??0.5)*100} min={0} max={100} step={1} unit="%" onChange={v=>change('release_ease',v/100)}
-              help="0% 匀速释放，50% 使用 JSM 缓出（默认）。高于 50% 起步更快，100% 使用三次缓出。"/>}
           </div>
-          <div><FlickReleaseCurve strength={jsm?0.5:f.release_ease??0.5}/></div>
+          <div><FlickReleaseCurve strength={0.5}/></div>
         </div>}
-        {!nativePad&&<p className={styles.hint}>{profile.gyro.output==='right_stick'
-          ? '预计时间表示转角释放时间；游戏完成转身仍受实际满杆速度限制。释放时间为 0 时立即提交全部转角。'
-          : '释放时间为 0 时立即输出全部转角。'}</p>}
-      </section>
-      {!jsm&&<section className={styles.flickGroup}>
-        <h3>转动与回中</h3>
-        <Range label="追踪下限比例" value={(f.release_ratio??0.5)*100} min={0} max={100} step={1} unit="%" onChange={v=>change('release_ratio',v/100)}
-          help="按拨动转身阈值的比例计算，默认 50%。比例越高，转动时越要贴近外圈。100% 时追踪下限等于触发阈值。"/>
-        <p className={styles.hint}>实际追踪下限 {Number((release*100).toFixed(1))}%</p>
-        <p className={styles.hint}>低于最小追踪幅度时按最小值限制，避免接近中心时方向不稳定。</p>
-        <Range label="拨动退出延时" value={f.disengage_ms??10} min={0} max={60} step={1} unit=" ms" slider={false} onChange={v=>change('disengage_ms',v)}
-          help="摇杆持续低于追踪下限后，才允许下一次拨动转身。默认 10 ms，设为 0 则立即退出。"/>
-        {!f.only&&<Numbers object={f} specs={[["stabilise_ms","转动方向稳定",0,1000,1," ms"]]} onChange={change}/>}
       </section>}
-      <section className={styles.flickGroup}>
-        <h3>拨动判定</h3>
-        <Numbers object={f} specs={[["forward_deadzone","正前方死角",0,180,1,"°"]]} onChange={change}/>
-        {jsm?<p className={styles.hint}>达到阈值触发拨动，低于阈值的 90% 后可以再次拨动。</p>:<>
-          <Numbers object={f} specs={[["speed_gate_ms","拨动判定时间",0,2000,1," ms"]]} onChange={change}/>
-          <Toggle label="慢推锁定为连续瞄准" value={f.slow_lock} onChange={v=>change('slow_lock',v)}/>
-        </>}
-      </section>
+      {!f.only&&<section className={styles.flickGroup}>
+        <h3>转动</h3>
+        <Range label="外圈转动平滑阈值" value={f.rotate_smooth_override??-1} min={-1} max={3.14} step={0.01} slider={false}
+          onChange={v=>change('rotate_smooth_override',v)} help="单位为弧度。负值使用默认阈值，设为 0 可关闭外圈转动平滑。"/>
+      </section>}
       </>}
       {continuous&&<section className={styles.flickGroup}>
         <h3>配套摇杆瞄准</h3>
@@ -374,10 +363,10 @@ export const MotionOutputSettings = memo(function MotionOutputSettings({profile,
     </>}
     {showStickScale&&<Range label="游戏满杆角速度" value={gyro.stick_full_scale_dps} min={30} max={1440} step={1} unit=" °/s" slider={false}
       onChange={v=>update(p=>{p.gyro.stick_full_scale_dps=v;})} help="填写游戏实际满杆时的转向速度，用于将目标转角换算成摇杆输出。提高这里的值不会让游戏转得更快。"/>}
-    {showStickScale&&usesJsmAim(gyro)&&<>
+    {showStickScale&&!passthrough&&(usesJsmAim(gyro)||gyro.motion.flick.enabled||gyro.motion.flick.stick_aim)&&<>
       <Range label="右摇杆内死区补偿" value={(gyro.jsm_response?.right_undeadzone_inner??0)*100} min={0} max={99-Math.round((gyro.jsm_response?.right_undeadzone_outer??0)*100)} step={1} unit="%"
         onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_undeadzone_inner:v/100};})}
-        help="填入游戏忽略的中心范围。JSM 会将静止输出放在该边界，方便观察游戏是否开始转动。"/>
+        help="填入游戏忽略的摇杆中心范围。手柄静止时，输出会停在这个边界，方便观察镜头是否开始转动。"/>
       <Range label="右摇杆外死区补偿" value={(gyro.jsm_response?.right_undeadzone_outer??0)*100} min={0} max={99-Math.round((gyro.jsm_response?.right_undeadzone_inner??0)*100)} step={1} unit="%"
         onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_undeadzone_outer:v/100};})}/>
       <Range label="右摇杆响应指数" value={gyro.jsm_response?.right_unpower??0} min={0} max={10} step={0.05}

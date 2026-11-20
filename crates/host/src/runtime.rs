@@ -204,7 +204,6 @@ impl Runtime {
             status.output_preview = self.output.as_ref().map(Dispatcher::preview);
             status.mapping = self.engine.as_ref().map(Engine::mapping_status).unwrap_or_default();
         }
-        status.motion.aim_engine = self.engine.as_ref().and_then(Engine::aiming_engine);
         status.motion.filters = self
             .engine
             .as_ref()
@@ -1566,11 +1565,6 @@ impl Runtime {
         }
         if controls_event && !from_snapshot {
             self.sync_layers()?;
-            if !self.output_paused() {
-                if let Some(engine) = &mut self.engine {
-                    engine.advance_flick_input();
-                }
-            }
         }
         if !self.output_paused() && !self.seeding {
             if let Some(engine) = &self.engine {

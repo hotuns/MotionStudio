@@ -20,22 +20,22 @@ export type FilterStatus={id:string;name:string;stage:FilterStage;enabled:boolea
 export type FilterPreview={points:{t:number;input:number[];output:number[]}[];status:FilterStatus};
 export type TurnBinding={name:string;input:string;degrees:number;duration_ms:number;output:AimOutput};
 export type SensorCalibration={accel_offset:number[];accel_scale:number[];gyro_sign:number[];accel_sign:number[];mounting:number[];gyro_noise_dps:number;accel_noise_g:number;accel_faces:(number|null)[][]};
-export type MotionTelemetry={aim_engine?:Gyro['aim_engine'];filters?:FilterStatus[];accel_g:number[];accel_fresh:boolean;orientation:number[];orientation_quat?:[number,number,number,number]|null;quantities:number[];rotation_offset:number;rotation_taken:boolean;measured_degrees:number;measurement_peak:number;measuring:string|null;measurement_error:string|null};
+export type MotionTelemetry={filters?:FilterStatus[];accel_g:number[];accel_fresh:boolean;orientation:number[];orientation_quat?:[number,number,number,number]|null;quantities:number[];rotation_offset:number;rotation_taken:boolean;measured_degrees:number;measurement_peak:number;measuring:string|null;measurement_error:string|null};
 export type MotionConfig={
-  space:'pitch_yaw'|'pitch_roll'|'player'|'world';mode:'pointer'|'steering'|'stick_rotation';
+  space:'pitch_yaw'|'pitch_roll'|'yaw_plus_roll'|'player'|'player_lean'|'world'|'world_lean';mode:'pointer'|'steering'|'stick_rotation';
   hold_angles:number[];roll_contribution:number;invert_x:boolean;reset_input:string|null;neutral_input:string|null;
   steering_range:number;steering_exclude_y:boolean;recenter_strength:number;reset_ease_ms:number;drift_correction:boolean;
   smoothing:'ema'|'decay'|'one_euro';decay_threshold:number;one_euro_cutoff:number;one_euro_beta:number;
   angle_snap:number;angle_snap_ease:boolean;brake_strength:number;brake_threshold:number;cutoff_dps:number;recovery_ms:number;noise_gate:number;
   edge:{mode:'off'|'ramp'|'momentum'|'both';zone:number;blend:number;ramp:number;max_dps:number;momentum:number;decay_s:number;gyro_keep:number;horizontal_only:boolean};
   rotation:{stick:'right'|'left';sensitivity:number;deadzone:number;smooth_ms:number;relative:boolean;return_ms:number;takeover:boolean;takeover_dps:number;outer:number};
-  flick:{enabled:boolean;only?:boolean;snap_mode?:'none'|'four'|'eight';snap_strength?:number;standalone?:boolean;stick:'right'|'left';enable_input:string|null;pause_input?:string|null;deadzone:number;release_ratio?:number;disengage_ms?:number;time_exponent?:number;smooth_ms:number;release_ease:number;forward_deadzone:number;stabilise_ms:number;speed_gate_ms:number;slow_lock:boolean;suppress:'full'|'deadzone'|'off';stick_aim:boolean;aim_sensitivity:number;max_dps:number;vertical_ratio:number};
+  flick:{enabled:boolean;only?:boolean;rotate_only?:boolean;rotate_smooth_override?:number;snap_mode?:'none'|'four'|'eight';snap_strength?:number;standalone?:boolean;stick:'right'|'left';enable_input:string|null;pause_input?:string|null;deadzone:number;release_ratio?:number;disengage_ms?:number;time_exponent?:number;smooth_ms:number;release_ease:number;forward_deadzone:number;stabilise_ms:number;speed_gate_ms:number;slow_lock:boolean;suppress:'full'|'deadzone'|'off';stick_aim:boolean;aim_sensitivity:number;max_dps:number;vertical_ratio:number};
   trackball:{horizontal_input:string|null;vertical_input:string|null;decay:number};bindings:MotionBinding[];turns:TurnBinding[];custom_filters?:CustomFilter[];
 };
 export type Gyro = {
   enabled:boolean;
-  aim_engine?:'studio'|'jsm';
   jsm_response?:{
+    auto_calibrate_gyro?:boolean; mouse_x_axes?:number|null; mouse_y_axes?:number|null;
     smooth_time_ms?:number; smooth_threshold_dps?:number; decay_smoothing?:boolean; one_euro?:boolean;
     cutoff_recovery_dps?:number; right_undeadzone_inner?:number; right_undeadzone_outer?:number; right_unpower?:number;
   };

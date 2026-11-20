@@ -1,5 +1,6 @@
 mod handoff;
 pub(crate) mod jsm;
+mod gamepad_motion;
 pub use handoff::PressHandoff;
 
 use crate::profile::{
@@ -574,7 +575,7 @@ pub struct Engine {
     gyro_signals: SigMap,
     controls: GraphRunner,
     gyro: GraphRunner,
-    jsm: Option<Box<jsm::JsmAim>>,
+    jsm: Box<jsm::JsmAim>,
     active: bool,
     last_paused: bool,
     activation_pressed: bool,
@@ -593,12 +594,7 @@ pub struct Engine {
     analog_hold_back: Vec<crate::chord_wait::AnalogHoldBack>,
     action_time_ns: u64,
     rotated_stick: Option<(Stick, Vec2)>,
-    flick: GraphRunner,
-    flick_input_ns: Option<u64>,
-    flick_stick: Vec2,
-    flick_turn_stick: f32,
     turn_stick: f32,
-    flick_stick_owed: f32,
     flick_snapshot_blocked: bool,
     turn_held: Vec<bool>,
     turns: Vec<PendingTurn>,
@@ -640,66 +636,6 @@ struct PendingTurn {
     output: AimOutput,
 }
 
-fn flick_graph(profile: &Profile) -> GraphRunner {
-    let f = &profile.gyro.motion.flick;
-    let mut src = node(0, "device.source", 2);
-    src.device_id = Some(SOURCE.into());
-    src.output_pin_ids = vec![
-        if f.stick == Stick::Left {
-            "left_stick".into()
-        } else {
-            "right_stick".into()
-        },
-        "flick_on".into(),
-    ];
-    src.params.insert("deadzone".into(), json!(0.));
-    let mut rws = node(1, "processing.rws", 5);
-    rws.input_sources = vec![None, Some((0, 0)), Some((0, 1))];
-    rws.params = HashMap::from([
-        ("scale".into(), json!(profile.gyro.counts_per_degree)),
-        ("rws".into(), json!(1.)),
-        (
-            "stick_out_dps".into(),
-            json!(profile.gyro.stick_full_scale_dps),
-        ),
-        // Use the Flick pin as a relative-angle source for the shared output.
-        ("flick_output".into(), json!("mouse")),
-        ("_rws_flick_out_wired".into(), json!(f.enabled)),
-        ("stick_aim_enabled".into(), json!(f.stick_aim)),
-        ("flick_deadzone".into(), json!(f.deadzone)),
-        ("flick_only".into(), json!(f.only)),
-        ("flick_snap_mode".into(), json!(f.snap_mode)),
-        ("flick_snap_strength".into(), json!(f.snap_strength)),
-        ("flick_release_ratio".into(), json!(f.release_ratio)),
-        ("flick_disengage_ms".into(), json!(f.disengage_ms)),
-        ("flick_smooth_ms".into(), json!(f.smooth_ms)),
-        ("flick_time_exponent".into(), json!(f.time_exponent)),
-        ("flick_release_ease".into(), json!(f.release_ease)),
-        ("flick_fwd_dz_deg".into(), json!(f.forward_deadzone)),
-        ("flick_stabilise_ms".into(), json!(f.stabilise_ms)),
-        ("flick_speed_ms".into(), json!(f.speed_gate_ms)),
-        ("flick_slow_lock".into(), json!(f.slow_lock)),
-        ("stick_aim_rws".into(), json!(f.aim_sensitivity)),
-        ("max_rate_dps".into(), json!(f.max_dps)),
-        ("stick_vh_ratio".into(), json!(f.vertical_ratio)),
-    ]);
-    let mut sink = node(2, "device.sink", 0);
-    sink.sink_target = Some(SinkTarget {
-        device_id: GYRO.into(),
-        pin_ids: vec![
-            "flick_mouse".into(),
-            "flick_pad".into(),
-            "flick_angle".into(),
-        ],
-        multi_sources: vec![
-            vec![(1, 0)],
-            vec![(1, 1)],
-            if f.enabled { vec![(1, 2)] } else { vec![] },
-        ],
-        ..Default::default()
-    });
-    GraphRunner::new(vec![src, rws, sink])
-}
 // Legacy exponent is configuration converted to an upstream vector-response
 // curve. The original RWS integrates its output; Studio owns no mouse filter.
 fn stick_mouse_graph(profile: &Profile) -> GraphRunner {
@@ -792,10 +728,9 @@ impl Engine {
                 .collect(),
             action_time_ns: 0,
             gyro: gyro_graph(&profile),
-            jsm: profile.gyro.uses_jsm_aim().then(|| Box::new(jsm::JsmAim::new(&profile.gyro))),
+            jsm: Box::new(jsm::JsmAim::new(&profile.gyro, profile.input.deadzone(&profile, profile.gyro.motion.flick.stick == Stick::Left))),
             motion: MotionRuntime::new(&profile.gyro)?,
             sensor_calibration: SensorCalibration::default(),
-            flick: flick_graph(&profile),
             binding_states: (0..profile.gyro.motion.bindings.len())
                 .map(|_| BindingState::default())
                 .collect(),
@@ -821,11 +756,7 @@ impl Engine {
             motion_pad: vec![],
             controls_held: BTreeSet::new(),
             rotated_stick: None,
-            flick_input_ns: None,
-            flick_stick: Vec2::ZERO,
-            flick_turn_stick: 0.,
             turn_stick: 0.,
-            flick_stick_owed: 0.0,
             flick_snapshot_blocked: false,
             turns: vec![],
             turn_stick_owed: 0.0,
@@ -849,11 +780,6 @@ impl Engine {
     }
     pub fn graph_node_count(&self) -> usize {
         self.controls.graph.nodes.len() + self.gyro.graph.nodes.len()
-    }
-    pub fn aiming_engine(&self) -> Option<crate::profile::AimEngine> {
-        let g = &self.profile.gyro;
-        (self.measuring.is_none() && !g.uses_ds4_imu() && g.motion.mode == MotionMode::Pointer
-            && (g.enabled || g.flick_available())).then_some(g.aim_engine)
     }
     /// Layer changes keep the sample clock, input bus, untouched activators,
     /// pending turns and motion filters. The caller keeps the same dispatcher.
@@ -962,16 +888,14 @@ impl Engine {
         }
         let gyro_clock_changed = std::mem::discriminant(&profile.gyro.timestamp_source)
             != std::mem::discriminant(&self.profile.gyro.timestamp_source);
-        let aim_engine_changed = profile.gyro.uses_jsm_aim() != self.profile.gyro.uses_jsm_aim();
-        if aim_engine_changed {
+        let pointer_mode_changed = profile.gyro.uses_jsm_aim() != self.profile.gyro.uses_jsm_aim();
+        if pointer_mode_changed {
             self.clear_gyro_motion();
             self.clock.reset();
-            self.jsm = profile.gyro.uses_jsm_aim().then(|| Box::new(jsm::JsmAim::new(&profile.gyro)));
-        } else if let Some(jsm) = &mut self.jsm {
-            jsm.configure(&profile.gyro);
-            if gyro_clock_changed { jsm.clear_gyro(); }
         }
+        self.jsm.configure(&profile.gyro, profile.input.deadzone(&profile, profile.gyro.motion.flick.stick == Stick::Left));
         if gyro_clock_changed {
+            self.jsm.clear_gyro();
             self.clock = SampleClock::new(profile.gyro.timestamp_source);
         }
         let motion = serde_json::to_value(&profile.gyro.motion)?;
@@ -998,9 +922,6 @@ impl Engine {
             self.clear_turn_output();
         }
         let flick_changed = motion["flick"] != previous_motion["flick"];
-        if flick_changed {
-            self.flick = flick_graph(&profile);
-        }
         if profile.gyro.motion.mode != self.profile.gyro.motion.mode || gyro_disabled {
             self.gyro.state.clear();
             self.gyro_stick = Vec2::ZERO;
@@ -1043,12 +964,6 @@ impl Engine {
                     .insert(key.into(), json!(value));
             }
         }
-        let flick_params = &mut self.flick.graph.nodes[1].params;
-        flick_params.insert("scale".into(), json!(profile.gyro.counts_per_degree));
-        flick_params.insert(
-            "stick_out_dps".into(),
-            json!(profile.gyro.stick_full_scale_dps),
-        );
         self.profile = profile;
         self.refresh_sticks(self.stick_time, true);
         // A new threshold or input geometry is not a physical button edge.
@@ -1061,7 +976,7 @@ impl Engine {
             .iter()
             .map(|turn| self.input_value(&turn.input) > self.profile.gyro.activation_threshold)
             .collect();
-        if aim_engine_changed || flick_changed
+        if pointer_mode_changed || flick_changed
             || (gyro_enabled_changed && !self.profile.gyro.motion.flick.standalone)
             || gyro_output_changed
             || input_changed
@@ -1069,7 +984,7 @@ impl Engine {
             self.clear_flick_output();
             let flick = &self.profile.gyro.motion.flick;
             self.flick_snapshot_blocked =
-                flick.enabled && self.stick_value_radial(flick.stick).length() >= flick.deadzone;
+                flick.enabled && self.stick_value_radial(flick.stick).length() >= self.jsm.flick_threshold();
         }
         self.eval_controls(true, self.action_time_ns);
         if touch_changed {
@@ -1232,7 +1147,6 @@ impl Engine {
         }
         self.clear_gyro_motion();
         self.accel = None;
-        self.flick_input_ns = None;
         self.clear_flick_output();
         self.flick_snapshot_blocked = false;
         self.clear_turn_output();
@@ -1250,6 +1164,24 @@ impl Engine {
         self.refresh_sticks(0., false);
         self.eval_controls(false, 0);
     }
+    /// Apply physical-stick rotation before JSM composes the virtual right stick.
+    fn mapped_pad(&self) -> Option<PadState> {
+        self.physical_pad.map(|mut pad| {
+            if let Some((rotated, value)) = self.rotated_stick {
+                for binding in self.profile.gamepad_bindings.iter().flatten() {
+                    if pad_binding::stick(&binding.input) == Some(rotated) {
+                        if let Some(output) = pad_binding::stick(&binding.output) {
+                            for (pin, component) in pad_binding::stick_pins(output)
+                                .into_iter().zip([value.x, value.y]) {
+                                pad.set(pin, Signal::Float(component));
+                            }
+                        }
+                    }
+                }
+            }
+            pad
+        })
+    }
     fn update_pad(&mut self) {
         if !self.profile.gyro.uses_ds4_imu() {
             self.frame.ds4_imu = Ds4ImuState::Off;
@@ -1265,31 +1197,13 @@ impl Engine {
             self.frame.scroll = [0; 2];
             return;
         }
-        self.frame.pad = self.physical_pad.map(|mut pad| {
+        self.frame.pad = self.mapped_pad().map(|mut pad| {
             if self.measuring.is_some() {
                 pad.right_x = 0;
                 pad.right_y = 0;
             }
-            if let Some((rotated, value)) = self.rotated_stick {
-                for binding in self.profile.gamepad_bindings.iter().flatten() {
-                    let (Some(input), Some(output)) = (
-                        pad_binding::stick(&binding.input),
-                        pad_binding::stick(&binding.output),
-                    ) else {
-                        continue;
-                    };
-                    if input == rotated {
-                        for (pin, component) in pad_binding::stick_pins(output)
-                            .into_iter()
-                            .zip([value.x, value.y])
-                        {
-                            pad.set(pin, Signal::Float(component));
-                        }
-                    }
-                }
-            }
-            let aim = self.gyro_stick + self.flick_stick;
-            let right = self.jsm.as_ref().and_then(|jsm| jsm.right)
+            let aim = self.gyro_stick;
+            let right = self.jsm.right
                 .filter(|_| self.measuring.is_none())
                 .unwrap_or_else(|| Vec2::new(axis_from_i16(pad.right_x), axis_from_i16(pad.right_y)));
             let mut right_x = right.x + aim.x;
@@ -1315,7 +1229,7 @@ impl Engine {
             }
             // Fit and apply queued angles against the same clamped base axis.
             let base_x = axis_from_i16(axis_to_i16(right_x));
-            pad.right_x = axis_to_i16(base_x + self.flick_turn_stick + self.turn_stick);
+            pad.right_x = axis_to_i16(base_x + self.turn_stick);
             pad
         });
         self.frame.held = self
@@ -1327,7 +1241,7 @@ impl Engine {
     }
     fn clear_gyro_motion(&mut self) {
         self.frame.ds4_imu = Ds4ImuState::Off;
-        if let Some(jsm) = &mut self.jsm { jsm.clear_gyro(); }
+        self.jsm.clear_gyro();
         if self.trial_scale.is_some() {
             self.clear_turn_output();
         }
@@ -1376,18 +1290,14 @@ impl Engine {
             && match f.suppress {
                 Suppress::Full => true,
                 Suppress::Deadzone => {
-                    f.enabled && self.stick_value_radial(f.stick).length() >= f.deadzone
+                    f.enabled && self.stick_value_radial(f.stick).length() >= self.jsm.flick_threshold()
                 }
                 Suppress::Off => false,
             })
         .then_some(f.stick)
     }
     fn clear_flick_output(&mut self) {
-        if let Some(jsm) = &mut self.jsm { jsm.clear_stick(); }
-        self.flick.state.clear();
-        self.flick_stick = Vec2::ZERO;
-        self.flick_turn_stick = 0.;
-        self.flick_stick_owed = 0.;
+        self.jsm.clear_stick();
     }
     fn clear_turn_output(&mut self) {
         self.turns.clear();
@@ -1710,15 +1620,22 @@ impl Engine {
         let active = gyro.enabled
             && !paused
             && (gyro.activation == "always" || if toggle { self.gyro_latched } else { pressed });
-        if paused != self.last_paused {
+        if paused && !self.last_paused {
+            // Motion actions are Studio button outputs. Release even if the aim
+            // gate was already closed and JSM continues to track orientation.
+            self.motion_held.clear();
+            self.motion_pad.clear();
+            self.binding_states.fill_with(BindingState::default);
+        }
+        if paused != self.last_paused && (!gyro.uses_jsm_aim() || self.measuring.is_some()) {
             self.clock.reset();
             self.clear_gyro_motion();
             if self.measuring.is_some() {
                 self.motion.telemetry.measurement_error = Some("测量期间已暂停，请重新测量".into());
             }
         } else if active != self.active && self.measuring.is_none() {
-            self.clock.reset();
-            if let Some(jsm) = &mut self.jsm { jsm.clear_gyro(); }
+            if !gyro.uses_jsm_aim() { self.clock.reset(); }
+            if !active { self.jsm.block_gyro(); }
             self.motion.reset_filters();
             self.gyro.state.clear();
             self.gyro_stick = Vec2::ZERO;
@@ -1761,7 +1678,7 @@ impl Engine {
         let flick = &self.profile.gyro.motion.flick;
         if flick.enabled
             && self.pressed(&flick.pause_input)
-            && self.stick_value_radial(flick.stick).length() >= flick.deadzone
+            && self.stick_value_radial(flick.stick).length() >= self.jsm.flick_threshold()
         {
             // Reuse the snapshot guard: releasing a pause at the rim must not
             // create a new turn from a stick push that happened while paused.
@@ -1814,10 +1731,10 @@ impl Engine {
                     self.refresh_sticks(now_ns as f64 / 1e9, allow_toggle);
                     let f = &self.profile.gyro.motion.flick;
                     let length = self.stick_value_radial(f.stick).length();
-                    if !allow_toggle && f.enabled && length >= f.deadzone {
+                    if !allow_toggle && f.enabled && length >= self.jsm.flick_threshold() {
                         self.flick_snapshot_blocked = true;
                     }
-                    if allow_toggle && length < f.deadzone * 0.8 {
+                    if allow_toggle && length < self.jsm.flick_threshold() * 0.9 {
                         self.flick_snapshot_blocked = false;
                     }
                     self.eval_controls(allow_toggle, now_ns);
@@ -1956,7 +1873,7 @@ impl Engine {
             self.clear_gyro_motion();
             return;
         }
-        if !self.profile.gyro.enabled {
+        if !self.profile.gyro.enabled && !self.profile.gyro.uses_jsm_aim() {
             return;
         }
         self.last_stick_gyro_ns = Some(time.host_ns);
@@ -1976,6 +1893,10 @@ impl Engine {
             c.gyro_sign,
             c,
         ));
+        if !self.profile.gyro.enabled {
+            self.jsm.sample(raw, accel, dt, [false; 2], false);
+            return;
+        }
         let reset = self.pressed(&self.profile.gyro.motion.reset_input);
         let neutral = self.pressed(&self.profile.gyro.motion.neutral_input);
         let tracking = [
@@ -1994,7 +1915,7 @@ impl Engine {
             c.gyro_noise_dps,
             c.accel_noise_g,
             time,
-            self.measuring.is_none() && !direct && self.jsm.is_none(),
+            self.measuring.is_none() && !direct && !self.profile.gyro.uses_jsm_aim(),
         );
         if direct {
             // Device telemetry uses the physical sample. Filters act on the
@@ -2031,17 +1952,18 @@ impl Engine {
             self.motion_held.clear();
             self.motion_pad.clear();
         }
+        if self.measuring.is_none() && self.profile.gyro.uses_jsm_aim() {
+            // JSM observes gravity and smoothing even while an activation button blocks output.
+            let mouse = self.jsm.sample(raw, accel, dt, tracking, self.active);
+            if self.active { self.add_jsm_mouse(mouse); }
+            self.update_pad();
+            return;
+        }
         if !self.active && self.measuring.is_none() {
             self.update_pad();
             return;
         }
         if self.measuring.is_none() {
-            if let Some(jsm) = &mut self.jsm {
-                let mouse = jsm.sample(raw, accel, dt, tracking);
-                self.add_jsm_mouse(mouse);
-                self.update_pad();
-                return;
-            }
             if let Some(steering) = result.steering {
                 self.gyro_stick = steering;
                 self.update_pad();
@@ -2058,7 +1980,9 @@ impl Engine {
                 return;
             }
         }
-        let rate = if self.measuring.is_some() {
+        let rate = if self.measuring.is_some() && self.profile.gyro.uses_jsm_aim() {
+            self.jsm.measurement_rate(raw, accel, dt)
+        } else if self.measuring.is_some() {
             result.physical_rate
         } else {
             result.rate
@@ -2331,73 +2255,9 @@ impl Engine {
         self.refresh_sticks(self.stick_time, true);
         let flick = &self.profile.gyro.motion.flick;
         self.flick_snapshot_blocked =
-            flick.enabled && self.stick_value_radial(flick.stick).length() >= flick.deadzone;
+            flick.enabled && self.stick_value_radial(flick.stick).length() >= self.jsm.flick_threshold();
         self.eval_controls(false, self.action_time_ns);
         Some(result)
-    }
-
-    fn advance_flick(&mut self, dt: f32, input_dt: f32) {
-        if !self.flick_active() {
-            self.clear_flick_output();
-            return;
-        }
-        let f = &self.profile.gyro.motion.flick;
-        let value = if self.flick_snapshot_blocked {
-            Vec2::ZERO
-        } else {
-            self.stick_value_radial(f.stick)
-        };
-        self.gyro_signals.set_pin(
-            SOURCE,
-            if f.stick == Stick::Left {
-                "left_stick"
-            } else {
-                "right_stick"
-            },
-            Signal::Vec2(value),
-        );
-        self.gyro_signals
-            .set_pin(SOURCE, "flick_on", Signal::Bool(true));
-        self.flick.graph.nodes[1]
-            .params
-            .insert("flick_input_dt".into(), json!(input_dt));
-        self.flick.eval(&self.gyro_signals, dt);
-        self.flick_stick = Vec2::ZERO;
-        let outputs = &self.flick.result.sink_outputs;
-        let flick_counts = match outputs.get_pin(GYRO, "flick_angle") {
-            Some(Signal::Vec2(v)) => v.x,
-            _ => 0.,
-        };
-        match self.profile.gyro.output {
-            GyroOutput::Mouse => {
-                if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_mouse") {
-                    self.frame.mouse_delta[0] += f64::from(v.x);
-                    self.frame.mouse_delta[1] -= f64::from(v.y);
-                }
-                self.frame.mouse_delta[0] += f64::from(flick_counts);
-            }
-            GyroOutput::RightStick => {
-                self.flick_stick_owed += flick_counts / self.profile.gyro.counts_per_degree;
-                if let Some(Signal::Vec2(v)) = outputs.get_pin(GYRO, "flick_pad") {
-                    self.flick_stick = *v;
-                }
-            }
-            GyroOutput::Ds4Imu => {}
-        }
-    }
-
-    /// Observe Flick input after FIFO events and layer changes.
-    pub fn advance_flick_input(&mut self) {
-        // JSM reads the complete thumb position at its turn tick. An SDL X
-        // event followed by Y is not two separate flick directions.
-        if self.jsm.is_some() { return; }
-        let now = self.action_time_ns;
-        let input_dt = self
-            .flick_input_ns
-            .replace(now)
-            .map_or(0., |last| (now.saturating_sub(last) as f32 / 1e9).min(0.05));
-        self.advance_flick(0., input_dt);
-        self.update_pad();
     }
 
     fn add_jsm_mouse(&mut self, bus: Vec2) {
@@ -2410,17 +2270,14 @@ impl Engine {
     fn advance_jsm_output(&mut self, dt: f32) {
         let gesture = (self.flick_active() && !self.flick_snapshot_blocked)
             .then(|| self.stick_value_radial(self.profile.gyro.motion.flick.stick));
-        let carrier = self.physical_pad.map_or(Vec2::ZERO, |pad| {
+        let carrier = self.mapped_pad().map_or(Vec2::ZERO, |pad| {
             Vec2::new(axis_from_i16(pad.right_x), axis_from_i16(pad.right_y))
         });
-        if let Some(jsm) = &mut self.jsm {
-            let mouse = jsm.output(dt, gesture, carrier);
-            self.add_jsm_mouse(mouse);
-        }
+        let mouse = self.jsm.output(dt, gesture, carrier);
+        self.add_jsm_mouse(mouse);
     }
 
     fn advance_turns(&mut self, dt: f32) {
-        self.flick_turn_stick = 0.;
         self.turn_stick = 0.;
         let mouse_scale = self
             .trial_scale
@@ -2442,11 +2299,8 @@ impl Engine {
             t.seconds > 0.
         });
         self.update_pad();
-        let owed = self.flick_stick_owed + self.turn_stick_owed;
-        if owed == 0. {
-            self.flick_stick_owed = 0.;
-            self.turn_stick_owed = 0.;
-        } else {
+        let owed = self.turn_stick_owed;
+        if owed != 0. {
             let base = self.frame.pad.map_or(0., |p| axis_from_i16(p.right_x));
             let cap = self
                 .trial_scale
@@ -2454,16 +2308,8 @@ impl Engine {
                 * dt;
             let room = (1. - base * owed.signum()).max(0.) * cap;
             let emit = owed.abs().min(room) * owed.signum();
-            // Allocate the shared stick capacity while retaining ownership of
-            // the current output and pending angle for each turn source.
-            let remaining = owed - emit;
-            let flick_share = (self.flick_stick_owed / owed).clamp(0., 1.);
-            let emitted_stick = emit / cap;
-            let flick_stick = emitted_stick * flick_share;
-            self.flick_turn_stick = flick_stick;
-            self.turn_stick = emitted_stick - flick_stick;
-            self.flick_stick_owed = remaining * flick_share;
-            self.turn_stick_owed = remaining - self.flick_stick_owed;
+            self.turn_stick = emit / cap;
+            self.turn_stick_owed -= emit;
             self.update_pad();
         }
     }
@@ -2481,7 +2327,10 @@ impl Engine {
         let previous_held = std::mem::take(&mut self.frame.held);
         let previous_pad = self.frame.pad;
         self.tick_input(now_ns);
-        self.advance_flick_input();
+        if self.flick_active() && !self.flick_snapshot_blocked {
+            let thumb = self.stick_value_radial(self.profile.gyro.motion.flick.stick);
+            self.jsm.observe_flick(thumb);
+        }
         self.frame.held != previous_held
             || self.frame.pad != previous_pad
             || self.frame.scroll != [0; 2]
@@ -2500,16 +2349,16 @@ impl Engine {
             };
             self.tick_input(input_ns);
         }
-        self.tick_output(dt, now_ns, dt)
+        self.tick_output(dt, now_ns)
     }
 
     /// Advance continuous output without deciding gestures ahead of SDL.
     pub fn advance_output(&mut self, dt: f32, now_ns: u64) -> &Frame {
         self.clear_frame_deltas();
-        self.tick_output(dt, now_ns, 0.)
+        self.tick_output(dt, now_ns)
     }
 
-    fn tick_output(&mut self, dt: f32, now_ns: u64, flick_input_dt: f32) -> &Frame {
+    fn tick_output(&mut self, dt: f32, now_ns: u64) -> &Frame {
         if self.trial_scale.is_some() {
             if !dt.is_finite() || dt <= 0. || dt > 0.05 {
                 self.motion.telemetry.measurement_error =
@@ -2544,14 +2393,12 @@ impl Engine {
             for state in &mut self.action_states {
                 state.elapsed = 0.;
             }
-            self.flick_turn_stick = 0.;
-            if let Some(jsm) = &mut self.jsm {
-                jsm.clear_stick();
-                jsm.clear_gyro();
-                self.clock.reset();
-                let f = &self.profile.gyro.motion.flick;
-                self.flick_snapshot_blocked = f.enabled && self.stick_value_radial(f.stick).length() >= f.deadzone;
-            }
+            self.jsm.clear_stick();
+            // A missed report cancels old rates. The FIFO sample clock already
+            // detects sensor outages independently of display or output stalls.
+            self.jsm.clear_rate();
+            let f = &self.profile.gyro.motion.flick;
+            self.flick_snapshot_blocked = f.enabled && self.stick_value_radial(f.stick).length() >= self.jsm.flick_threshold();
             self.clear_turn_output();
             self.update_pad();
             return &self.frame;
@@ -2577,10 +2424,8 @@ impl Engine {
                 }
             }
         }
-        if self.jsm.is_some() && self.measuring.is_none() {
+        if self.measuring.is_none() && !self.profile.gyro.uses_ds4_imu() {
             self.advance_jsm_output(dt);
-        } else {
-            self.advance_flick(dt, flick_input_dt);
         }
         self.advance_turns(dt);
         self.advance_stick_mouse(dt);

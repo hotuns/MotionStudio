@@ -9,7 +9,12 @@ macro_rules! choices {
         pub enum $name { #[default] $first, $($rest),* }
     };
 }
-choices!(Space, PitchYaw, PitchRoll, Player, World);
+choices!(Space, PitchYaw, PitchRoll, YawPlusRoll, Player, PlayerLean, World, WorldLean);
+impl Space {
+    pub fn uses_gravity(self) -> bool {
+        matches!(self, Self::Player | Self::PlayerLean | Self::World | Self::WorldLean)
+    }
+}
 choices!(MotionMode, Pointer, Steering, StickRotation);
 choices!(Smoothing, Ema, Decay, OneEuro);
 choices!(Curve, Linear, Natural, Power, Quadratic, Sigmoid, Jump, Custom);
@@ -152,6 +157,8 @@ impl Default for Rotation {
 pub struct Flick {
     pub enabled: bool,
     pub only: bool,
+    pub rotate_only: bool,
+    pub rotate_smooth_override: f32,
     pub snap_mode: FlickSnap,
     pub snap_strength: f32,
     pub standalone: bool,
@@ -181,6 +188,8 @@ impl Default for Flick {
         Self {
             enabled: false,
             only: false,
+            rotate_only: false,
+            rotate_smooth_override: -1.0,
             snap_mode: FlickSnap::None,
             snap_strength: 1.0,
             standalone: false,
@@ -188,7 +197,7 @@ impl Default for Flick {
             _legacy_output: serde::de::IgnoredAny,
             enable_input: None,
             pause_input: None,
-            deadzone: 0.85,
+            deadzone: 0.9,
             release_ratio: 0.5,
             time_exponent: 0.0,
             disengage_ms: 10.0,
@@ -348,7 +357,7 @@ impl SensorCalibration {
 }
 impl MotionConfig {
     pub fn needs_accel(&self) -> bool {
-        matches!(self.space, Space::Player | Space::World)
+        self.space.uses_gravity()
             || self.drift_correction
             || self.recenter_strength > 0.0
             || self
@@ -381,6 +390,12 @@ impl MotionConfig {
         if self.flick.pause_input.is_some() && self.flick.enable_input.is_some() {
             bail!("拨动的按住开启和按住暂停不能同时设置");
         }
+        if self.flick.only && self.flick.rotate_only {
+            bail!("仅拨动和仅转动不能同时启用");
+        }
+        if !self.flick.rotate_smooth_override.is_finite() {
+            bail!("外圈转动平滑阈值必须是有限数值");
+        }
         for angle in self.hold_angles {
             range("握持角度", angle, -180.0, 180.0)?;
         }
@@ -412,7 +427,7 @@ impl MotionConfig {
             ("相对回归时间", self.rotation.return_ms, 0., 5000.),
             ("接管速度", self.rotation.takeover_dps, 0., 2000.),
             ("外圈交还阈值", self.rotation.outer, 0.05, 1.),
-            ("拨动死区", self.flick.deadzone, 0.05, 0.99),
+            ("拨动死区", self.flick.deadzone, 0.05, 1.),
             ("拨动追踪下限比例", self.flick.release_ratio, 0., 1.),
             ("拨动退出延时", self.flick.disengage_ms, 0., 60.),
             ("拨动时间", self.flick.smooth_ms, 0., 2000.),

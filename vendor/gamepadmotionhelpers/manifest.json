@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/JibbSmart/GamepadMotionHelpers",
+  "commit": "39b578aacf34c3a1c584d8f7f194adc776f88055",
+  "files": {
+    "GamepadMotion.hpp": "502624f52fd6f11f0a3b49e516c58d06ec583c36bafd284b9b01e9c280e0a784",
+    "LICENSE": "cab235520dc9bda018e27ccc8c533ecf375766823f9ed918f3698fa52aaffa33"
+  }
+}

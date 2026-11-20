@@ -125,7 +125,7 @@ export function StudioShell(props: Props) {
   const outputBlocked = blocked || props.capturing;
   const tools: Command[] = [
     { label: '新建配置', icon: 'profiles', run: props.onNewProfile, disabled: blocked },
-    { label: '导入 JSM 配置', icon: 'folder', run: props.onImportJsm, disabled: outputBlocked },
+    { label: '导入文本配置', icon: 'folder', keywords: 'JSM JoyShockMapper TXT CFG', run: props.onImportJsm, disabled: outputBlocked },
     { label: '搜索设置和操作', icon: 'search', run: openSearch },
     { label: props.gamepadOn ? '停用手柄界面操作' : '手柄操作界面', icon: 'games', run: props.onGamepad, disabled: outputBlocked || !props.gamepadAvailable },
     { label: '软件更新', icon: 'settings', run: openUpdates },

@@ -1,6 +1,6 @@
 // Plain-language help shared by settings controls. Explicit help at a call site takes precedence.
 export const settingHelp: Record<string, string> = {
-  "仅拨动（关闭外圈转动）": "对应 JSM 的 FLICK_ONLY：保留初始拨动，关闭外圈转动。回到释放区域后才可再次拨动。配套摇杆瞄准独立设置。",
+  "仅拨动（关闭外圈转动）": "推到外圈时拨动一次，回到释放区域后可以再次拨动。",
   "拨动角度吸附": "四向按 90°、八向按 45° 对齐初始拨动方向。吸附不作用于后续转动，也不改变体感方向。",
   "拨动角度吸附强度": "100% 完全对齐最近方向，0% 保留原始角度。中间值按比例偏向最近方向。",
   "启用体感": "用手柄的转动控制镜头。关闭后停止体感瞄准；拨动是否继续工作由它的独立启用设置决定。",

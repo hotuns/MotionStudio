@@ -10,7 +10,7 @@ Motion Studio is the successor to JSM Studio. It is a Windows controller mapper 
 
 安装版可在「设置与组件 → 软件更新」检查、下载并原位升级。从旧免安装版或 0.15.2 及更早版本升级时，请退出正在运行的程序，再手动下载安装包。已有配置和本机设置继续使用原来的应用数据目录。详见[软件更新与发布](docs/software-updates.md)。
 
-从 [JSM Studio](https://github.com/hotuns/JSM_Studio) 迁移时，在「游戏配置」或「配置库」选择「导入 JSM 配置」，打开旧版导出的 TXT，核对转换报告，再创建新的 Studio 配置。两款应用各自保存本机数据，试用时请一次只启动一个映射会话。复杂的轻按／长按绑定和部分高级 JSM 命令需要按报告核验或补配。详见 [JSM 导入与兼容范围](docs/jsm-import.md)。
+从 [JSM Studio](https://github.com/hotuns/JSM_Studio) 迁移时，在「游戏配置」或「配置库」选择「导入文本配置」，打开旧版导出的 TXT，核对转换报告，再创建新的 Studio 配置。两款应用各自保存本机数据，试用时请一次只启动一个映射会话。复杂的轻按／长按绑定和部分高级 JSM 命令需要按报告核验或补配。详见 [JSM 导入与兼容范围](docs/jsm-import.md)。
 
 ## 功能概览
 
@@ -45,6 +45,7 @@ Motion Studio is the successor to JSM Studio. It is a Windows controller mapper 
 ## 已实现
 
 - 游戏配置：统一管理动作映射、摇杆、扳机、触控和体感。手柄按键、扳机和摇杆方向可以组成最多四个输入的组合，映射到键盘、键鼠组合、鼠标五键或四向滚轮；支持实体录入、自定义动作、配置重命名。
+- 体感瞄准与快速转向使用 JSM 响应。玩家空间和世界空间各有转动、侧倾两种方式，重力估计采用独立 JoyShockMapper 使用的 GamepadMotionHelpers。
 - JSM 导入转换为可编辑的 Studio 配置，支持所选关联文件和逐行转换报告。左右扳机的轻拉、全拉和快拉模式复用 FlexInput JSM 状态机。
 - 配置库支持浏览 GitHub 社区配置、输入短码和复制离线配置码。预览动作与体感用法后可保存为本地副本。[社区投稿说明](community-configs)
 - 手柄界面操作：方向与左摇杆移动焦点、A 确认、B 返回、LB／RB 切区域、右摇杆滚动、Y 保存，包含选项窗口、数值调整、屏幕键盘和应用内文件选择器。
@@ -100,7 +101,7 @@ Motion Studio is the successor to JSM Studio. It is a Windows controller mapper 
 
 默认键鼠后端为 HIDMaestro；虚拟 Xbox／DS4 默认使用 FlexInput 原生 ViGEm，需要 ViGEmBus，也可单独改选 HIDMaestro 手柄。HidHide 用于解决实体和映射输出同时被游戏读取的问题。安装组件后，开始映射默认自动隐藏所选实体手柄，保留虚拟输出可见；断线等待保留会话，停止、F12 或退出恢复本次新增规则。仅观察和手柄操作界面不会新增隐藏。可以在「设置与组件」关闭自动隐藏并自行管理规则。详见[隐藏生命周期](docs/hidhide-lifecycle.md)和[游戏转角校准](docs/game-angle-calibration.md)。
 
-在「游戏配置 → 配置工具」或「配置库 → 导入与文件」选择「导入 JSM 配置」，先查看报告再创建。顶栏「更多工具 → 手柄操作界面」暂停映射并进入界面导航，Menu 可继续游戏，前台 View + Menu 可切回界面。详见 [JSM 导入](docs/jsm-import.md)和[手柄操作](docs/gamepad-ui.md)。
+在「游戏配置 → 配置工具」或「配置库 → 导入与文件」选择「导入文本配置」，先查看报告再创建。顶栏「更多工具 → 手柄操作界面」暂停映射并进入界面导航，Menu 可继续游戏，前台 View + Menu 可切回界面。详见 [JSM 导入](docs/jsm-import.md)和[手柄操作](docs/gamepad-ui.md)。
 
 按住 LB 使用不同灵敏度：在基础层把 LB 映射到鼠标右键，添加以 LB 启用的配置层，在该层编辑体感灵敏度。更多操作见[配置层、触发方式与运行中录入](docs/action-layers-and-triggers.md)，示例见 [hold-layer.toml](examples/hold-layer.toml)。在左下角选择界面语言，旁边按钮切换主题；在「自动切换」设置并预览[配置切换提示](docs/configuration-overlay.md)。
 

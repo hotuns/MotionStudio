@@ -54,9 +54,35 @@ fn gamepad(p: &mut Profile) {
 }
 
 #[test]
+fn legacy_aim_engine_choices_load_and_drop_out_of_saved_profiles_and_layers() {
+    let source = include_str!("../../../examples/gyro-mouse.toml");
+    for choice in ["studio", "jsm"] {
+        let legacy = format!(r#"{source}
+aim_engine = "{choice}"
+[gyro.jsm_response]
+smooth_threshold_dps = 14.0
+[[layers]]
+id = "aim"
+name = "Aim"
+input = "left_shoulder"
+[layers.settings.gyro]
+aim_engine = "{choice}"
+sensitivity = 2.0
+"#);
+        let profile = parse_profile(&legacy).unwrap();
+        let saved = toml::to_string(&profile).unwrap();
+        assert!(!saved.contains("aim_engine"));
+        let reopened = parse_profile(&saved).unwrap();
+        let aim = motion_core::layers::resolve(&reopened, &[0]).unwrap();
+        assert_eq!(aim.gyro.sensitivity, 2.0);
+        assert_eq!(aim.gyro.jsm_response.smooth_threshold_dps, Some(14.0));
+        assert!(aim.gyro.uses_jsm_aim());
+    }
+}
+
+#[test]
 fn jsm_mouse_integrates_each_sample_once_on_both_axes() {
     let mut p = profile();
-    p.gyro.aim_engine = motion_core::profile::AimEngine::Jsm;
     p.gyro.pause_input = Some("south".into());
     let mut e = Engine::new(p).unwrap();
     gyro(&mut e, 10, 0., 20., 30.);
@@ -73,15 +99,13 @@ fn jsm_mouse_integrates_each_sample_once_on_both_axes() {
 }
 
 #[test]
-fn jsm_virtual_flick_uses_full_stick_speed_and_releases_on_engine_switch() {
+fn jsm_virtual_flick_uses_full_stick_speed_and_releases_when_flick_is_disabled() {
     let mut p = profile();
     gamepad(&mut p);
-    p.gyro.aim_engine = motion_core::profile::AimEngine::Jsm;
     p.gyro.motion.flick.enabled = true;
     p.gyro.motion.flick.smooth_ms = 2000.; // A mouse duration cannot slow a native stick flick.
     let mut e = Engine::new(p.clone()).unwrap();
     axis(&mut e, 2, i16::MAX);
-    e.advance_flick_input();
     assert_eq!(e.frame.pad.unwrap().right_x, 0);
     e.advance_output(0.002, time(2).host_ns);
     assert_eq!(e.frame.pad.unwrap().right_x, i16::MAX);
@@ -91,7 +115,7 @@ fn jsm_virtual_flick_uses_full_stick_speed_and_releases_on_engine_switch() {
     gyro(&mut e, 4, 0., 0., 0.);
     e.advance_output(0.002, time(4).host_ns);
     assert_eq!(e.frame.pad.unwrap().right_x, i16::MAX);
-    p.gyro.aim_engine = motion_core::profile::AimEngine::Studio;
+    p.gyro.motion.flick.enabled = false;
     e.apply_layer(p).unwrap();
     assert_eq!(e.frame.pad.unwrap().right_x, 0);
     assert_eq!(e.advance_output(0.002, time(6).host_ns).pad.unwrap().right_x, 0);
@@ -275,7 +299,7 @@ fn missing_stale_and_out_of_order_acceleration_do_not_drive_gravity_dependent_ai
 
 #[test]
 fn local_roll_axis_and_roll_contribution_can_drive_horizontal_aim() {
-    for (space, share, roll) in [(Space::PitchRoll, 0., 90.), (Space::PitchYaw, 100., -90.)] {
+    for (space, share, roll) in [(Space::PitchRoll, 0., 90.), (Space::YawPlusRoll, 100., 90.)] {
         let mut p = profile();
         p.gyro.motion.space = space;
         p.gyro.motion.roll_contribution = share;
@@ -328,7 +352,7 @@ fn neutral_forward_resets_heading_without_resetting_the_clock_or_tilt() {
 }
 
 #[test]
-fn edge_ramp_keeps_turning_outside_the_zone_and_neutral_stops_it() {
+fn legacy_edge_turns_never_add_displacement_to_native_angular_aim() {
     let mut p = profile();
     p.gyro.motion.edge.mode = EdgeMode::Ramp;
     p.gyro.motion.edge.zone = 5.;
@@ -341,8 +365,9 @@ fn edge_ramp_keeps_turning_outside_the_zone_and_neutral_stops_it() {
     for ms in 1..202 {
         gyro(&mut e, ms, 0., 0., 90.);
     }
+    assert!(e.frame.mouse_delta[0] > 0.);
     gyro(&mut e, 202, 0., 0., 0.);
-    assert!((e.frame.mouse_delta[0] - 1.).abs() < 0.05);
+    assert_eq!(e.frame.mouse_delta, [0.; 2]);
     button(&mut e, 0, true);
     gyro(&mut e, 203, 0., 0., 0.);
     assert!(e.frame.mouse_delta[0].abs() < 1e-4);
@@ -530,7 +555,7 @@ fn flick_90_degrees_is_paid_out_once_and_suppresses_the_original_stick() {
 }
 
 #[test]
-fn a_quick_flick_between_output_slots_is_recognized_then_paid_out() {
+fn a_complete_flick_between_output_slots_is_recognized_then_paid_out() {
     let mut p = profile();
     p.gyro.motion.flick.enabled = true;
     let mut e = Engine::new(p).unwrap();
@@ -542,7 +567,7 @@ fn a_quick_flick_between_output_slots_is_recognized_then_paid_out() {
             index: 2,
             value,
         });
-        e.advance_flick_input();
+        e.advance_input(time(ms).host_ns);
         assert_eq!(e.frame.mouse_delta, [0.; 2]);
     }
     for ms in (16..=160).step_by(2) {
@@ -616,8 +641,8 @@ fn aim_without_flick_keeps_native_stick_in_deadzone_mode_and_survives_a_layer_ch
 }
 
 #[test]
-fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_directions() {
-    for (strength, exponent) in [(0., 1), (0.5, 2), (1., 3)] {
+fn native_quadratic_flick_payout_uses_elapsed_time_for_both_directions() {
+    for strength in [0., 0.5, 1.] {
         for (value, direction) in [(32767, 1.), (-32768, -1.)] {
             let mut p = profile();
             p.gyro.motion.flick.enabled = true;
@@ -625,6 +650,7 @@ fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_direc
             p.gyro.motion.flick.release_ease = strength;
             let mut engine = Engine::new(p).unwrap();
             axis(&mut engine, 2, value);
+            assert_eq!(engine.advance_output(0.001, time(1).host_ns).mouse_delta, [0.; 2]);
             let mut elapsed = 0.0_f32;
             let mut total = 0.0;
             for dt in [0.002, 0.005, 0.013, 0.020, 0.011, 0.019, 0.031] {
@@ -633,7 +659,7 @@ fn flick_release_curve_follows_time_progress_with_irregular_ticks_and_both_direc
                 assert!(delta * direction >= -0.0001, "reverse step {delta}");
                 total += delta;
                 let progress = (elapsed / 0.1).min(1.);
-                let expected = f64::from(1. - (1. - progress).powi(exponent)) * 900. * direction;
+                let expected = f64::from(1. - (1. - progress).powi(2)) * 900. * direction;
                 assert!(
                     (total - expected).abs() < 0.002,
                     "{strength}: {total} vs {expected}"
@@ -766,6 +792,7 @@ fn flick_snap_settings_roundtrip_and_layer_changes_require_recenter() {
     assert_eq!(layer.gyro.motion.flick.snap_strength, 0.75);
     let mut e = Engine::new(restored).unwrap();
     axis(&mut e, 2, 32767);
+    e.advance_output(0.001, time(1).host_ns);
     assert!(e.advance(0.01, 10_000_000).mouse_delta[0] > 0.);
     e.apply_layer(layer.clone()).unwrap();
     assert_eq!(e.advance(0.01, 20_000_000).mouse_delta, [0.; 2]);
@@ -891,7 +918,8 @@ fn stick_aim_continues_while_gyro_is_paused_and_restores_native_input_when_disab
     let native_x = native.frame.pad.unwrap().right_x;
     p.gyro.motion.flick.stick_aim = true;
     p.gyro.motion.flick.enable_input = Some("east".into());
-    p.stick_deadzone = 0.; // Isolate RWS timing from source deadzone.
+    p.stick_deadzone = 0.;
+    p.gyro.motion.flick.deadzone = 1.; // Isolate rate conversion from inner/outer deadzones.
     let mut e = Engine::new(p).unwrap();
     button(&mut e, 1, true);
     axis(&mut e, 2, 16384);
@@ -1170,22 +1198,20 @@ fn aim_activation_preserves_motion_toggle_and_pause_releases_it_even_with_aim_of
 }
 
 #[test]
-fn a_flick_shares_stick_capacity_with_gyro_without_losing_degrees() {
+fn native_virtual_flick_saturates_the_combined_rate_and_finishes_on_schedule() {
     let mut p = profile();
     gamepad(&mut p);
     p.gyro.motion.flick.enabled = true;
     let mut e = Engine::new(p).unwrap();
     axis(&mut e, 2, 32767);
-    let mut extra = 0.;
     for ms in 1..1001 {
         gyro(&mut e, ms, 0., 0., 180.);
         if ms % 10 == 0 {
-            extra += (e.advance(0.01, ms * 1_000_000).pad.unwrap().right_x as f32 / 32767. - 0.5)
-                * 360.
-                * 0.01;
+            let x = e.advance(0.01, ms * 1_000_000).pad.unwrap().right_x;
+            if ms <= 250 { assert_eq!(x, i16::MAX); }
+            if ms >= 280 { assert!((x as f32 / 32767. - 0.5).abs() < 1e-4); }
         }
     }
-    assert!((extra - 90.).abs() < 0.05, "{extra}");
 }
 
 #[test]
@@ -1224,7 +1250,8 @@ fn a_held_flick_snapshot_waits_for_center_before_starting_a_turn() {
     axis(&mut e, 2, 0);
     e.advance(0.01, 200_000_000);
     axis(&mut e, 2, 32767);
-    assert!(e.advance(0.01, 210_000_000).mouse_delta[0] > 0.);
+    e.advance(0.01, 210_000_000);
+    assert!(e.advance(0.01, 220_000_000).mouse_delta[0] > 0.);
 }
 
 #[test]
@@ -1295,6 +1322,7 @@ fn flick_pause_cancels_remaining_mouse_and_stick_turns_without_replaying_on_resu
         p.gyro.motion.flick.pause_input = Some("east".into());
         let mut e = Engine::new(p).unwrap();
         axis(&mut e, 2, 32767);
+        e.advance_output(0.001, time(1).host_ns);
         let first = e.advance(0.01, 10_000_000);
         assert!(first.mouse_delta[0] > 0. || first.pad.unwrap().right_x > 0);
         axis(&mut e, 2, 0);
@@ -1310,7 +1338,8 @@ fn flick_pause_cancels_remaining_mouse_and_stick_turns_without_replaying_on_resu
         assert_eq!(resumed.mouse_delta, [0.; 2]);
         assert_eq!(resumed.pad.unwrap().right_x, 0);
         axis(&mut e, 2, 32767);
-        let fresh = e.advance(0.01, 130_000_000);
+        e.advance(0.01, 130_000_000);
+        let fresh = e.advance(0.01, 140_000_000);
         assert!(fresh.mouse_delta[0] > 0. || fresh.pad.unwrap().right_x > 0);
     }
 }
@@ -1341,7 +1370,8 @@ fn releasing_flick_pause_with_the_stick_at_the_rim_waits_for_recenter() {
     axis(&mut e, 2, 0);
     e.advance(0.01, 120_000_000);
     axis(&mut e, 2, 32767);
-    assert!(e.advance(0.01, 130_000_000).mouse_delta[0] > 0.);
+    e.advance(0.01, 130_000_000);
+    assert!(e.advance(0.01, 140_000_000).mouse_delta[0] > 0.);
 }
 
 #[test]

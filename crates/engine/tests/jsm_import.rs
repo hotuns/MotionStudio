@@ -10,6 +10,23 @@ fn convert(text: &str) -> motion_core::jsm_import::JsmImport {
     Engine::new(p.profile.clone()).unwrap();
     p
 }
+
+#[test]
+fn lean_spaces_and_rotate_only_round_trip_independently_of_local_axes() {
+    use motion_core::motion_config::Space;
+    for (command, space) in [("PLAYER_LEAN", Space::PlayerLean), ("WORLD_LEAN", Space::WorldLean)] {
+        let imported = convert(&format!("MOUSE_X_FROM_GYRO_AXIS=Z\nGYRO_SPACE={command}\nGYRO_SENS=1\nRIGHT_STICK_MODE=ROTATE_ONLY\nRIGHT_STICK_DEADZONE_OUTER=0.2\nROTATE_SMOOTH_OVERRIDE=0\nAUTO_CALIBRATE_GYRO=ON"));
+        assert_eq!(imported.skipped, 0);
+        let saved = toml::to_string_pretty(&imported.profile).unwrap();
+        let gyro = parse_profile(&saved).unwrap().gyro;
+        assert_eq!(gyro.motion.space, space);
+        assert_eq!(gyro.jsm_response.mouse_x_axes, Some(4));
+        assert!(gyro.jsm_response.auto_calibrate_gyro && gyro.needs_accel());
+        assert!(gyro.motion.flick.enabled && gyro.motion.flick.rotate_only && !gyro.motion.flick.only);
+        assert!((gyro.motion.flick.deadzone - 0.8).abs() < 1e-6);
+        assert_eq!(gyro.motion.flick.rotate_smooth_override, 0.);
+    }
+}
 #[test]
 fn imported_flick_preserves_jsm_timing_and_ignores_stick_aim_sensitivity() {
     let p = convert("GYRO_SENS=2\nRIGHT_STICK_MODE=FLICK\nFLICK_TIME=0.15\nSTICK_SENS=0");

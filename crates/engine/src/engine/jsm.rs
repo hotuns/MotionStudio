@@ -1,10 +1,10 @@
 //! Adapt Studio's editable profile and two clocks to the native JSM aiming pipeline.
+use super::gamepad_motion::GamepadMotion;
 use crate::{
     motion::cc_settings,
     motion_config::{FlickSnap, Smoothing, Space},
     profile::{Gyro, GyroOutput},
 };
-use flexinput_core::imu::BUS_GYRO_DPS;
 use flexinput_engine::eval::{jsm_aim as jsm, jsm_motion_curves};
 use glam::{Vec2, Vec3};
 use std::collections::HashSet;
@@ -18,20 +18,36 @@ struct Settings {
     pad: jsm::PadSettings,
     gesture_mode: jsm::StickMode,
     stick_scale: f32,
+    auto_calibrate: bool,
+}
+
+fn axis_mask(bits: u8) -> jsm::AxisMask {
+    jsm::AxisMask {
+        x: bits & 1 != 0,
+        y: bits & 2 != 0,
+        z: bits & 4 != 0,
+    }
 }
 
 impl Settings {
-    fn from_profile(g: &Gyro) -> Self {
+    fn from_profile(g: &Gyro, inner_deadzone: f32) -> Self {
         let m = &g.motion;
         let f = &m.flick;
         let min_sens = (g.sensitivity, g.sensitivity * g.vertical_ratio);
         let fast = g.acceleration.fast_multiplier;
         let stick_speed = f.max_dps * f.aim_sensitivity;
         let response = &g.jsm_response;
-        let shared_window = if m.smoothing == Smoothing::OneEuro {
-            0.
-        } else {
+        let legacy_smoothing = g.smoothing_ms > 0. && m.smoothing != Smoothing::OneEuro;
+        let defaults = jsm::Settings::default();
+        let window_ms = if legacy_smoothing {
             g.smoothing_ms
+        } else {
+            defaults.smooth_time * 1000.
+        };
+        let threshold = if legacy_smoothing {
+            m.decay_threshold
+        } else {
+            defaults.smooth_threshold
         };
         let aim = jsm::Settings {
             min_sens,
@@ -40,17 +56,15 @@ impl Settings {
             max_threshold: g.acceleration.full_dps,
             axis_x: if m.invert_x { -1. } else { 1. },
             axis_y: if g.invert_y { -1. } else { 1. },
-            mouse_x_from: if m.space == Space::PitchRoll {
-                jsm::AxisMask {
-                    z: true,
-                    ..Default::default()
-                }
-            } else {
-                jsm::AxisMask::Y
-            },
+            mouse_x_from: axis_mask(
+                response
+                    .mouse_x_axes
+                    .unwrap_or(if m.space == Space::PitchRoll { 4 } else { 2 }),
+            ),
+            mouse_y_from: axis_mask(response.mouse_y_axes.unwrap_or(1)),
             real_world_calibration: g.counts_per_degree,
-            smooth_time: response.smooth_time_ms.unwrap_or(shared_window) / 1000.,
-            smooth_threshold: response.smooth_threshold_dps.unwrap_or(m.decay_threshold),
+            smooth_time: response.smooth_time_ms.unwrap_or(window_ms) / 1000.,
+            smooth_threshold: response.smooth_threshold_dps.unwrap_or(threshold),
             cutoff_speed: m.cutoff_dps,
             cutoff_recovery: g.jsm_response.cutoff_recovery_dps,
             trackball_decay: m.trackball.decay,
@@ -63,14 +77,18 @@ impl Settings {
                 FlickSnap::Eight => jsm::SnapMode::Eight,
             },
             flick_snap_strength: f.snap_strength,
+            rotate_smooth_override: f.rotate_smooth_override,
             stick_sens: (stick_speed, stick_speed * f.vertical_ratio),
             ..Default::default()
         };
         let motion = jsm::MotionSettings {
             space: match m.space {
                 Space::PitchYaw | Space::PitchRoll => jsm::Space::Local,
+                Space::YawPlusRoll => jsm::Space::YawPlusRoll,
                 Space::Player => jsm::Space::PlayerTurn,
+                Space::PlayerLean => jsm::Space::PlayerLean,
                 Space::World => jsm::Space::WorldTurn,
+                Space::WorldLean => jsm::Space::WorldLean,
             },
             local_axis_offset: m.hold_angles[0],
             ..Default::default()
@@ -84,7 +102,7 @@ impl Settings {
                 .unwrap_or(m.smoothing == Smoothing::OneEuro),
             one_euro_min_cutoff: m.one_euro_cutoff,
             one_euro_speed_coeff: m.one_euro_beta,
-            roll_contribution: if m.space == Space::PitchYaw {
+            roll_contribution: if m.space == Space::YawPlusRoll {
                 m.roll_contribution
             } else {
                 0.
@@ -110,7 +128,10 @@ impl Settings {
         // stick into JSM's rate mixer, including cross-stick and empty layouts.
         let mut analog = jsm::AnalogSettings::default();
         analog.left.inner_dz = 0.;
-        analog.left.outer_dz = if f.enabled { 1. - f.deadzone } else { 0. };
+        // The source has already rescaled travel above the inner deadzone.
+        // Express JSM's physical outer boundary in that same coordinate system.
+        analog.left.outer_dz =
+            ((1. - f.deadzone) / (1. - inner_deadzone)).clamp(0., 1. - f32::EPSILON);
         analog.right.inner_dz = 0.;
         analog.right.outer_dz = 0.;
         analog.right.mode = if dest == jsm::Dest::RightStick {
@@ -119,7 +140,9 @@ impl Settings {
             jsm::StickMode::Inert
         };
         let gesture_mode = if f.enabled {
-            if f.only {
+            if f.rotate_only {
+                jsm::StickMode::RotateOnly
+            } else if f.only {
                 jsm::StickMode::FlickOnly
             } else {
                 jsm::StickMode::Flick
@@ -141,6 +164,7 @@ impl Settings {
             pad,
             gesture_mode,
             stick_scale: stick_speed / pad.calibration,
+            auto_calibrate: response.auto_calibrate_gyro,
         }
     }
 }
@@ -148,20 +172,21 @@ impl Settings {
 pub(crate) struct JsmAim {
     settings: Settings,
     aim: jsm::Aim,
-    motion: jsm::Motion,
+    motion: GamepadMotion,
     gravity: jsm::Gravity,
     analog: jsm::Analog,
     pad: jsm::Pad,
     actions: HashSet<jsm::GyroAction>,
     has_sample: bool,
     stick_active: bool,
+    pending_flick: Option<Vec2>,
     pub right: Option<Vec2>,
 }
 
 impl JsmAim {
-    pub fn new(g: &Gyro) -> Self {
+    pub fn new(g: &Gyro, inner_deadzone: f32) -> Self {
         Self {
-            settings: Settings::from_profile(g),
+            settings: Settings::from_profile(g, inner_deadzone),
             aim: Default::default(),
             motion: Default::default(),
             gravity: Default::default(),
@@ -170,22 +195,35 @@ impl JsmAim {
             actions: HashSet::with_capacity(2),
             has_sample: false,
             stick_active: false,
+            pending_flick: None,
             right: None,
         }
     }
 
-    pub fn configure(&mut self, g: &Gyro) {
-        let next = Settings::from_profile(g);
-        if next != self.settings {
-            self.clear_gyro();
-            self.settings = next;
+    pub fn configure(&mut self, g: &Gyro, inner_deadzone: f32) {
+        let next = Settings::from_profile(g, inner_deadzone);
+        if next.motion.space != self.settings.motion.space
+            || next.pad.gyro_dest != self.settings.pad.gyro_dest
+            || next.aim.mouse_x_from != self.settings.aim.mouse_x_from
+            || next.aim.mouse_y_from != self.settings.aim.mouse_y_from
+        {
+            self.clear_rate();
         }
+        self.settings = next;
+    }
+
+    pub fn flick_threshold(&self) -> f32 {
+        1. - self.settings.analog.left.outer_dz
     }
 
     pub fn clear_gyro(&mut self) {
-        self.aim.reset_sampled_gyro();
-        self.motion = Default::default();
+        self.motion.reset();
         self.gravity = Default::default();
+        self.clear_rate();
+    }
+
+    pub fn clear_rate(&mut self) {
+        self.aim.reset_sampled_gyro();
         self.has_sample = false;
         self.right = None;
         if !self.stick_active {
@@ -193,7 +231,30 @@ impl JsmAim {
         }
     }
 
+    pub fn block_gyro(&mut self) {
+        self.aim.block_sampled_gyro();
+        self.has_sample = false;
+        self.right = None;
+    }
+
+    // A thumb can reach the rim and return between two output reports. Capture
+    // its first complete vector after the SDL FIFO drains, never an isolated X
+    // or Y axis event. JSM still owns snapping, hysteresis and the entire turn.
+    pub fn observe_flick(&mut self, thumb: Vec2) {
+        if self.pending_flick.is_none()
+            && !self.aim.flick_engaged(0)
+            && matches!(
+                self.settings.gesture_mode,
+                jsm::StickMode::Flick | jsm::StickMode::FlickOnly
+            )
+            && thumb.length() >= self.flick_threshold()
+        {
+            self.pending_flick = Some(thumb);
+        }
+    }
+
     pub fn clear_stick(&mut self) {
+        self.pending_flick = None;
         if self.stick_active {
             self.aim.reset_sticks();
             self.analog = Default::default();
@@ -202,9 +263,30 @@ impl JsmAim {
         }
     }
 
-    pub fn sample(&mut self, raw: Vec3, accel: Option<Vec3>, dt: f32, tracking: [bool; 2]) -> Vec2 {
+    fn observe(&mut self, raw: Vec3, accel: Option<Vec3>, dt: f32) -> jsm::Gyro {
+        let (gyro, gravity) = self
+            .motion
+            .sample(raw, accel, dt, self.settings.auto_calibrate);
+        self.gravity = gravity;
+        gyro
+    }
+
+    pub fn measurement_rate(&mut self, raw: Vec3, accel: Option<Vec3>, dt: f32) -> Vec2 {
+        let gyro = self.observe(raw, accel, dt);
         let s = &self.settings;
-        self.gravity = self.motion.tick(accel, dt);
+        jsm::Aim::project_motion(&s.aim, &s.motion, &s.curves, self.gravity, gyro).into()
+    }
+
+    pub fn sample(
+        &mut self,
+        raw: Vec3,
+        accel: Option<Vec3>,
+        dt: f32,
+        tracking: [bool; 2],
+        active: bool,
+    ) -> Vec2 {
+        let gyro = self.observe(raw, accel, dt);
+        let s = &self.settings;
         self.actions.clear();
         if tracking[0] {
             self.actions.insert(jsm::GyroAction::TrackballX);
@@ -212,8 +294,7 @@ impl JsmAim {
         if tracking[1] {
             self.actions.insert(jsm::GyroAction::TrackballY);
         }
-        let rate = raw * BUS_GYRO_DPS;
-        self.has_sample = true;
+        self.has_sample = active;
         self.aim.sample_motion(
             &s.aim,
             &s.pad,
@@ -221,12 +302,9 @@ impl JsmAim {
             &s.curves,
             self.gravity,
             dt,
-            jsm::Gyro {
-                roll: rate.x,
-                pitch: rate.y,
-                yaw: rate.z,
-            },
+            gyro,
             &self.actions,
+            !active,
         )
     }
 
@@ -234,6 +312,7 @@ impl JsmAim {
         if gesture.is_none() {
             self.clear_stick();
         }
+        let gesture = self.pending_flick.take().or(gesture);
         if !self.has_sample && gesture.is_none() {
             self.right = None;
             return Vec2::ZERO;
@@ -252,6 +331,7 @@ impl JsmAim {
         if analog.left.mode == jsm::StickMode::VirtualStick(1) {
             // In native stick-aim mode the selected thumb owns the carrier.
             input.sticks[1] = gesture.unwrap_or_default().into();
+            analog.right.outer_dz = analog.left.outer_dz;
             analog.left.mode = jsm::StickMode::Inert;
             pad.out[1].virtual_scale = s.stick_scale;
         } else {

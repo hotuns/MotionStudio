@@ -93,7 +93,7 @@ export function OutputMonitor({ status, visible }: { status?: Status; visible: b
   const [trail, setTrail] = useState<Trail<MouseTracePoint>>({points:[],firstSequence:0});
   const [padTrail, setPadTrail] = useState<Trail<PadTracePoint>>({points:[],firstSequence:0});
   const [frozen, setFrozen] = useState<{
-    mouse:MouseTracePoint[];pad:PadTracePoint[];mouseTime:number;padTime:number;padState:VirtualPadPreview|null;aimEngine?:'studio'|'jsm';
+    mouse:MouseTracePoint[];pad:PadTracePoint[];mouseTime:number;padTime:number;padState:VirtualPadPreview|null;
   }>();
   useEffect(() => {
     if (preview) {
@@ -107,7 +107,7 @@ export function OutputMonitor({ status, visible }: { status?: Status; visible: b
   const last = preview?.mouse.at(-1);
   const mouseTime = last ? last.time_ms+(last.age_ms??0) : 0;
   const display = frozen ?? {mouse:trail.points,pad:padTrail.points,mouseTime,
-    padTime:preview?.pad_time_ms??0,padState:preview?.pad??null,aimEngine:status?.motion?.aim_engine};
+    padTime:preview?.pad_time_ms??0,padState:preview?.pad??null};
   const clear = () => {
     setFrozen(undefined);
     setTrail({points:last?[last]:[],firstSequence:last?last.sequence+1:0});
@@ -118,9 +118,7 @@ export function OutputMonitor({ status, visible }: { status?: Status; visible: b
   return <section className={styles.output}>
     <div className={styles.heading}>
       <h3>最终输出波形</h3>
-      <span className={styles.badge} data-live={!!preview && !!status?.emitting} role="status">{mode}
-        {preview&&display.aimEngine&&<> · {display.aimEngine==='jsm'?'JSM 原生':'Studio'}</>}
-      </span>
+      <span className={styles.badge} data-live={!!preview && !!status?.emitting} role="status">{mode}</span>
     </div>
     {preview ? <>
       <OutputWaveform mouse={display.mouse} pad={display.pad} mouseTime={display.mouseTime}

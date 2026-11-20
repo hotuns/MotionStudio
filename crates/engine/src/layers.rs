@@ -107,12 +107,26 @@ fn deserialize_settings<'de, D: Deserializer<'de>>(
     let Some(Value::Object(gyro)) = settings.get_mut("gyro") else {
         return Ok(settings);
     };
+    if matches!(gyro.get("aim_engine").and_then(Value::as_str), Some("studio" | "jsm")) {
+        gyro.remove("aim_engine");
+        if gyro.is_empty() {
+            settings.remove("gyro");
+            return Ok(settings);
+        }
+    }
     let Some(Value::Object(motion)) = gyro.get_mut("motion") else {
         return Ok(settings);
     };
     let Some(Value::Object(flick)) = motion.get_mut("flick") else {
         return Ok(settings);
     };
+    // A layer selecting one of JSM's exclusive modes owns both flags, even
+    // when an older layer only stored "only" and the base later changes.
+    for (selected, other) in [("only", "rotate_only"), ("rotate_only", "only")] {
+        if flick.get(selected).and_then(Value::as_bool) == Some(true) {
+            flick.entry(other).or_insert(Value::Bool(false));
+        }
+    }
     // Flick follows gyro.output. Drop obsolete layer overrides and empty groups.
     if flick.remove("output").is_some() && flick.is_empty() {
         motion.remove("flick");

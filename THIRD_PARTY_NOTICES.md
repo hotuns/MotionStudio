@@ -5,6 +5,7 @@ Motion Studio is an independent application. The project contains adapted open-s
 | Component | Source / version | Use and license |
 | --- | --- | --- |
 | FlexInput | https://github.com/x-iso/FlexInput/tree/c69f53ad3bca4ed34ef5f2d63509addaa7c767be | Core, evaluation, JSM Config, SDL input and supporting parsers, selected node descriptors and native output devices. MIT, licenses/FlexInput-MIT.txt |
+| GamepadMotionHelpers | https://github.com/JibbSmart/GamepadMotionHelpers/tree/39b578aacf34c3a1c584d8f7f194adc776f88055 | Standalone JoyShockMapper sensor fusion and gyro bias calibration. MIT, licenses/GamepadMotionHelpers-MIT.txt |
 | 3D Controller Overlay | https://github.com/larfingshnew/3d-controller-overlay via FlexInput c69f53ad | Xbox One, Xbox 360, DualSense, DualShock 4 and Switch Pro model parts packed as GLB. MIT, licenses/3D-Controller-Overlay-MIT.txt |
 | three.js | https://github.com/mrdoob/three.js/tree/r187 | WebView controller rendering and model import. MIT, licenses/Three-MIT.txt |
 | HIDMaestro | https://github.com/hifihedgehog/HIDMaestro/releases/tag/v2.0.1 | Embedded unmodified x64 DLLs/INFs and model data via pinned FlexInput; driver 2.0.0.2201; MIT, licenses/HIDMaestro-MIT.txt. Machine-local signing occurs only on explicit installation. |

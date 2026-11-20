@@ -96,7 +96,7 @@ test('worker handles discovery, pinned reconnect, valid/invalid reload, switch a
   writeFileSync(triggerFile,'schema_version = 1\nname = "Legacy source"\n[[jsm.files]]\nname = "Aim.txt"\ntext = "ZR = RMOUSE"\n');
   const legacySource=await app.wait(e=>e.type==='status'&&e.status.reload_error,mark);
   assert.equal(legacySource.status.profile_name,'Studio trigger stages');
-  assert.match(legacySource.status.reload_error,/导入 JSM 配置/);
+  assert.match(legacySource.status.reload_error,/导入文本配置/);
   mark=app.events.length;
   writeFileSync(triggerFile,'schema_version = 1\nname = "Trigger reload"\n[trigger_stages]\nright_mode = "no_skip_exclusive"\n[[actions]]\nname = "Fire"\ninput = "right_trigger_full"\noutput = "mouse:left"\n');
   await app.wait(e=>e.type==='status'&&e.status.profile_name==='Trigger reload'&&!e.status.reload_error,mark);

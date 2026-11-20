@@ -1,8 +1,8 @@
-# 导入 JSM 配置
+# 导入文本配置
 
-在「游戏配置」或「配置库」点击「导入 JSM 配置」。选择文件或粘贴文本，点击「预览转换」，核对报告后创建一份可编辑的 Studio 游戏配置。导入完成后，手动启用输出。
+在「游戏配置」或「配置库」点击「导入文本配置」。选择文件或粘贴文本，点击「预览转换」，核对报告后创建一份可编辑的 Studio 游戏配置。导入完成后，手动启用输出。
 
-点击「选择 JSM 文件」或「添加关联 JSM 文件」会打开系统文件选择器。支持 .txt、.jsm、.cfg、.conf，以及 UTF-8、带 BOM 的 UTF-16 LE／BE 和中文 GB18030／GBK。
+点击「选择主文件」或「添加关联文件」会打开系统文件选择器。支持 .txt、.jsm、.cfg、.conf，以及 UTF-8、带 BOM 的 UTF-16 LE／BE 和中文 GB18030／GBK。
 
 ## 轻拉和全拉
 
@@ -21,15 +21,15 @@ ZRF = LMOUSE
 
 ## 转换成 Studio 配置
 
-在「游戏配置 → 体感 → 瞄准引擎」选择「JSM 原生」，应用修改后，可用原生体感和拨动运行导入的配置。切回「Studio」即可用相同的动作、灵敏度和游戏转角校准对比。标准 Xbox 或 DS4 布局中，一根摇杆也可设为 AIM、FLICK 或 FLICK_ONLY。转换会保留另一根摇杆和普通按键，并把瞄准摇杆交给快速转向设置。
+导入的体感瞄准与快速转向由 Studio 直接处理。玩家空间和世界空间各支持转动和侧倾，可在「游戏配置 → 体感 → 方向与握持方式」查看。标准 Xbox 或 DS4 布局支持将一个摇杆设为 AIM、FLICK、FLICK_ONLY 或 ROTATE_ONLY，另一根摇杆和普通按键继续使用 Studio 动作映射。
 
-鼠标和虚拟右摇杆都支持体感与拨动共用输出目标。导入时会核对 `FLICK_STICK_OUTPUT` 与体感目标。JSM 的 `GYRO_CUTOFF_RECOVERY`、`RIGHT_STICK_UNDEADZONE_INNER`、`RIGHT_STICK_UNDEADZONE_OUTER` 和 `RIGHT_STICK_UNPOWER` 会写入 Studio 配置，在 JSM 原生引擎中生效。
+鼠标和虚拟右摇杆都支持体感与拨动共用输出目标。导入时会核对 `FLICK_STICK_OUTPUT` 与体感目标。原配置的 `GYRO_CUTOFF_RECOVERY`、`RIGHT_STICK_UNDEADZONE_INNER`、`RIGHT_STICK_UNDEADZONE_OUTER` 和 `RIGHT_STICK_UNPOWER` 会写入 Studio 配置，应用后即生效。
 
-JSM 原生引擎会保留阈值平滑或衰减平滑，并可在其后叠加 One Euro。只导入 `GYRO_SMOOTH_THRESHOLD` 时使用 JSM 默认的 125 ms 窗口。只导入 `GYRO_SMOOTH_TIME` 时，默认阈值为 0。可在「体感 → 防抖与平滑」调整这两项。
+导入时保留阈值平滑或衰减平滑，也可以在平滑之后叠加 One Euro。只导入 `GYRO_SMOOTH_THRESHOLD` 时使用默认的 125 ms 窗口。只导入 `GYRO_SMOOTH_TIME` 时，默认阈值为 0。可在「体感 → 防抖与平滑」调整这两项。
 
-主文件引用 `GyroConfigs/Aim.txt` 等文件时，在导入窗口点「添加关联 JSM 文件」选中 `Aim.txt`。转换按引用位置合并一层静态文件。文件数量上限为 16 个，合计及展开后均不得超过 512 KB 和 4096 行。报告标明每行的来源文件。
+主文件引用 `GyroConfigs/Aim.txt` 等文件时，在导入窗口点「添加关联文件」选中 `Aim.txt`。转换按引用位置合并一层静态文件。文件数量上限为 16 个，合计及展开后均不得超过 512 KB 和 4096 行。报告标明每行的来源文件。
 
-之前保存的 JSM 原文配置也可以转换。在「导入 JSM 配置」中选择旧版 TOML 文件，预览后另存为新配置，旧文件保留。输出和透传有差异时会显示提示。
+之前保存的 JSM 原文配置也可以转换。在「导入文本配置」中选择旧版 TOML 文件，预览后另存为新配置，旧文件保留。输出和透传有差异时会显示提示。
 
 | JSM 内容 | 转换方式 |
 |---|---|
@@ -41,9 +41,9 @@ JSM 原生引擎会保留阈值平滑或衰减平滑，并可在其后叠加 One
 | `REAL_WORLD_CALIBRATION`、`IN_GAME_SENS` | RWC / IN_GAME_SENS 转为每度鼠标计数；系统鼠标速度和实际游戏转角需核验。 |
 | `GYRO_ON/OFF`、`NO_GYRO_BUTTON` | 常开、关闭、按住开启与暂停。在 `GYRO_ON=NONE` 基础上，单键 `GYRO_ON`／`^GYRO_ON` 可转为按住／切换开启。冲突规则会报告。 |
 | `GYRO_TRACK_X/Y`、`GYRO_TRACKBALL` | 转为横向／纵向惯性体感按键。 |
-| 坐标与轴向 | LOCAL、PLAYER／PLAYER_TURN、WORLD／WORLD_TURN、默认俯仰偏航、本地横滚和标准／反转。玩家／世界模式需要加速度计。 |
+| 坐标与轴向 | LOCAL、YAW_PLUS_ROLL、PLAYER_TURN、PLAYER_LEAN、WORLD_TURN 和 WORLD_LEAN。支持本地水平与垂直输入轴、横滚贡献和陀螺仪自动校准。玩家／世界空间使用同一手柄的陀螺仪和加速度计。 |
 | 平滑和曲线 | 支持范围内的时间平滑、衰减平滑、One Euro、角度吸附、低速截止、减速刹车；六类 ACCEL_CURVE 及对应参数。算法或区间差异会提示。 |
-| 摇杆 | NO_MOUSE 的原生八向重叠判定和一个摇杆的 AIM／FLICK／FLICK_ONLY、方向绑定、统一／分侧死区与部分拨动参数。FLICK_ONLY 转为「仅拨动（关闭外圈转动）」，FLICK_SNAP_MODE（NONE／4／8）和 FLICK_SNAP_STRENGTH 转为初始角度吸附。方向绑定在输入死区之外立即响应，斜推同时触发相邻两键；外死区和其他模式仍需核验。关闭体感时，导入的摇杆瞄准／拨动使用独立启用选项，不会因此开启体感。 |
+| 摇杆 | NO_MOUSE 的原生八向重叠判定和一个摇杆的 AIM／FLICK／FLICK_ONLY／ROTATE_ONLY、方向绑定、统一／分侧死区及外圈转动平滑。FLICK_ONLY 转为「仅拨动（关闭外圈转动）」，FLICK_SNAP_MODE（NONE／4／8）和 FLICK_SNAP_STRENGTH 转为初始角度吸附。方向绑定在输入死区之外立即响应，斜推同时触发相邻两键；外死区和其他模式仍需核验。关闭体感时，导入的摇杆瞄准／拨动使用独立启用选项，不会因此开启体感。 |
 | 扳机 | 左右轻拉和全拉、`TRIGGER_THRESHOLD`、`TRIGGER_SKIP_DELAY`、双段模式及完整标准虚拟手柄透传。 |
 | 标准 Xbox／DS4 布局 | 完整的标准按钮、左右摇杆和扳机会导入为显式手柄映射。部分或重排布局仍保留在导入报告，可在动作映射中手动重建。 |
 
