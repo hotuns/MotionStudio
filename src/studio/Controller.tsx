@@ -1,11 +1,12 @@
-import { buttonNames, type Device, type Status } from '../types';
+import { buttonNames } from '../types';
+import type {OverlayDevice,OverlayStatus} from '../controller-overlay';
 import styles from './ControllerStatusSvg.module.css';
 
 type ControllerStatusSvgProps = {
   bindingCounts?: ReadonlyMap<string, number>
   showBindingCounts?: boolean
-  device?: Device | null
-  status?: Status | null
+  device?: Pick<OverlayDevice,'buttons'> | null
+  status?: Pick<OverlayStatus,'buttons'|'axes'> | null
   selectedControl?: string | null
   onSelectControl?: (control: string) => void
 }

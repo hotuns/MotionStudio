@@ -1,6 +1,6 @@
 use super::{
     measured_angles, run_input, CalibrationAction, CalibrationView, Hotkey, Hotkeys, Input,
-    DS4_IMU_CALIBRATION_UNAVAILABLE,
+    IMU_CALIBRATION_UNAVAILABLE,
 };
 use crate::{background, text, AppState};
 use motion_core::{motion_config::Stick, profile::GyroOutput, storage::Language};
@@ -227,7 +227,7 @@ impl Context {
         let output = match view.output {
             GyroOutput::Mouse => "鼠标",
             GyroOutput::RightStick => "虚拟右摇杆",
-            GyroOutput::Ds4Imu => return,
+            GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => return,
         };
         self.profile
             .set_text(&format!("{} · {}", view.profile_name, tr(output)));
@@ -247,7 +247,7 @@ impl Context {
         let label = match view.output {
             GyroOutput::Mouse => "鼠标转角系数（counts/°）",
             GyroOutput::RightStick => "满杆角速度（°/s）",
-            GyroOutput::Ds4Imu => return,
+            GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => return,
         };
         self.scale_label.set_text(tr(label));
         if self.last_scale.replace(view.draft_scale) != view.draft_scale {
@@ -559,7 +559,7 @@ impl Panel {
             let hint = match view.output {
                 GyroOutput::Mouse => "没转够 → 调大数值；转过头 → 调小数值。鼠标转角系数表示每度需要的移动量。",
                 GyroOutput::RightStick => "没转够 → 调小数值；转过头 → 调大数值。使用摇杆 Flick 前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。",
-                GyroOutput::Ds4Imu => DS4_IMU_CALIBRATION_UNAVAILABLE,
+                GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => IMU_CALIBRATION_UNAVAILABLE,
             };
             panel.detail = format!("{}\r\n\r\n{}", tr(hint), tr("每次重新对齐参照物，确认完整转一圈。修改后再次试转，保存时才写入配置。校准后保持游戏灵敏度不变。"));
             panel.valid_result = true;

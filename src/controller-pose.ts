@@ -1,7 +1,7 @@
 import {Quaternion} from 'three';
-import type {Status} from './types';
+import type {OverlayStatus} from './controller-overlay';
 
-export function controllerOrientation(status?: Status | null) {
+export function controllerOrientation(status?: Pick<OverlayStatus,'motion'> | null) {
   const values=status?.motion.orientation_quat;
   if(!values||values.length!==4||!values.every(Number.isFinite))return null;
   const pose=new Quaternion().fromArray(values);

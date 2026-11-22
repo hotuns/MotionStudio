@@ -5,7 +5,7 @@ import {
   type BufferGeometry, type Material, type Object3D,
 } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import type { Device, Status } from '../types';
+import type {OverlayDevice, OverlayStatus} from '../controller-overlay';
 import {loadParts,updateParts,type Part} from './controller-model-animation';
 import styles from './DevicePage.module.css';
 
@@ -17,7 +17,7 @@ const models = {
   switchPro: new URL('./controller-models/switch-pro.glb', import.meta.url).href,
 };
 
-function modelFor(device: Device) {
+function modelFor(device: OverlayDevice) {
   const { vendor, product, name } = device;
   if ((vendor === 0x054c && [0x0ce6, 0x0df2].includes(product)) || /dualsense/i.test(name)) return models.dualSense;
   if ((vendor === 0x054c && [0x05c4, 0x09cc, 0x0ba0].includes(product)) || /dualshock\s*4/i.test(name)) return models.dualShock4;
@@ -55,8 +55,8 @@ function radiusAround(model: Object3D, center: Vector3) {
 export type ControllerPreviewFailure = 'graphics' | 'model';
 
 export default function Controller3D({ device, status, pose, onUnavailable, className }: {
-  device: Device;
-  status?: Status;
+  device: OverlayDevice;
+  status?: OverlayStatus;
   pose: Quaternion;
   onUnavailable: (reason: ControllerPreviewFailure) => void;
   className?: string;

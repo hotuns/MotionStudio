@@ -13,7 +13,7 @@ use tauri::{
 
 pub const LABEL: &str = "controller-overlay";
 
-fn logical_size(settings: &ControllerOverlaySettings) -> [f64; 2] {
+pub(super) fn logical_size(settings: &ControllerOverlaySettings) -> [f64; 2] {
     let width = f64::from(settings.width);
     let model = width * 0.75;
     let panel = (width * 0.48).clamp(128., 224.);
@@ -58,6 +58,12 @@ fn placement(
 
 pub fn configure(app: &AppHandle, settings: &ControllerOverlaySettings) -> Result<(), String> {
     settings.validate().map_err(text)?;
+    // Restore the desktop display even if the recording port is occupied at startup.
+    let recording = app.state::<crate::obs_overlay::RecordingSource>().configure(app, settings.obs_enabled);
+    configure_desktop(app, settings).and(recording)
+}
+
+fn configure_desktop(app: &AppHandle, settings: &ControllerOverlaySettings) -> Result<(), String> {
     if !settings.enabled {
         if let Some(window) = app.get_webview_window(LABEL) {
             window.destroy().map_err(text)?;
@@ -142,7 +148,7 @@ fn require_window(label: &str) -> Result<(), String> {
     }
 }
 
-fn live(status: &Status, ready: bool, fresh: bool) -> bool {
+pub(super) fn live(status: &Status, ready: bool, fresh: bool) -> bool {
     ready
         && fresh
         && status.device.is_some()
@@ -314,10 +320,12 @@ mod tests {
     fn old_settings_keep_overlay_off_and_values_are_bounded() {
         let settings: motion_core::storage::Settings = serde_json::from_str("{}").unwrap();
         assert!(!settings.controller_overlay.enabled);
+        assert!(!settings.controller_overlay.obs_enabled);
         assert_eq!(settings.controller_overlay.width, 320);
         assert_eq!(settings.controller_overlay.content, OverlayContent::KeyMouse);
         let old: ControllerOverlaySettings = serde_json::from_str(r#"{"enabled":true,"width":400}"#).unwrap();
         assert_eq!(old.content, OverlayContent::Controller);
+        assert!(old.enabled && !old.obs_enabled);
         assert_eq!(logical_size(&old), [400., 300.]);
         assert_eq!(logical_size(&ControllerOverlaySettings {content: OverlayContent::Both, ..old}), [400., 492.]);
         for (width, opacity) in [(159, 100), (641, 100), (320, 19), (320, 101)] {

@@ -1,5 +1,5 @@
 use motion_core::{
-    engine::{Ds4ImuState, Engine, InputEvent},
+    engine::{Engine, ImuState, InputEvent},
     motion_config::*,
     profile::{Action, GamepadTarget, GyroActivationMode, GyroOutput, Profile, TimestampSource},
     storage::parse_profile,
@@ -121,11 +121,46 @@ fn jsm_virtual_flick_uses_full_stick_speed_and_releases_when_flick_is_disabled()
     assert_eq!(e.advance_output(0.002, time(6).host_ns).pad.unwrap().right_x, 0);
 }
 
+fn sensor_profiles() -> [Profile; 2] {
+    [(GamepadTarget::DualShock4, GyroOutput::Ds4Imu), (GamepadTarget::DualSense, GyroOutput::DualSenseImu)]
+        .map(|(target, output)| {
+            let mut p = profile();
+            p.virtual_gamepad = target;
+            p.gyro.output = output;
+            p
+        })
+}
+
 #[test]
-fn ds4_sensor_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
-    let mut p = profile();
-    p.virtual_gamepad = GamepadTarget::DualShock4;
-    p.gyro.output = GyroOutput::Ds4Imu;
+fn shared_profiles_and_layers_select_the_matching_sony_sensor_target() {
+    for mut p in sensor_profiles() {
+        let output = p.gyro.output;
+        let text = toml::to_string(&p).unwrap();
+        let loaded = parse_profile(&text).unwrap();
+        assert_eq!(loaded.gyro.output, output);
+        assert!(loaded.has_sensor_passthrough());
+        p.gyro.output = GyroOutput::Mouse;
+        let layer = serde_json::json!({
+            "id":"motion", "name":"Motion", "input":"south",
+            "settings":{"gyro":{"output":output}}
+        });
+        p.layers.push(serde_json::from_value(layer).unwrap());
+        let layered = parse_profile(&toml::to_string(&p).unwrap()).unwrap();
+        assert!(layered.has_sensor_passthrough());
+        assert_eq!(motion_core::layers::resolve(&layered, &[0]).unwrap().gyro.output, output);
+        p.virtual_gamepad = if p.virtual_gamepad == GamepadTarget::DualSense { GamepadTarget::DualShock4 } else { GamepadTarget::DualSense };
+        assert!(p.validate().is_err(), "mismatched sensor target in a layer");
+        p.virtual_gamepad = GamepadTarget::Xbox360;
+        assert!(p.validate().is_err());
+    }
+}
+
+#[test]
+fn sony_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
+    sensor_profiles().into_iter().for_each(check_passthrough);
+}
+
+fn check_passthrough(mut p: Profile) {
     p.gyro.pause_input = Some("south".into());
     p.gyro.sensitivity = 3.;
     p.gyro.motion.cutoff_dps = 100.;
@@ -137,12 +172,12 @@ fn ds4_sensor_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
         ..Default::default()
     });
     let mut e = Engine::new(p).unwrap();
-    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    assert_eq!(e.frame.imu, ImuState::Neutral);
 
     accel(&mut e, 10, [0., 0., 1.]);
     gyro(&mut e, 11, 1., 2., 3.);
     gyro(&mut e, 12, 1., 2., 3.);
-    let Ds4ImuState::Sample(sample) = e.frame.ds4_imu else {
+    let ImuState::Sample(sample) = e.frame.imu else {
         panic!("missing gyro sample");
     };
     assert_eq!(sample.timestamp_ns, 12_000_000);
@@ -154,21 +189,22 @@ fn ds4_sensor_passthrough_bypasses_aim_and_clears_on_pause_and_stale_accel() {
     assert_eq!(e.frame.pad.unwrap().right_x, 0);
 
     button(&mut e, 0, true);
-    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    assert_eq!(e.frame.imu, ImuState::Neutral);
     button(&mut e, 0, false);
     gyro(&mut e, 14, 1., 2., 3.);
     gyro(&mut e, 15, 1., 2., 3.);
     gyro(&mut e, 59, 1., 2., 3.);
-    assert!(matches!(e.frame.ds4_imu, Ds4ImuState::Sample(_)));
+    assert!(matches!(e.frame.imu, ImuState::Sample(_)));
     e.advance_output(0.001, 60_000_000);
-    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    assert_eq!(e.frame.imu, ImuState::Neutral);
 }
 
 #[test]
-fn ds4_filters_three_axes_only_while_enabled_and_restart_after_a_toggle() {
-    let mut p = profile();
-    p.virtual_gamepad = GamepadTarget::DualShock4;
-    p.gyro.output = GyroOutput::Ds4Imu;
+fn sony_passthrough_filters_three_axes_only_while_enabled_and_restarts_after_a_toggle() {
+    sensor_profiles().into_iter().for_each(check_sensor_filters);
+}
+
+fn check_sensor_filters(mut p: Profile) {
     p.gyro.activation = "south".into();
     p.gyro.activation_mode = GyroActivationMode::Toggle;
     p.gyro.ds4_imu_filter.smoothing_ms = 10.;
@@ -187,7 +223,7 @@ fn ds4_filters_three_axes_only_while_enabled_and_restart_after_a_toggle() {
     }
     let mut e = Engine::new(p.clone()).unwrap();
     let check = |e: &Engine, ms, expected: [f32; 3]| {
-        let Ds4ImuState::Sample(sample) = e.frame.ds4_imu else {
+        let ImuState::Sample(sample) = e.frame.imu else {
             panic!("missing filtered sample");
         };
         assert_eq!(sample.timestamp_ns, time(ms).sensor_ns);
@@ -200,7 +236,7 @@ fn ds4_filters_three_axes_only_while_enabled_and_restart_after_a_toggle() {
     accel(&mut e, 10, [0., 0., 1.]);
     gyro(&mut e, 11, 2., 4., 6.);
     gyro(&mut e, 12, 2., 4., 6.);
-    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    assert_eq!(e.frame.imu, ImuState::Neutral);
     assert_eq!(e.motion.custom_filters.statuses()[0].calls, 0);
 
     button(&mut e, 0, true);
@@ -215,7 +251,7 @@ fn ds4_filters_three_axes_only_while_enabled_and_restart_after_a_toggle() {
 
     button(&mut e, 0, false);
     button(&mut e, 0, true);
-    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    assert_eq!(e.frame.imu, ImuState::Neutral);
     button(&mut e, 0, false);
     button(&mut e, 0, true);
     gyro(&mut e, 25, 5., 10., 15.);
@@ -225,7 +261,7 @@ fn ds4_filters_three_axes_only_while_enabled_and_restart_after_a_toggle() {
     p.gyro.ds4_imu_filter.noise_gate = 2.;
     e.sensor_calibration.gyro_noise_dps = 1.;
     e.apply_layer(p).unwrap();
-    assert_eq!(e.frame.ds4_imu, Ds4ImuState::Neutral);
+    assert_eq!(e.frame.imu, ImuState::Neutral);
     gyro(&mut e, 27, 0.1, 0.2, 0.3);
     check(&e, 27, [0.; 3]);
 }

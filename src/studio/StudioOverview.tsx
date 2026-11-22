@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import {nativeSmoothing,usesJsmAim} from '../motion-presets';
 import { buttonNames, labels, type Device, type Profile, type Status } from '../types';
 import Controller from './Controller';
@@ -42,12 +43,14 @@ export function StudioOverview({ profile, device, status, deviceCount, guideStep
   const pressed = buttonNames.filter((_, i) => live?.buttons[i]);
   const gyro = profile?.gyro;
   const smooth = gyro&&usesJsmAim(gyro)?nativeSmoothing(gyro):undefined;
-  const windowMs = smooth?(smooth.threshold>0?smooth.window:0):gyro?.smoothing_ms??0;
+  const sensorOutput = isSensorOutput(gyro?.output);
+  const windowMs = sensorOutput ? gyro?.ds4_imu_filter?.smoothing_ms??0
+    : smooth?(smooth.threshold>0?smooth.window:0):gyro?.smoothing_ms??0;
   const output = profile?.virtual_gamepad === 'dualsense' ? 'DualSense'
     : profile?.virtual_gamepad === 'dualshock_4' ? 'DualShock 4'
     : profile?.virtual_gamepad === 'xbox_360' ? 'Xbox 360' : '键盘与鼠标';
   const gyroMode = !gyro ? '—' : !gyro.enabled ? '关闭'
-    : gyro.output === 'ds4_imu' ? 'DS4 传感器直通'
+    : isSensorOutput(gyro.output) ? sensorOutputLabel(gyro.output)
     : gyro.motion.mode === 'steering' ? '姿态控制摇杆'
     : gyro.motion.mode === 'stick_rotation' ? '体感旋转摇杆方向'
     : gyro.output === 'right_stick' ? '右摇杆瞄准' : '鼠标瞄准';
@@ -148,7 +151,7 @@ export function StudioOverview({ profile, device, status, deviceCount, guideStep
         {gyro?.enabled && <details className={styles.profileDetails}>
           <summary>调校参数</summary>
           <dl className={styles.tuningValues}>
-            <div><dt>水平 / 垂直灵敏度</dt><dd>{gyro.sensitivity.toFixed(1)} / {(gyro.sensitivity * gyro.vertical_ratio).toFixed(1)}</dd></div>
+            {!sensorOutput&&<div><dt>水平 / 垂直灵敏度</dt><dd>{gyro.sensitivity.toFixed(1)} / {(gyro.sensitivity * gyro.vertical_ratio).toFixed(1)}</dd></div>}
             <div><dt>平滑时间</dt><dd>{windowMs>0?windowMs+' ms':'关闭'}</dd></div>
           </dl>
         </details>}

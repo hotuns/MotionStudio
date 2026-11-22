@@ -1,7 +1,8 @@
+import {isSensorOutput} from './sensor-passthrough';
 import type {Gyro} from './types';
 
 export function usesJsmAim(gyro:Gyro) {
-  return gyro.output!=='ds4_imu' && gyro.motion.mode==='pointer';
+  return !isSensorOutput(gyro.output) && gyro.motion.mode==='pointer';
 }
 
 export function nativeSmoothing(gyro:Gyro) {

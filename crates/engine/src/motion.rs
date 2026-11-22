@@ -5,7 +5,7 @@ use crate::{
     engine::{node, GraphRunner},
     motion_config::*,
     motion_curves as cc,
-    profile::{Ds4ImuFilter, Gyro, GyroAcceleration},
+    profile::{ImuFilter, Gyro, GyroAcceleration},
 };
 use flexinput_core::{
     imu::{ImuEstimator, ImuReading, BUS_ACCEL_G, BUS_GYRO_DPS},
@@ -62,7 +62,7 @@ pub struct MotionRuntime {
     pub reading: ImuReading,
     pub telemetry: MotionTelemetry,
     smoothing: AimSmoothing,
-    ds4_smoothed_gyro: Option<Vec3>,
+    passthrough_smoothed_gyro: Option<Vec3>,
     brake: cc::Brake,
     recovery: f32,
     history: VecDeque<(Vec2, f32)>,
@@ -271,7 +271,7 @@ impl MotionRuntime {
             reading: ImuReading::default(),
             telemetry: MotionTelemetry::default(),
             smoothing: AimSmoothing::default(),
-            ds4_smoothed_gyro: None,
+            passthrough_smoothed_gyro: None,
             brake: cc::Brake::default(),
             recovery: 0.0,
             history: VecDeque::new(),
@@ -294,7 +294,7 @@ impl MotionRuntime {
     pub fn reset_filters(&mut self) {
         self.custom_filters.reset_state();
         self.smoothing = AimSmoothing::default();
-        self.ds4_smoothed_gyro = None;
+        self.passthrough_smoothed_gyro = None;
         self.brake = cc::Brake::default();
         self.recovery = 0.;
         self.history.clear();
@@ -302,10 +302,10 @@ impl MotionRuntime {
         self.was_tracking = [false; 2];
         self.rotation = StickRotation::default();
     }
-    /// Filter the calibrated three-axis gyro while preserving the DS4 sensor basis.
-    pub(crate) fn filter_ds4_gyro(
+    /// Filter the calibrated three-axis gyro while preserving the physical sensor basis.
+    pub(crate) fn filter_passthrough_gyro(
         &mut self,
-        settings: &Ds4ImuFilter,
+        settings: &ImuFilter,
         gyro: Vec3,
         accel: Vec3,
         dt: f32,
@@ -330,10 +330,10 @@ impl MotionRuntime {
         }
         if settings.smoothing_ms > 0. {
             rate = self
-                .ds4_smoothed_gyro
+                .passthrough_smoothed_gyro
                 .unwrap_or(rate)
                 .lerp(rate, ema_weight(dt, settings.smoothing_ms));
-            self.ds4_smoothed_gyro = Some(rate);
+            self.passthrough_smoothed_gyro = Some(rate);
         }
         rate.to_array()
     }
@@ -425,7 +425,7 @@ impl MotionRuntime {
             .unwrap_or(Vec3::ZERO)
             .to_array()
             .map(|v| v * BUS_ACCEL_G);
-        if g.uses_ds4_imu() || g.uses_jsm_aim() {
+        if g.uses_sensor_passthrough() || g.uses_jsm_aim() {
             return MotionSample {
                 rate: Vec2::ZERO,
                 physical_rate: Vec2::new(raw.x, -raw.y),

@@ -1,13 +1,10 @@
-import {lazy,Suspense,useEffect,useRef,useState} from 'react';
+import {useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {listen} from '@tauri-apps/api/event';
 import {setLanguage,useLanguage} from '../i18n';
 import type {Device,Status} from '../types';
 import {liveControllerStatus,type ControllerOverlayView} from '../controller-overlay';
-import {KeyMouseOverlay} from './KeyMouseOverlay';
-import styles from './FloatingController.module.css';
-
-const FloatingControllerModel=lazy(()=>import('./FloatingControllerModel'));
+import {OverlaySurface} from './OverlaySurface';
 
 export function FloatingController() {
   useLanguage();
@@ -63,12 +60,6 @@ export function FloatingController() {
   const device=live?.device??view?.device??lastDevice.current;
   if(device)lastDevice.current=device;
   if(!view?.settings.enabled)return null;
-  const content=view.settings.content??'controller';
-  return <main className={styles.surface} data-content={content} aria-label="桌面悬浮显示" style={{opacity:view.settings.opacity/100}}>
-    {content!=='key_mouse'&&<Suspense fallback={<div/>}>
-      <FloatingControllerModel key={device?.path} device={device} live={live} followMotion={view.settings.follow_motion}
-        restarts={view.restart_count} offline={offline}/>
-    </Suspense>}
-    {content!=='controller'&&<KeyMouseOverlay status={live} ageMs={ageMs} width={window.innerWidth}/>}
-  </main>;
+  return <OverlaySurface settings={view.settings} device={device} live={live} ageMs={ageMs}
+    restarts={view.restart_count} offline={offline} width={window.innerWidth}/>;
 }

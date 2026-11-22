@@ -286,29 +286,29 @@ pub struct Gyro {
     pub smoothing_ms: f32,
     pub noise_threshold: f32,
     pub acceleration: GyroAcceleration,
-    #[serde(skip_serializing_if = "Ds4ImuFilter::is_default")]
-    pub ds4_imu_filter: Ds4ImuFilter,
+    #[serde(skip_serializing_if = "ImuFilter::is_default")]
+    pub ds4_imu_filter: ImuFilter,
     pub motion: crate::motion_config::MotionConfig,
 }
 impl Gyro {
-    pub fn uses_ds4_imu(&self) -> bool {
-        self.output == GyroOutput::Ds4Imu
+    pub fn uses_sensor_passthrough(&self) -> bool {
+        matches!(self.output, GyroOutput::Ds4Imu | GyroOutput::DualSenseImu)
     }
 
     pub fn needs_accel(&self) -> bool {
         if self.uses_jsm_aim() {
             return self.motion.aim_needs_accel();
         }
-        self.uses_ds4_imu() || self.motion.needs_accel()
+        self.uses_sensor_passthrough() || self.motion.needs_accel()
     }
 
     pub fn uses_jsm_aim(&self) -> bool {
-        !self.uses_ds4_imu() && self.motion.mode == crate::motion_config::MotionMode::Pointer
+        !self.uses_sensor_passthrough() && self.motion.mode == crate::motion_config::MotionMode::Pointer
     }
 
     pub(crate) fn flick_available(&self) -> bool {
         let flick = &self.motion.flick;
-        !self.uses_ds4_imu()
+        !self.uses_sensor_passthrough()
             && (self.enabled || flick.standalone)
             && (flick.enabled || flick.stick_aim)
     }
@@ -334,7 +334,7 @@ impl Default for Gyro {
             smoothing_ms: 0.0,
             noise_threshold: 0.0,
             acceleration: GyroAcceleration::default(),
-            ds4_imu_filter: Ds4ImuFilter::default(),
+            ds4_imu_filter: ImuFilter::default(),
             motion: Default::default(),
         }
     }
@@ -347,6 +347,8 @@ pub enum GyroOutput {
     Mouse,
     RightStick,
     Ds4Imu,
+    #[serde(rename = "dualsense_imu")]
+    DualSenseImu,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
@@ -410,23 +412,23 @@ impl JsmResponse {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Ds4ImuFilter {
+pub struct ImuFilter {
     pub smoothing_ms: f32,
     pub noise_gate: f32,
     pub use_custom_filters: bool,
 }
 
-impl Ds4ImuFilter {
+impl ImuFilter {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
 
     fn validate(&self) -> Result<()> {
         if !(0.0..=120.0).contains(&self.smoothing_ms) {
-            bail!("DS4 IMU smoothing must be between 0 and 120 ms");
+            bail!("Sensor smoothing must be between 0 and 120 ms");
         }
         if !(0.0..=5.0).contains(&self.noise_gate) {
-            bail!("DS4 IMU noise gate must be between 0 and 5");
+            bail!("Sensor noise gate must be between 0 and 5");
         }
         Ok(())
     }
@@ -615,15 +617,13 @@ pub fn valid_output(output: &str) -> bool {
     crate::bindings::output_chord(output).is_some()
 }
 impl Profile {
-    pub fn has_ds4_imu(&self) -> bool {
-        self.gyro.uses_ds4_imu()
+    pub fn has_sensor_passthrough(&self) -> bool {
+        self.gyro.uses_sensor_passthrough()
             || self.layers.iter().any(|layer| {
-                layer
-                    .settings
-                    .get("gyro")
+                let output = layer.settings.get("gyro")
                     .and_then(|gyro| gyro.get("output"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some("ds4_imu")
+                    .and_then(serde_json::Value::as_str);
+                matches!(output, Some("ds4_imu" | "dualsense_imu"))
             })
     }
 
@@ -705,11 +705,18 @@ impl Profile {
             }
         }
         let g = &self.gyro;
-        if self.has_ds4_imu() && self.virtual_gamepad != GamepadTarget::DualShock4 {
-            bail!("传感器直通需要选择虚拟 DualShock 4");
+        // Layer validation checks this same rule for each resolved combination.
+        match g.output {
+            GyroOutput::Ds4Imu if self.virtual_gamepad != GamepadTarget::DualShock4 => {
+                bail!("传感器直通需要选择虚拟 DualShock 4");
+            }
+            GyroOutput::DualSenseImu if self.virtual_gamepad != GamepadTarget::DualSense => {
+                bail!("DualSense 传感器直通需要选择虚拟 DualSense（PS5）");
+            }
+            _ => {}
         }
         if g.enabled
-            && !g.uses_ds4_imu()
+            && !g.uses_sensor_passthrough()
             && g.motion.mode != crate::motion_config::MotionMode::Pointer
             && g.output != GyroOutput::RightStick
         {

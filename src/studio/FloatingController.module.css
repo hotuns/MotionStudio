@@ -6,8 +6,8 @@
   width: 100%; height: 100%; min-width: 0; min-height: 0;
   overflow: hidden;
 }
-.surface { position: relative; display: grid; grid-template-rows: minmax(0,1fr); width: 100vw; height: 100vh; overflow: hidden; pointer-events: none; user-select: none; }
-.surface[data-content='both'] { grid-template-rows: minmax(0,1fr) min(100%,clamp(128px,48vw,224px)); }
+.surface { position: relative; display: grid; container-type: inline-size; grid-template-rows: minmax(0,1fr); width: 100vw; height: 100vh; overflow: hidden; pointer-events: none; user-select: none; transform-origin: top left; }
+.surface[data-content='both'] { grid-template-rows: minmax(0,1fr) min(100%,clamp(128px,var(--key-mouse-height,48vw),224px)); }
 .controller { position: relative; min-width: 0; min-height: 0; }
 .surface .model { position: absolute; inset: 0; width: 100%; height: 100%; min-height: 0; aspect-ratio: auto; background: transparent; }
 .fallback { position: absolute; inset: 0; display: grid; align-items: center; padding: 4px 10px; }

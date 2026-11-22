@@ -1,6 +1,6 @@
 //! Studio lifecycle adapter over the pinned FlexInput composite USB backend.
 use crate::{
-    engine::PadState,
+    engine::{ImuState, PadState},
     feedback::FeedbackFrame,
     output::{GamepadBackend, GamepadStatus, Sink},
     profile::GamepadTarget,
@@ -19,7 +19,7 @@ pub fn probe() -> Result<()> {
             && std::env::var("SDL_JOYSTICK_HIDAPI").as_deref() != Ok("0"),
         "Native output is disabled for this session"
     );
-    ensure!(host_controller_available(), "DualSense audio output requires the usbip-win2 virtual USB host controller. Install it before starting this profile.");
+    ensure!(host_controller_available(), "虚拟 DualSense 需要 usbip-win2 虚拟 USB 主控制器，请在「设置与组件」检查组件。");
     Ok(())
 }
 pub struct DualSenseSink {
@@ -60,6 +60,7 @@ impl Sink for DualSenseSink {
             backend: GamepadBackend::UsbIp,
             connected: self.device.host_connected(),
             player_index: None,
+            sensor_queue_drops: self.device.sensor_queue_drops(),
             protected_devices: self.protected.clone(),
         })
     }
@@ -72,9 +73,19 @@ impl Sink for DualSenseSink {
         self.device.flush();
         Ok(())
     }
+    fn stage_imu(&mut self, state: ImuState) -> Result<()> {
+        match state {
+            ImuState::Sample(sample) => {
+                self.device.set_imu_sample(sample.timestamp_ns, sample.gyro_dps, sample.accel_g);
+            }
+            ImuState::Neutral => self.device.clear_imu(true),
+            ImuState::Off => self.device.clear_imu(false),
+        }
+        Ok(())
+    }
     fn idle_gamepad(&mut self) -> Result<()> {
         self.poll()?;
-        self.device.flush();
+        self.device.flush_idle();
         Ok(())
     }
     fn button(&mut self, _: &str, _: bool) -> Result<()> {

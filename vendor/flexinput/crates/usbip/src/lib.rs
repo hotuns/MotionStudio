@@ -145,6 +145,12 @@ impl EmulatedDevice {
         self.inner.submit_input(report);
     }
 
+    /// Queue a timestamped HID input report and return the number of older
+    /// reports lost to host backpressure. A neutral/reset report can purge stale motion.
+    pub fn submit_sensor_input(&self, report: &[u8], clear: bool) -> usize {
+        self.inner.submit_sensor_input(report, clear)
+    }
+
     /// The reports the host wrote since the last call, oldest first.
     pub fn take_outputs(&self) -> Vec<OutputFrame> {
         self.inner.take_outputs()

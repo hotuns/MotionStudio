@@ -7,6 +7,7 @@ mod game_calibration;
 mod hid_inventory;
 mod import_files;
 mod installers;
+mod obs_overlay;
 mod overlay;
 mod policy;
 mod profile_share;
@@ -811,6 +812,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(updates::Updates::new(portable_restart.clone()))
+        .manage(obs_overlay::RecordingSource::default())
         .setup(|app| {
             let handle = app.handle().clone();
             let root = runtime::runtime_dir(&handle).map_err(anyhow::Error::msg)?;
@@ -880,6 +882,7 @@ fn main() {
             controller_overlay::controller_overlay_state,
             controller_overlay::controller_overlay_displays,
             controller_overlay::controller_overlay_ready,
+            obs_overlay::obs_source_info,
             workspace,
             snapshot,
             save_profile,
@@ -918,6 +921,7 @@ fn main() {
         .expect("Motion Studio startup failed");
     let exit_code = app.run_return(|app, event| {
         if let tauri::RunEvent::Exit = event {
+            app.state::<obs_overlay::RecordingSource>().stop();
             app.state::<AppState>().overlay.shutdown();
             app.state::<AppState>().client.shutdown();
         }

@@ -410,6 +410,7 @@ impl Sink for HidMaestroSink {
             backend: crate::output::GamepadBackend::HidMaestro,
             connected: pad.is_connected(),
             player_index: None,
+            sensor_queue_drops: None,
             protected_devices: self.protected.clone(),
         })
     }

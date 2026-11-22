@@ -5,21 +5,37 @@ import {createElement} from 'react';
 import {renderToStaticMarkup} from 'react-dom/server';
 import {build} from 'esbuild';
 
+const root=fileURLToPath(new URL('../',import.meta.url));
 const compiled=await build({
-  absWorkingDir:fileURLToPath(new URL('../',import.meta.url)),
-  entryPoints:['src/studio/KeyMouseOverlay.tsx'],bundle:true,write:false,format:'esm',platform:'node',
+  absWorkingDir:root,stdin:{resolveDir:root,contents:
+    "export * from './src/studio/KeyMouseOverlay'; export * from './src/studio/ControllerOverlaySettings';"},
+  bundle:true,write:false,format:'esm',platform:'node',
   outfile:'overlay-test.mjs',logLevel:'silent',
   plugins:[{name:'shared-react',setup(builder){
     builder.onResolve({filter:/^react(?:\/.*)?$/},args=>({path:import.meta.resolve(args.path),external:true}));
   }}],
 });
 const js=compiled.outputFiles.find(file=>file.path.endsWith('.mjs'));
-const {KeyMouseOverlay}=await import('data:text/javascript;base64,'+Buffer.from(js.text).toString('base64'));
+const {KeyMouseOverlay,ControllerOverlaySettings}=await import('data:text/javascript;base64,'+Buffer.from(js.text+'\n//# sourceURL=overlay-test.mjs').toString('base64'));
 const button=(name,down,age_ms)=>({kind:'button',name,down,age_ms});
 const status=(held,recent)=>({state:'running',emitting:true,output_preview:{key_mouse:{held,recent},mouse:[]}});
 function draw(status,ageMs=0) {
   return renderToStaticMarkup(createElement(KeyMouseOverlay,{status,ageMs,width:320}));
 }
+
+test('recording and desktop calibration can each run alone or together',()=>{
+  for(const [enabled,obs_enabled,destination] of [
+    [true,undefined,'仅桌面'],[false,true,'仅 OBS'],[true,true,'桌面和 OBS'],[false,false,'关闭'],
+  ]) {
+    const value={enabled,obs_enabled,width:320,opacity:100,position:'bottom_left',monitor:null,follow_motion:true};
+    const markup=renderToStaticMarkup(createElement(ControllerOverlaySettings,{value,busy:false,onChange:()=>{}}));
+    assert.ok(markup.includes('aria-pressed="true">'+destination+'</button>'));
+    assert.equal(markup.includes('OBS 浏览器源地址'),obs_enabled===true);
+    assert.equal(markup.includes('aria-label="悬浮窗显示器"'),enabled);
+    assert.equal(markup.includes('aria-label="悬浮窗大小"'),!!(enabled||obs_enabled));
+    assert.ok(markup.includes('aria-pressed="true">三维手柄</button>'),'legacy content preference');
+  }
+});
 
 test('a released chord survives between frames without combining separate taps',()=>{
   const edges=[

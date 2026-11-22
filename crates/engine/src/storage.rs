@@ -96,7 +96,9 @@ pub enum OverlayPosition {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ControllerOverlaySettings {
+    /// The desktop WebView and the recording source have independent lifetimes.
     pub enabled: bool,
+    pub obs_enabled: bool,
     #[serde(default)] // Previously saved overlay settings always displayed the controller.
     pub content: OverlayContent,
     pub width: u32,
@@ -117,6 +119,7 @@ impl Default for ControllerOverlaySettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            obs_enabled: false,
             content: OverlayContent::KeyMouse,
             width: 320,
             opacity: 100,

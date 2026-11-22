@@ -1,3 +1,4 @@
+import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import {useLayoutEffect,useRef,useState} from 'react';
 import {t} from '../i18n';
 import {chordParts,outputLabel,type Device,type Profile,type Status} from '../types';
@@ -14,11 +15,12 @@ import styles from './MappingOverview.module.css';
 function labels(entry:OverviewEntry,profile:Profile,split:boolean) {
   const inputLabel=(input:string)=>chordParts(input).map(part=>t(padInputLabel(part,split))).join(' + ');
   if(entry.kind==='setting') {
-    const passthrough=profile.gyro.output==='ds4_imu';
-    const gyroOutput=t(passthrough?'DS4 传感器':profile.gyro.output==='mouse'?'鼠标':'虚拟右摇杆');
+    const output=profile.gyro.output;
+    const passthrough=isSensorOutput(output);
+    const gyroOutput=t(passthrough?sensorOutputLabel(output):output==='mouse'?'鼠标':'虚拟右摇杆');
     if(entry.setting==='stick_mouse')return {input:t(entry.input==='left_stick'?'左摇杆':'右摇杆'),output:t('移动鼠标'),name:t('摇杆鼠标'),tags:[t('持续移动')]};
     if(entry.setting==='flick')return {input:t(entry.input==='left_stick'?'左摇杆':'右摇杆'),output:gyroOutput,name:t('快速转向'),tags:[t(profile.gyro.motion.flick.standalone?'独立启用':'随体感启用')]};
-    return {input:t('体感'),output:gyroOutput,name:t(passthrough?'DS4 传感器直通':'体感瞄准'),tags:[profile.gyro.activation==='always'?t('始终开启'):inputLabel(profile.gyro.activation)]};
+    return {input:t('体感'),output:gyroOutput,name:t(passthrough?sensorOutputLabel(output):'体感瞄准'),tags:[profile.gyro.activation==='always'?t('始终开启'):inputLabel(profile.gyro.activation)]};
   }
   if(entry.kind==='motion'||entry.kind==='turn') {
     const value=motionActionLabels(entry);

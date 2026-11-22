@@ -60,5 +60,6 @@
   "查看全部组件与输出设置": "View all components and output settings",
   "准备组件": "Set up components",
   "安装指引会按当前输出方式列出所需组件，显示安装状态，并提供安装入口。": "The setup guide lists the components needed for your output mode, their status, and installation options.",
-  "确认组件、手柄和配置后，点击顶栏的「启动映射」，再进入游戏。": "Check your components, controller, and profile, then select Start mapping in the top bar before entering a game."
+  "确认组件、手柄和配置后，点击顶栏的「启动映射」，再进入游戏。": "Check your components, controller, and profile, then select Start mapping in the top bar before entering a game.",
+  "创建支持六轴传感器直通、USB 音频与高清触觉的虚拟 DualSense。": "Creates a virtual DualSense with six-axis sensor passthrough, USB audio and HD haptics."
 }

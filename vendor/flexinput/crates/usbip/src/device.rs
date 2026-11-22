@@ -263,18 +263,34 @@ impl DeviceInner {
     /// A built input report (report id first): answers the oldest parked read
     /// on the input endpoint, or waits for the next one.
     pub(crate) fn submit_input(&self, report: &[u8]) {
+        self.queue_input(report, self.frame_queue, false);
+    }
+
+    /// Sensor frames carry individual sample clocks. Reuse the bounded event FIFO
+    /// of a physical passthrough. A clear supersedes motion still waiting for a read.
+    pub(crate) fn submit_sensor_input(&self, report: &[u8], clear: bool) -> usize {
+        self.queue_input(report, MAX_PASSTHROUGH_QUEUE, clear)
+    }
+
+    fn queue_input(&self, report: &[u8], capacity: usize, clear: bool) -> usize {
         // Held across the send, so two reports can't reach the wire out of order.
         let mut h = self.hid.lock().unwrap();
+        if clear {
+            h.frames.clear();
+        }
         h.last_input.clear();
         h.last_input.extend_from_slice(report);
         let seq = h.parked.get_mut(&self.primary_in).and_then(VecDeque::pop_front);
         match seq {
-            Some(seq) => self.slot.ret_submit(seq, 0, report.len(), Some(report)),
+            Some(seq) => {
+                self.slot.ret_submit(seq, 0, report.len(), Some(report));
+                0
+            }
             None => {
-                if h.frames.len() >= self.frame_queue {
-                    h.frames.pop_front();
-                }
+                let dropped = (h.frames.len() + 1).saturating_sub(capacity);
+                h.frames.drain(..dropped);
                 h.frames.push_back(report.to_vec());
+                dropped
             }
         }
     }
@@ -612,6 +628,25 @@ pub(crate) mod tests {
         assert_eq!(recv(&rx).4, vec![0x01, 0xBB], "the newest report answers the next read");
         dev.handle_submit(&submit(12, 4, true, 64, [0; 8]), None, Vec::new());
         assert!(rx.recv_timeout(Duration::from_millis(30)).is_err(), "nothing older is left to send");
+    }
+
+    #[test]
+    fn timestamped_reports_reach_the_hid_reader_in_order_and_neutral_purges_backlog() {
+        let (dev, _wire, rx) = device(DUALSENSE_COMPOSITE_JSON);
+        let read = |seq| {
+            dev.handle_submit(&submit(seq, 4, true, 64, [0; 8]), None, Vec::new());
+            recv(&rx).4
+        };
+        for n in 0..=MAX_PASSTHROUGH_QUEUE {
+            assert_eq!(dev.submit_sensor_input(&[1, n as u8], false), usize::from(n == MAX_PASSTHROUGH_QUEUE));
+        }
+        assert_eq!(read(1), [1, 1]);
+        assert_eq!(read(2), [1, 2]);
+        assert_eq!(dev.submit_sensor_input(&[1, 0], true), 0);
+        assert_eq!(read(3), [1, 0]);
+        dev.handle_submit(&submit(4, 4, true, 64, [0; 8]), None, Vec::new());
+        dev.submit_sensor_input(&[1, 42], false);
+        assert_eq!(recv(&rx).4, [1, 42], "a parked host read gets the next sample immediately");
     }
 
     #[test]

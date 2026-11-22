@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use flexinput_core::Signal;
 use flexinput_virtual::VirtualDevice;
 use motion_core::{
-    engine::{Ds4ImuSample, Ds4ImuState, Frame, PadState},
+    engine::{ImuSample, ImuState, Frame, PadState},
     flex_output::FlexVirtualSink,
     output::{Dispatcher, Sink},
 };
@@ -20,8 +20,8 @@ enum Call {
     Mouse(i32, i32),
     Scroll(i32, i32),
     Pad(PadState),
-    StageDs4Imu(Ds4ImuState),
-    RetryDs4ImuClear,
+    StageImu(ImuState),
+    RetryImuClear,
     Cancel,
 }
 #[derive(Clone, Default)]
@@ -61,12 +61,12 @@ impl Sink for Mock {
         self.record(Call::Pad(pad));
         Ok(())
     }
-    fn stage_ds4_imu(&mut self, state: Ds4ImuState) -> Result<()> {
-        self.record(Call::StageDs4Imu(state));
+    fn stage_imu(&mut self, state: ImuState) -> Result<()> {
+        self.record(Call::StageImu(state));
         Ok(())
     }
-    fn retry_ds4_imu_clear(&mut self) -> Result<()> {
-        self.record(Call::RetryDs4ImuClear);
+    fn retry_imu_clear(&mut self) -> Result<()> {
+        self.record(Call::RetryImuClear);
         Ok(())
     }
 }
@@ -79,36 +79,36 @@ fn flex_output_forwards_ds4_samples_and_clear_with_unchanged_pad() {
         buttons: 0x1000,
         ..Default::default()
     };
-    let first = Ds4ImuSample {
+    let first = ImuSample {
         timestamp_ns: 1_000_000,
         gyro_dps: [1., 2., 3.],
         accel_g: [0., 0., 1.],
     };
-    let second = Ds4ImuSample {
+    let second = ImuSample {
         timestamp_ns: 2_000_000,
         ..first
     };
-    for ds4_imu in [Ds4ImuState::Sample(first), Ds4ImuState::Sample(second)] {
+    for imu in [ImuState::Sample(first), ImuState::Sample(second)] {
         out.apply(&Frame {
             pad: Some(pad),
-            ds4_imu,
+            imu,
             ..Default::default()
         })
         .unwrap();
     }
     out.reset().unwrap();
-    out.retry_ds4_imu_clear().unwrap();
+    out.retry_imu_clear().unwrap();
     assert_eq!(
         mock.calls.lock().unwrap().as_slice(),
         [
-            Call::StageDs4Imu(Ds4ImuState::Sample(first)),
+            Call::StageImu(ImuState::Sample(first)),
             Call::Pad(pad),
-            Call::StageDs4Imu(Ds4ImuState::Sample(second)),
+            Call::StageImu(ImuState::Sample(second)),
             Call::Pad(pad),
             Call::Cancel,
-            Call::StageDs4Imu(Ds4ImuState::Off),
+            Call::StageImu(ImuState::Off),
             Call::Pad(PadState::default()),
-            Call::RetryDs4ImuClear,
+            Call::RetryImuClear,
         ]
     );
 }

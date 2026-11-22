@@ -1,3 +1,4 @@
+import {isSensorOutput} from '../sensor-passthrough';
 import type {Action,GamepadBinding,MotionBinding,Profile,TurnBinding} from '../types';
 import {chordParts} from '../types';
 import {editingProfile,layerSettingOverridden} from '../layers';
@@ -36,7 +37,7 @@ export function buildMappingOverview(base:Profile,layerId='') {
     if(padOutputs.includes(value.output))entries.push({kind:'gamepad',value,index,id:'gamepad:'+index,layerId:source('gamepad_bindings'),controls:controls(value.input)});
   });
   profile.gyro.motion.turns.forEach((value,index)=>entries.push({kind:'turn',value,index,id:'turn:'+index,layerId:source('gyro.motion.turns'),controls:controls(value.input)}));
-  const passthrough=profile.gyro.output==='ds4_imu';
+  const passthrough=isSensorOutput(profile.gyro.output);
   if(!passthrough)profile.gyro.motion.bindings.forEach((value,index)=>entries.push({kind:'motion',value,index,id:'motion:'+index,layerId:source('gyro.motion.bindings'),controls:['motion']}));
   if(profile.stick_mouse.enabled)entries.push({kind:'setting',setting:'stick_mouse',input:profile.stick_mouse.stick+'_stick',index:0,id:'setting:stick_mouse',layerId:source('stick_mouse'),controls:[profile.stick_mouse.stick+'_stick']});
   if(!passthrough&&profile.gyro.motion.flick.enabled)entries.push({kind:'setting',setting:'flick',input:profile.gyro.motion.flick.stick+'_stick',index:0,id:'setting:flick',layerId:source('gyro.motion.flick'),controls:[profile.gyro.motion.flick.stick+'_stick']});

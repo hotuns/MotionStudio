@@ -1,11 +1,11 @@
 {
   "name": "motion-studio",
-  "version": "0.19.1",
+  "version": "0.19.2",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "dev:web": "vite --host 127.0.0.1 --port 1435 --strictPort",
+    "dev:web": "vite build --mode obs-dev && vite --host 127.0.0.1 --port 1435 --strictPort",
     "build:web": "node scripts/verify-native-input.mjs && node scripts/verify-i18n.mjs && tsc --noEmit && vite build",
     "build": "tauri build",
     "package:portable": "node scripts/package-portable.mjs",

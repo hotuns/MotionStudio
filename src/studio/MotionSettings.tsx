@@ -1,7 +1,8 @@
+import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import {memo} from 'react';
 import {Range, Toggle} from './Controls';
 import {applyJsmResponse,isJsmResponse,nativeSmoothing,usesJsmAim} from '../motion-presets';
-import type {Ds4ImuFilter, FilterStatus, Gyro, Profile} from '../types';
+import type {ImuFilter, FilterStatus, Gyro, Profile} from '../types';
 import {useLanguage} from '../i18n';
 import styles from './MotionControls.module.css';
 import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice} from './AdvancedMotion';
@@ -34,11 +35,12 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
 }) {
   useLanguage();
   const gyro=profile.gyro;
-  const passthrough=gyro.output==='ds4_imu';
+  const output=gyro.output;
+  const passthrough=isSensorOutput(output);
   const jsm=usesJsmAim(gyro);
-  const ds4Filter=gyro.ds4_imu_filter;
+  const sensorFilter=gyro.ds4_imu_filter;
   const setGyro=<K extends keyof Gyro>(key:K,value:Gyro[K])=>update(draft=>{draft.gyro[key]=value;});
-  const setDs4Filter=(change:Ds4ImuFilter)=>update(draft=>{
+  const setSensorFilter=(change:ImuFilter)=>update(draft=>{
     draft.gyro.ds4_imu_filter={...draft.gyro.ds4_imu_filter,...change};
   });
   const activation=gyro.activation==='always'?'always':gyro.activation_mode;
@@ -48,7 +50,7 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
     :gyro.motion.smoothing==='ema'&&gyro.smoothing_ms===ms);
 
   return <div className={settingStyles.page}>
-    <SettingSection id="motion-main" title={passthrough?'DS4 传感器直通':'体感瞄准'} defaultOpen
+    <SettingSection id="motion-main" title={passthrough?sensorOutputLabel(output):'体感瞄准'} defaultOpen
       summary={gyro.enabled?(passthrough?'已启用':<>{gyro.sensitivity}×</>):'关闭'}>
       <Toggle label="启用体感" value={gyro.enabled} onChange={value=>setGyro('enabled',value)}
         help={passthrough?'按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。':undefined}/>
@@ -96,7 +98,7 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
       </>}
       {passthrough?<>
         <p className={styles.hint}>使用同时支持陀螺仪和加速度计的实体手柄。设备静止校准和安装方向可在「设备与输入」调整。</p>
-        {missingImu&&<p className={settingStyles.notice}>虚拟 PS4 传感器直通需要支持陀螺仪和加速度计的体感接口</p>}
+        {missingImu&&<p className={settingStyles.notice}>传感器直通需要同时支持陀螺仪和加速度计的手柄接口</p>}
         <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
         <div className="studio-actions"><button type="button" className="secondary-btn" onClick={onOpenDevice}>打开设备校准</button></div>
       </>:<div className="studio-actions"><button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button></div>}
@@ -111,15 +113,15 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
         title={passthrough?'直通滤波':'采样与扩展滤波'} defaultOpen={passthrough} lazy={!passthrough}
         summary={!passthrough&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
         {passthrough?<>
-          <p className={styles.hint}>发送给虚拟 DS4 前可处理三轴角速度。加速度计数据沿用设备校准。</p>
-          <Range label="直通平滑时间" value={ds4Filter?.smoothing_ms??0} min={0} max={120} step={1} unit=" ms"
-            onChange={smoothing_ms=>setDs4Filter({smoothing_ms})}
+          <p className={styles.hint}>发送给虚拟手柄前可处理三轴角速度。加速度计数据沿用设备校准。</p>
+          <Range label="直通平滑时间" value={sensorFilter?.smoothing_ms??0} min={0} max={120} step={1} unit=" ms"
+            onChange={smoothing_ms=>setSensorFilter({smoothing_ms})}
             help="平滑值越大，角速度越平稳，快速转动的响应也会变慢。0 关闭平滑。"/>
-          <Range label="直通噪声抑制倍率" value={ds4Filter?.noise_gate??0} min={0} max={5} step={0.1} unit="×"
-            onChange={noise_gate=>setDs4Filter({noise_gate})}
+          <Range label="直通噪声抑制倍率" value={sensorFilter?.noise_gate??0} min={0} max={5} step={0.1} unit="×"
+            onChange={noise_gate=>setSensorFilter({noise_gate})}
             help="按设备静止校准得到的噪声底抑制小幅波动。0 关闭噪声抑制。"/>
-          <Toggle label="直通应用原始角速度脚本" value={ds4Filter?.use_custom_filters??false}
-            onChange={use_custom_filters=>setDs4Filter({use_custom_filters})}
+          <Toggle label="直通应用原始角速度脚本" value={sensorFilter?.use_custom_filters??false}
+            onChange={use_custom_filters=>setSensorFilter({use_custom_filters})}
             help="在直通时应用下方已启用的 Rhai 脚本。"/>
         </>:<SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>}
         {jsm&&<Toggle label="自动校准陀螺仪偏移" value={gyro.jsm_response?.auto_calibrate_gyro??false}
@@ -127,7 +129,7 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
           help="手柄静止时自动估计陀螺仪的残余偏移。默认关闭。"/>}
         <SettingField label="自定义滤波" path="gyro.motion.custom_filters"><SettingLabel label="自定义滤波"/>
           <CustomFilters key={profileId} profile={profile} update={update} embedded rawGyroOnly={passthrough}
-            running={(!passthrough||!!ds4Filter?.use_custom_filters)&&filtersRunning}
+            running={(!passthrough||!!sensorFilter?.use_custom_filters)&&filtersRunning}
             statuses={filterStatuses}
             onReset={()=>onMotionAction('reset_filters')}/>
         </SettingField>

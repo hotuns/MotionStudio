@@ -122,7 +122,7 @@ export function SystemPage(props: Props) {
           <div className={styles.driverInfo}>
             <div className={styles.driverTitle}><h3>{componentNames[kind]}</h3>
               <span className={styles.badge} data-ready={state?.status === 'running'}>{state ? componentStateNames[state.status] ?? state.status : '等待检测'}</span></div>
-            <p>{kind === 'usbip'?'创建支持 USB 音频与高清触觉的虚拟 DualSense。':kind === 'hidmaestro' ? '提供虚拟键盘、鼠标、Xbox 360 和 DualShock 4。安装时会在本机生成签名证书，Windows 会请求管理员授权。' : hidhide ? '安装后由软件自动管理：开始映射时隐藏实体手柄，停止后恢复，无需手动配置。' : '安装此驱动后可使用 ViGEm 虚拟手柄。'}</p>
+            <p>{kind === 'usbip'?'创建支持六轴传感器直通、USB 音频与高清触觉的虚拟 DualSense。':kind === 'hidmaestro' ? '提供虚拟键盘、鼠标、Xbox 360 和 DualShock 4。安装时会在本机生成签名证书，Windows 会请求管理员授权。' : hidhide ? '安装后由软件自动管理：开始映射时隐藏实体手柄，停止后恢复，无需手动配置。' : '安装此驱动后可使用 ViGEm 虚拟手柄。'}</p>
             {state?.error && <p className={styles.error} role="alert">{state.error}</p>}
           </div>
           <div className={styles.actions}>

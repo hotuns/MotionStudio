@@ -4,6 +4,16 @@ The product is a Studio-style configuration and interaction layer over FlexInput
 
 For the complete upstream crate inventory, the current 0.8.0 integration and remaining optional scope, see [FlexInput 模块与接入范围](flexinput-module-plan.md).
 
+## Virtual DualSense sensor passthrough
+
+Studio uses FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. The virtual/USB-IP `CompositeDevice`, bundled `dualsense-composite.json`, HIDMaestro `PinState` and `encode_report_into`, and USB/IP feature report 0x05 provide the device, six-axis layout, Sony axis conversion and calibration response. The virtual device exposes a wired DualSense through the existing usbip-win2 connection.
+
+The profile parser in `crates/hidmaestro/src/profile.rs` exposes the declared rolling sequence byte and 32-bit sample-clock offset. The local adapter in `crates/virtual/src/composite_device.rs` translates calibrated physical units to the encoder's normalized pins using the calibration advertised by this persona (16 counts per degree/second, 8192 counts per g). It writes the USB sensor clock in 1/3 µs ticks to the standard 64-byte input report. Button changes retain the last sensor timestamp. Pausing, stale samples and handoff clear angular velocity and retain a unit gravity direction. The desktop output tick can flush controls independently of incoming samples. [SDL DualSense input reader](https://github.com/libsdl-org/SDL/blob/e21b424c76b3c27cf07b420cfd565292c876d554/src/joystick/hidapi/SDL_hidapi_ps5.c)
+
+`crates/usbip/src/lib.rs` exposes the ordered path in `crates/usbip/src/device.rs`. Motion samples and intervening control edges use the existing 16-report physical passthrough capacity until the USB host reads them. If the host falls behind, the oldest pending reports are displaced and counted in `output_gamepad.sensor_queue_drops`. A clearing report discards pending motion immediately. Ordinary virtual pad traffic uses the original latest-state queue.
+
+Studio shares the physical SDL FIFO, calibration, activation and optional three-axis filter with DS4. The existing `gyro.ds4_imu_filter` key stores the common settings for compatibility with shared profiles. `gyro.output = "dualsense_imu"` selects the DualSense target and `"ds4_imu"` selects DS4 with ViGEm. IPC protocol 26 carries the new output choice.
+
 ## JoyShockMapper angular aiming and Flick
 
 All Studio profiles and layers use JSM for angular aiming and Flick. The legacy `gyro.aim_engine` field accepts both `studio` and `jsm` on input and is omitted from saved profiles. Obsolete layer overrides are discarded when read. Both mouse and virtual right-stick output use the same selected destination. Studio owns button activators, layers, physical input calibration, device lifetime and report delivery. Pose steering, stick-direction rotation, game-angle measurement and DS4 sensor forwarding keep their dedicated paths. The output monitor shows whether the signal is live, simulated or paused. IPC version 25 covers the new profile fields.
@@ -232,6 +242,8 @@ The WebView follows the transforms in `crates/ui/src/model/obj.rs`, the input pa
 The stick display adapter explicitly converts the raw SDL axes in Studio `Status.axes` (positive Y points down) to the upward-positive stick vector expected by `ControllerLive::part_xform` in `crates/ui/src/model/callback.rs` at commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Previously the WebView applied the upstream rotation sign directly to raw SDL Y, reversing front/back movement. The shared `controller-model-animation.ts` keeps the upstream hinge amount, mesh names and button travel and corrects only this coordinate seam. Model files, upstream source and hashes are unchanged. Projection regressions exercise both sticks on all five actual bundled GLBs; the planar SVG's existing SDL conversion remains unchanged.
 
 The recording overlay reuses that same `Controller3D`, model assets, pose basis and engine-status channel. A separate transparent, non-focusing, click-through Tauri window remains visible when the main UI is minimized. Studio owns persisted display/corner/size/opacity settings, a local pose reference, a planar fallback and window cleanup on application exit. It never opens another controller, creates output, changes HidHide or starts mapping/observation. The desktop client records status freshness; inactive, disconnected, faulted or stale status clears the displayed controls rather than holding the last pose. This display adapter does not change the timestamped input FIFO, processing or output cadence.
+
+Studio's OBS browser source reuses the same controller renderer, FlexInput model assets at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`, and the existing keyboard/mouse output preview. A read-only loopback HTTP endpoint in the desktop process serves the transparent viewer and the selected controls from the latest engine status. Opening the OBS source and showing the desktop window are independent settings. The recording view reads successful mapped writes, including the short-lived edge history and relative mouse trail, directly from the same snapshot as the desktop display.
 
 ## 0.15.0 output preview
 

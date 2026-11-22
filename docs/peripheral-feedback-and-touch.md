@@ -61,7 +61,7 @@ Motion Studio 可将虚拟手柄收到的游戏震动和灯光回传给实体手
 
 单触摸板的 1／2 是两根手指。双触摸板的 1／2 分别是左右板的接触。关闭触摸板鼠标时也能用接触触发体感、动作和配置切换。参见[快捷键切换](controller-shortcuts.md)。
 
-示例：[触摸板鼠标](../examples/touchpad-mouse.toml)、[触摸开启体感与肩键层](../examples/touch-to-aim.toml)。专用 HID 输入 provider、触摸分区编辑、原生 DS4 传感器透传不在本版声明的覆盖范围内，多传感器融合保持排除。DualSense 音频的首版范围见上文。
+示例：[触摸板鼠标](../examples/touchpad-mouse.toml)、[触摸开启体感与肩键层](../examples/touch-to-aim.toml)。在「游戏配置 → 体感」可将六轴传感器直通给虚拟 DualShock 4（ViGEm）或虚拟 DualSense（USB/IP）。两种模式都可使用开启键、暂停键和三轴直通滤波。DualSense 音频的首版范围见上文。
 
 ## 无真机验证
 

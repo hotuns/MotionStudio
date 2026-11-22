@@ -1,4 +1,5 @@
 import {useEffect,useMemo,useRef,useState} from 'react';
+import {isSensorOutput} from '../sensor-passthrough';
 import {chordParts,outputLabel,type Action,type Device,type GamepadBinding,type Profile,type Status} from '../types';
 import {t} from '../i18n';
 import Controller from './Controller';
@@ -86,7 +87,7 @@ export function ActionMappings({profile, baseProfile, layerId='', onEditBase, on
     ? controlLabel(part) : t(padInputLabel(part, split))).join(' + ');
   const touches = (part: string) => physicalControl(part) === 'touchpad' || (split && part === 'misc2');
   const motion = profile.gyro.motion;
-  const passthrough = profile.gyro.output === 'ds4_imu';
+  const passthrough = isSensorOutput(profile.gyro.output);
   const gamepadOutputs = virtualGamepadControls(profile.virtual_gamepad);
   const gamepadBindings = profile.gamepad_bindings ?? gamepadOutputs.map(output=>({input:output,output}));
   const canFillGamepad = fillStandardGamepadBindings(profile.virtual_gamepad, gamepadBindings).length

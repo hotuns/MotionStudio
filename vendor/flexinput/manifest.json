@@ -572,10 +572,10 @@
     {
       "path": "crates/hidmaestro/src/profile.rs",
       "upstreamSha256": "d18b99a6c382b057f14fd7fbadbdacfd6283a1c0c107ea4d345f2f13a847995c",
-      "vendoredSha256": "03684b2096a54dab12537668a89abb9099966a0994e0df33003166a7572c177a",
+      "vendoredSha256": "3a6e3c580aac73c49de2e609824602caf87d6e336c287f84a615058213181a30",
       "modified": true,
       "upstreamGitBlob": "e20c684aaca8c5bbe9bd96225807040303f2d5be",
-      "patch": "Expose shared keyboard key-count/report-size constants for the 16KRO descriptor; update keyboard preset documentation and existing layout assertions."
+      "patch": "Expose shared keyboard key-count/report-size constants for the 16KRO descriptor; update keyboard preset documentation and existing layout assertions. Expose the sequence and 32-bit sensor timestamp offsets declared by the embedded report layout."
     },
     {
       "path": "crates/hidmaestro/src/shm.rs",
@@ -1042,9 +1042,9 @@
       "path": "crates/virtual/src/composite_device.rs",
       "upstreamSha256": "b300de0f0cf7a45f78f784b7ea2d4c84d8da29c2ae0bba6a859b581e61b351c8",
       "upstreamGitBlob": "b72a99f76296dd09d582e3240e159e860e6dc6eb",
-      "vendoredSha256": "8c3628969b6f4833bb4307db45a79271d499633a72935739fb41904afe27f942",
+      "vendoredSha256": "46b07985fb3a75539ef416992fb52deea39d249ab62be8420e6f210503ea5164",
       "modified": true,
-      "patch": "Add fallible attach_existing and raw PCM seam, host connection status and feedback command sequence. Disable automatic installation and global attachment sweeps. Gate original GUI-metadata tests behind upstream-output-tests."
+      "patch": "Add fallible attach_existing and raw PCM seam, host connection status and feedback command sequence. Disable automatic installation and global attachment sweeps. Gate original GUI-metadata tests behind upstream-output-tests. Stage calibrated DualSense IMU pins, stamp the per-sample 3 MHz USB clock, and submit ordered reports with pause/reset handling and queue-loss accounting. Add detached and loopback reader tests."
     },
     {
       "path": "crates/usbip/src/audio.rs",
@@ -1058,9 +1058,9 @@
       "path": "crates/usbip/src/device.rs",
       "upstreamSha256": "cfbcfd0375a5596e4b1c023f80fb4df20184dbaddc6d8bd13bea4e30356bf257",
       "upstreamGitBlob": "ff67d4eba439e5312a81dabea83113a2e2e093f3",
-      "vendoredSha256": "ae1a0ca30fb26edd8fd5b5ebaf3bdde9ce56775670cd49aec55005edc271e682",
+      "vendoredSha256": "44fba29f61454847863e806bf400849f399c96b7b807bc5d3bf700dbeb218b57",
       "modified": true,
-      "patch": "Update ISO PCM callback regression for compacted bytes and stream-reset notifications."
+      "patch": "Update ISO PCM callback regression for compacted bytes and stream-reset notifications. Share interrupt-IN delivery with an ordered sensor FIFO and a neutral purge, returning the overflow count. Add an in-memory host-read regression."
     },
     {
       "path": "crates/usbip/src/server.rs",
@@ -1109,8 +1109,9 @@
       "path": "crates/usbip/src/lib.rs",
       "upstreamSha256": "35325e56dd5602df2e6480b1dc3c1c50cfe0c4c0e82a6ece56840b31a69682b2",
       "upstreamGitBlob": "4369ad82dc484fd1ce3243467e74df99002e885e",
-      "vendoredSha256": "35325e56dd5602df2e6480b1dc3c1c50cfe0c4c0e82a6ece56840b31a69682b2",
-      "modified": false
+      "vendoredSha256": "2e69e8529345a209aff830bad2ddb1bb3168f78bac9ec3da90291b0ba1213d0f",
+      "modified": true,
+      "patch": "Expose bounded ordered sensor input and neutral purging through the existing EmulatedDevice."
     },
     {
       "path": "crates/usbip/src/pacer.rs",

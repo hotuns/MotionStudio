@@ -1,7 +1,8 @@
 import {modifierOutputs} from '../keyboard';
 import {t} from '../i18n';
 import {mouseTrajectory,signedCount} from '../mouse-trajectory';
-import {outputLabel,type KeyMouseEvent,type MouseTracePoint,type Status} from '../types';
+import {outputLabel,type KeyMouseEvent,type MouseTracePoint} from '../types';
+import type {OverlayStatus} from '../controller-overlay';
 import styles from './KeyMouseOverlay.module.css';
 
 const KEY_ECHO_MS=700;
@@ -93,7 +94,7 @@ function Movement({points,ageMs}:{points:MouseTracePoint[];ageMs:number}) {
   </div>;
 }
 
-export function KeyMouseOverlay({status,ageMs,width}:{status?:Status;ageMs:number;width:number}) {
+export function KeyMouseOverlay({status,ageMs,width}:{status?:OverlayStatus;ageMs:number;width:number}) {
   const preview=status?.emitting&&!status.binding_capture&&!status.ui_navigation?status.output_preview:null;
   const held=preview?.key_mouse?.held??[];
   const events=preview?.key_mouse?.recent??[];

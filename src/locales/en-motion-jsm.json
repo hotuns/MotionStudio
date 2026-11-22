@@ -157,5 +157,19 @@
   "仅拨动和仅转动不能同时启用": "Flick only and rotate only are mutually exclusive",
   "瞄准输入轴组合值需在 0 到 7 之间": "The aim input axis combination must be between 0 and 7",
   "线性预设使用固定灵敏度，并关闭平滑、低速抑制、吸附和刹车。": "The Linear preset uses constant sensitivity and turns off smoothing, low-speed suppression, snapping and braking.",
-  "此配置的边缘转向设置仅在旧版角速度瞄准中生效。": "This profile’s edge turning settings apply only to the legacy angular aiming mode."
+  "此配置的边缘转向设置仅在旧版角速度瞄准中生效。": "This profile’s edge turning settings apply only to the legacy angular aiming mode.",
+  "DualSense 传感器直通": "DualSense sensor passthrough",
+  "传感器直通": "Sensor passthrough",
+  "虚拟 DualSense（PS5）": "Virtual DualSense (PS5)",
+  "DualSense 传感器直通需要选择虚拟 DualSense（PS5）": "DualSense sensor passthrough requires the virtual DualSense (PS5) target.",
+  "传感器直通需要同时支持陀螺仪和加速度计的手柄接口": "Sensor passthrough requires a controller interface with both a gyroscope and an accelerometer.",
+  "虚拟 DualSense 需要 usbip-win2 虚拟 USB 主控制器，请在「设置与组件」检查组件。": "The virtual DualSense requires the usbip-win2 virtual USB host controller. Check Settings and components.",
+  "当前配置使用传感器直通，可切换到支持六轴输出的虚拟手柄。": "This profile uses sensor passthrough. Select a virtual controller with six-axis output.",
+  "发送给虚拟手柄前可处理三轴角速度。加速度计数据沿用设备校准。": "Filter the three gyro axes before sending them to the virtual controller. Acceleration uses the device calibration.",
+  "选择虚拟 DualSense（PS5）或使用 ViGEm 的虚拟 DualShock 4，即可直通六轴传感器。": "Select a virtual DualSense (PS5) or a ViGEm DualShock 4 for six-axis sensor passthrough.",
+  "通过 USB/IP 向虚拟 DualSense 发送校准后的陀螺仪和加速度计数据。可在支持 DualSense 体感的游戏或 Steam 输入中设置瞄准。": "Send calibrated gyro and accelerometer readings to the virtual DualSense over USB/IP. Configure aiming in a game with DualSense motion support or in Steam Input.",
+  "鼠标和右摇杆模式由 Studio 计算瞄准。传感器直通把六轴数据交给游戏或 Steam 输入处理。": "Studio computes aiming for mouse and right-stick output. Sensor passthrough sends all six axes to the game or Steam Input.",
+  "DS4 DualSense PS5 传感器直通 ViGEm USB/IP IMU": "DS4 DualSense PS5 sensor passthrough ViGEm USB/IP IMU",
+  "主机未及时读取而丢弃的传感器报告": "Sensor reports dropped while waiting for a host read",
+  "在游戏配置中选择虚拟手柄并启动映射后，这里显示设备和连接状态。": "Choose a virtual controller in the game profile and start mapping to see the device and its connection status."
 }

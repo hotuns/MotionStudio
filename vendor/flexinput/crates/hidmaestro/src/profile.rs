@@ -145,6 +145,8 @@ pub struct ExtendedLayout {
     pub accel_x: Option<usize>,
     pub accel_y: Option<usize>,
     pub accel_z: Option<usize>,
+    pub sequence_num: Option<usize>,
+    pub sensor_timestamp_u32: Option<usize>,
     /// First byte of each touchpad finger record (the active-flag/counter byte).
     /// A real device sets bit 7 of this byte when the finger is NOT touching.
     pub touch_fingers: Vec<usize>,
@@ -197,6 +199,8 @@ impl ExtendedLayout {
                     "accelX" => out.accel_x = Some(byte),
                     "accelY" => out.accel_y = Some(byte),
                     "accelZ" => out.accel_z = Some(byte),
+                    "sequenceNum" if f.ty.as_deref() == Some("uint8-rolling") => out.sequence_num = Some(byte),
+                    "sensorTimestamp" if f.ty.as_deref() == Some("uint32-le") => out.sensor_timestamp_u32 = Some(byte),
                     "batteryLevel" => out.battery_level = Some(byte),
                     _ => {}
                 }

@@ -1,4 +1,5 @@
 import {useEffect, useState} from 'react';
+import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import {invoke} from '@tauri-apps/api/core';
 import {inputLabel, outputLabel, type Profile} from '../types';
 import {
@@ -26,8 +27,9 @@ async function inspect(lookup: Lookup, signal: AbortSignal): Promise<Result> {
 
 function ProfilePreview({profile}: {profile: Profile}) {
   const {gyro} = profile;
-  const passthrough = gyro.output === 'ds4_imu';
-  const mode = passthrough ? 'DS4 传感器直通' : gyro.motion.mode === 'steering' ? '姿态控制摇杆' :
+  const output = gyro.output;
+  const passthrough = isSensorOutput(output);
+  const mode = passthrough ? sensorOutputLabel(output) : gyro.motion.mode === 'steering' ? '姿态控制摇杆' :
     gyro.motion.mode === 'stick_rotation' ? '体感旋转摇杆方向' :
     gyro.output === 'mouse' ? '鼠标瞄准' : '右摇杆瞄准';
   const groups = [{id: '', name: '基础层', actions: profile.actions}, ...(profile.layers ?? [])];

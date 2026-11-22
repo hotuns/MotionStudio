@@ -1,13 +1,13 @@
 import {useCallback,useMemo,useRef,useState} from 'react';
 import {Quaternion} from 'three';
 import {controllerOrientation,controllerViewPose} from '../controller-pose';
-import type {Device,Status} from '../types';
+import type {OverlayDevice,OverlayStatus} from '../controller-overlay';
 import Controller from './Controller';
 import Controller3D,{type ControllerPreviewFailure} from './Controller3D';
 import styles from './FloatingController.module.css';
 
 export default function FloatingControllerModel({device,live,followMotion,restarts,offline}:{
-  device:Device|null;live?:Status;followMotion:boolean;restarts:number;offline:boolean;
+  device:OverlayDevice|null;live?:OverlayStatus;followMotion:boolean;restarts:number;offline:boolean;
 }) {
   const [failure,setFailure]=useState<ControllerPreviewFailure>();
   const origin=useRef<{key:string;rotation:Quaternion}>();

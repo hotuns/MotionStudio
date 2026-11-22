@@ -60,11 +60,11 @@ impl<K: Sink, P: Sink> Sink for SplitSink<K, P> {
     fn gamepad(&mut self, pad: PadState) -> Result<()> {
         self.pad.gamepad(pad)
     }
-    fn stage_ds4_imu(&mut self, state: Ds4ImuState) -> Result<()> {
-        self.pad.stage_ds4_imu(state)
+    fn stage_imu(&mut self, state: ImuState) -> Result<()> {
+        self.pad.stage_imu(state)
     }
-    fn retry_ds4_imu_clear(&mut self) -> Result<()> {
-        self.pad.retry_ds4_imu_clear()
+    fn retry_imu_clear(&mut self) -> Result<()> {
+        self.pad.retry_imu_clear()
     }
     fn idle_gamepad(&mut self) -> Result<()> {
         self.pad.idle_gamepad()
@@ -135,6 +135,7 @@ mod tests {
                 backend: GamepadBackend::Vigem,
                 connected: true,
                 player_index: Some(2),
+                sensor_queue_drops: None,
                 protected_devices: self.protected_devices(),
             })
         }

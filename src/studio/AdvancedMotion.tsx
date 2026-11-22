@@ -1,4 +1,5 @@
 import {memo} from 'react';
+import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import type { MotionConfig, Profile } from '../types';
 import {useLanguage} from '../i18n';
 import {nativeSmoothing,usesJsmAim} from '../motion-presets';
@@ -241,7 +242,7 @@ export function AdvancedTurning({profile,update}:Props) {
   </>;
 }
 export function FlickStickSettings({profile,update}:Props) {
-  if(profile.gyro.output==='ds4_imu')return <SettingSection id="flick-main" title="快速转向" summary="传感器直通期间停用">
+  if(isSensorOutput(profile.gyro.output))return <SettingSection id="flick-main" title="快速转向" summary="传感器直通期间停用">
     <p className={styles.hint}>切换到鼠标或虚拟右摇杆体感输出后，可使用拨动和配套摇杆瞄准。</p>
   </SettingSection>;
   const f=profile.gyro.motion.flick;
@@ -325,13 +326,15 @@ export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: G
     </>;
 }
 
-export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,ds4Required}:
-  Props&GameCalibrationProps&{vigemGamepad:boolean;ds4Required:boolean}) {
+export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad}:
+  Props&GameCalibrationProps&{vigemGamepad:boolean}) {
   useLanguage();
   const gyro=profile.gyro;
-  const passthrough=gyro.output==='ds4_imu';
+  const passthrough=isSensorOutput(gyro.output);
   const isDs4=profile.virtual_gamepad==='dualshock_4';
-  const canUsePassthrough=isDs4&&vigemGamepad;
+  const isDualSense=profile.virtual_gamepad==='dualsense';
+  const sensorOutput=isDualSense?'dualsense_imu':'ds4_imu';
+  const canUsePassthrough=isDualSense||(isDs4&&vigemGamepad);
   const outputLocked=gyro.motion.mode!=='pointer'&&!passthrough&&!canUsePassthrough;
   const showMouseScale=passthrough
     ? gyro.motion.turns.some(turn=>turn.output!=='right_stick')
@@ -340,7 +343,7 @@ export const MotionOutputSettings = memo(function MotionOutputSettings({profile,
     ? gyro.motion.turns.some(turn=>turn.output!=='mouse')
     : gyro.output==='right_stick';
   return <SettingSection id="motion-calibration" title={passthrough?'体感输出':'输出与转角校准'}
-    summary={passthrough?'DS4 传感器直通':gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
+    summary={passthrough?sensorOutputLabel(sensorOutput):gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
     <SettingField label="体感输出" disabled={outputLocked}>
       <div className={settingStyles.row}><SettingLabel label="体感输出"/><select aria-label="体感输出" value={gyro.output}
         disabled={outputLocked} onChange={event=>{
@@ -348,14 +351,13 @@ export const MotionOutputSettings = memo(function MotionOutputSettings({profile,
           update(p=>{p.gyro.output=output;});
         }}>
         <option value="mouse" disabled={gyro.motion.mode!=='pointer'}>鼠标</option><option value="right_stick" disabled={profile.virtual_gamepad==='none'}>虚拟手柄右摇杆</option>
-        <option value="ds4_imu" disabled={!canUsePassthrough}>DS4 传感器直通</option>
+        <option value={sensorOutput} disabled={!canUsePassthrough}>{isDualSense||isDs4?sensorOutputLabel(sensorOutput):'传感器直通'}</option>
       </select></div>
     </SettingField>
     {isDs4&&!vigemGamepad&&<p className={settingStyles.notice}>请在「设置与组件」将虚拟手柄后端设为 ViGEm，再使用 DS4 传感器直通。</p>}
-    {!isDs4&&<p className={styles.hint}>DS4 传感器直通需要选择虚拟 DualShock 4 和 ViGEm 后端。</p>}
-    {ds4Required&&<p className={styles.hint}>切换虚拟手柄类型前，请先在使用 DS4 传感器直通的基础层或配置层改用其他体感输出。</p>}
+    {!isDs4&&!isDualSense&&<p className={styles.hint}>选择虚拟 DualSense（PS5）或使用 ViGEm 的虚拟 DualShock 4，即可直通六轴传感器。</p>}
     {passthrough?<>
-      <p className={styles.hint}>向虚拟 DualShock 4 发送经设备校准的陀螺仪和加速度计数据。请在支持读取 DS4 传感器的游戏或 Steam 输入中设置体感。</p>
+      <p className={styles.hint}>{isDualSense?'通过 USB/IP 向虚拟 DualSense 发送校准后的陀螺仪和加速度计数据。可在支持 DualSense 体感的游戏或 Steam 输入中设置瞄准。':'向虚拟 DualShock 4 发送经设备校准的陀螺仪和加速度计数据。请在支持读取 DS4 传感器的游戏或 Steam 输入中设置体感。'}</p>
       {(showStickScale||showMouseScale)&&<p className={styles.hint}>下面的转角换算用于按键触发的定角转身。</p>}
     </>:<>
       <p className={styles.hint}>体感、拨动和配套摇杆瞄准共用这里的输出与转角换算。</p>

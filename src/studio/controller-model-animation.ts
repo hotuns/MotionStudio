@@ -1,5 +1,6 @@
 import {Box3,Color,Mesh,MeshStandardMaterial,Quaternion,Vector3,type Material,type Object3D} from 'three';
-import {buttonNames,type Status} from '../types';
+import {buttonNames} from '../types';
+import type {OverlayStatus} from '../controller-overlay';
 
 // Port of the button mesh-to-pin names in FlexInput's canvas/viewer/controller3d.rs.
 const partButtons: Partial<Record<string, typeof buttonNames[number]>> = {
@@ -41,7 +42,7 @@ export function loadParts(model: Object3D) {
   return parts;
 }
 
-export function updateParts(parts: Part[], accent: Color, status?: Status) {
+export function updateParts(parts: Part[], accent: Color, status?: Pick<OverlayStatus,'axes'|'buttons'|'touches'>) {
   const [lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0] = status?.axes ?? [];
   const pressed = new Set(buttonNames.filter((_, index) => status?.buttons[index]));
   const tiltX = new Quaternion();

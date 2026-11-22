@@ -25,7 +25,7 @@ export function componentPlan(settings:Pick<Settings,'output_backend'|'gamepad_b
   };
   if((settings.output_backend??'hid_maestro')==='hid_maestro')add('hidmaestro','发送键盘、鼠标和所选 HID 虚拟手柄输入。');
   if(settings.auto_hide!==false)add('hidhide','安装后由软件自动管理：开始映射时隐藏实体手柄，停止后恢复，无需手动配置。');
-  if(target==='dualsense')add('usbip','创建支持 USB 音频与高清触觉的虚拟 DualSense。');
+  if(target==='dualsense')add('usbip','创建支持六轴传感器直通、USB 音频与高清触觉的虚拟 DualSense。');
   else if(target!=='none'&&(settings.output_backend==='legacy'||(settings.gamepad_backend??'vigem')==='vigem'))
     add('vigem','创建当前配置使用的虚拟 Xbox 360 或 DualShock 4。');
   const issues=items.filter(item=>item.status!=='running');
