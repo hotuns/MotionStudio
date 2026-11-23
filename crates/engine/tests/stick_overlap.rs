@@ -59,6 +59,44 @@ fn held(e: &Engine, keys: &[&str]) {
 }
 
 #[test]
+fn outer_sectors_share_the_ring_and_switch_without_recentering() {
+    let mut p = profile();
+    p.actions = serde_json::from_value(json!([
+        {"name": "Ring", "input": "left_stick_outer", "output": "key:SHIFT"},
+        {"name": "Forward", "input": "left_stick_outer_up", "output": "key:W"},
+        {"name": "Right", "input": "left_stick_outer_right", "output": "key:D"}
+    ])).unwrap();
+    p.virtual_gamepad = motion_core::profile::GamepadTarget::Xbox360;
+    p.gamepad_bindings = Some(serde_json::from_value(json!([
+        {"input": "right_stick_outer_left", "output": "south"}
+    ])).unwrap());
+    let mut e = Engine::new(p.clone()).unwrap();
+    stick(&mut e, 1, -32767, 0, 1);
+    stick(&mut e, 0, 0, -32767, 2);
+    held(&e, &["SHIFT", "W"]);
+    assert_eq!(e.frame.pad.unwrap().buttons, 0x1000);
+    // A diagonal still belongs to exactly one native outer sector, even in eight-way WASD mode.
+    stick(&mut e, 0, 26000, -26000, 3);
+    assert_eq!(e.input_value("left_stick_outer_up") + e.input_value("left_stick_outer_right"), 1.);
+    stick(&mut e, 0, 32767, 0, 4);
+    held(&e, &["SHIFT", "D"]);
+    stick(&mut e, 0, 27000, 0, 5); // Between the 0.85 entry and 0.80 release radii.
+    held(&e, &["SHIFT", "D"]);
+    let mut layer = p.clone();
+    layer.stick_zones.left_outer = 0.99;
+    e.apply_layer(layer).unwrap();
+    held(&e, &[]);
+    assert_eq!(e.layer_input_value("left_stick_outer_right", &p, false), 1.);
+    stick(&mut e, 0, 23000, 0, 6);
+    assert_eq!(e.layer_input_value("left_stick_outer_right", &p, true), 0.);
+    stick(&mut e, 1, 0, 32767, 7);
+    assert_eq!(e.input_value("right_stick_outer_down"), 1.);
+    assert_eq!(e.frame.pad.unwrap().buttons, 0);
+    e.reset();
+    assert_eq!(e.input_value("right_stick_outer_down"), 0.);
+}
+
+#[test]
 fn native_default_preserves_original_predicate_including_boundaries() {
     use flexinput_engine::eval::jsm_stick_directions;
     for radius in [0_f32, 0.3, 1.] {

@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -168,6 +168,8 @@ pub struct Status {
     #[serde(default)]
     pub pad_region_capture: PadRegionCapture,
     #[serde(default)]
+    pub pad_outer_capture: PadRegionCapture,
+    #[serde(default)]
     pub touches: crate::touchpad::Contacts,
     pub gyro: [f32; 3],
     pub calibration_progress: f32,
@@ -221,6 +223,7 @@ impl Default for Status {
             processed_axes: [0.0; 6],
             stick_regions: Default::default(),
             pad_region_capture: Default::default(),
+            pad_outer_capture: Default::default(),
             touches: Default::default(),
             gyro: [0.0; 3],
             calibration_progress: 0.0,

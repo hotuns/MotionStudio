@@ -19,7 +19,7 @@ import {MappingOverview} from './MappingOverview';
 import {buildMappingOverview,physicalControl,type OverviewEntry} from './controller-mapping-overview';
 
 export type CaptureKind = 'key' | 'pad';
-export type Capture = {kind: CaptureKind; index: number | null; preview?: string[]};
+export type Capture = {kind: CaptureKind; index: number | null; preview?: string[]; outerRing?: boolean};
 
 export type ActionMappingsProps = {
   profileId?: string;
@@ -37,7 +37,7 @@ export type ActionMappingsProps = {
   touchOnly: boolean;
   onClearTouch: () => void;
   onCapture: (kind: CaptureKind, index: number) => void;
-  onRecordGamepad: (wholeStick: boolean, onInput: (input: string) => void) => void;
+  onRecordGamepad: (wholeStick: boolean, onInput: (input: string) => void, outerRing?: boolean) => void;
   onCancelCapture: () => void;
   onAssignEscape: () => void;
   onBatch: (floating?:boolean) => void;

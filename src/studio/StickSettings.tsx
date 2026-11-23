@@ -38,7 +38,7 @@ export const StickSettings = memo(function StickSettings({profile,update}:{profi
       <Range label="左摇杆外圈阈值" value={zones.left_outer} min={0.1} max={1} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,left_outer:value};})}/>
       <Range label="右摇杆外圈阈值" value={zones.right_outer} min={0.1} max={1} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,right_outer:value};})}/>
       <Range label="区域切换回差" value={zones.hysteresis} min={0} max={0.09} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,hysteresis:value};})}/>
-      <p className={styles.hint}>外圈按推杆幅度判断，不限方向，回到内圈后释放。内圈不包含中心死区。在「动作映射」中可将内圈或外圈绑定到按键、组合键或滚轮。</p>
+      <p className={styles.hint}>在「动作映射」中可绑定整个外圈，也可分别绑定上、下、左、右外圈。四个方向各占 90°，沿外圈转动即可切换方向。整圈和四向共用这里的阈值与回差。内圈从中心死区之外开始。</p>
     </SettingSection>
     <StickCalibrationSettings profile={profile} update={update}/>
   </div>;

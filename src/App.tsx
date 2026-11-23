@@ -35,7 +35,7 @@ import {editingProfile,updateLayer,restoreLayerSetting} from './layers';
 import type {SettingRequest} from './studio/settings-catalog';
 import {useLanguage,setLanguage,getLanguage,t} from './i18n';
 import { chordParts,inputLabel,outputLabel, type Action, type Entry, type Profile, type Settings, type Snapshot, type Workspace } from './types';
-import { padBindingCandidates, padInputNeutral, heldPadInputs, recordedSticks, type GamepadBindingRecording, type GyroBindingField, type GyroBindingRecording } from './pad-capture';
+import { outerRingNeutral, padBindingCandidates, padInputNeutral, heldPadInputs, recordedSticks, type GamepadBindingRecording, type GyroBindingField, type GyroBindingRecording } from './pad-capture';
 import dialogStyles from './studio/CreateProfileDialog.module.css';
 
 const DevicePage = lazy(() => import('./studio/DevicePage'));
@@ -56,9 +56,9 @@ type SaveResult = { entry: Entry; applied: boolean; warning: string | null };
 type PadCaptureSession = {kind:'pad'; index:null; deviceId:number; restartCount:number};
 type GyroCapture = PadCaptureSession & GyroBindingRecording & {split:boolean};
 type GamepadCapture = PadCaptureSession & GamepadBindingRecording & {onGamepadInput:(input:string)=>void} & Partial<Pick<PadPickerRequest,'controlId'|'allowedInputs'>>;
-type ActiveCapture = Capture | GyroCapture | GamepadCapture;
+type ActiveCapture = Capture | (Capture & {deviceId:number; restartCount:number; waitingForNeutral:boolean}) | GyroCapture | GamepadCapture;
 type CaptureRequest = Capture | Pick<GyroCapture,'kind'|'index'|'gyroField'>
-  | Pick<GamepadCapture,'kind'|'index'|'wholeStick'|'onGamepadInput'|'controlId'|'allowedInputs'>;
+  | Pick<GamepadCapture,'kind'|'index'|'wholeStick'|'outerRing'|'onGamepadInput'|'controlId'|'allowedInputs'>;
 
 function suggestedDevicePath(devices: Snapshot['devices']) {
   const physical = devices.filter(device => device.origin === 'physical' && device.path && device.gamepad && !device.open_error);
@@ -153,7 +153,7 @@ export default function App() {
   const {components,checking:checkingComponents,error:componentError,refresh:refreshComponents}=useComponentStatus(native,page==='settings');
   const setupPlan=useMemo(()=>componentPlan(workspace?.settings??{output_backend:'hid_maestro',auto_hide:true},draft?.profile.virtual_gamepad,components),
     [workspace?.settings,draft?.profile.virtual_gamepad,components]);
-  const studioUpdate = useStudioUpdate(native);
+  const studioUpdate = useStudioUpdate(native, workspace?.settings);
   const entries = workspace?.profiles ?? [];
   const saved = entries.find(entry => entry.id === draft?.id);
   const savedRef = useRef(saved);
@@ -165,7 +165,7 @@ export default function App() {
   const gyroRecording = capture && 'gyroField' in capture ? capture : undefined;
   const controlRecording = capture && 'onGamepadInput' in capture && capture.controlId ? capture : undefined;
   const gamepadRecording = capture && 'onGamepadInput' in capture && !capture.controlId ? capture : undefined;
-  const actionRecording = capture && !('deviceId' in capture) ? capture : null;
+  const actionRecording = capture && !('onGamepadInput' in capture) && !('gyroField' in capture) ? capture : null;
   const captureActive = !!capture || !!status?.binding_capture;
   const measuringRef=useRef(false);
   measuringRef.current=!!status?.motion?.measuring;
@@ -380,11 +380,14 @@ export default function App() {
   };
 
   useEffect(() => {
-    const serial = status?.input_serial ?? 0;
-    const edge = status?.last_input && serial > previousInput.current ?
-      (status.input_chord?.length ? status.input_chord : [status.last_input]) : null;
-    previousInput.current = Math.max(previousInput.current,serial);
     if (capture?.kind !== 'pad' || !status) return;
+    const outer = 'outerRing' in capture && capture.outerRing;
+    const serial = outer ? status.pad_outer_capture?.serial ?? 0 : status.input_serial;
+    const observed = outer ? status.pad_outer_capture?.chord :
+      status.input_chord?.length ? status.input_chord : status.last_input ? [status.last_input] : undefined;
+    const edge = observed?.length && serial > previousInput.current ?
+      (outer ? padBindingCandidates(observed, (status.device?.touchpads ?? 0) >= 2) : observed) : null;
+    previousInput.current = Math.max(previousInput.current,serial);
     const scoped = 'deviceId' in capture;
     const lostScopedCapture = scoped && (!status.binding_capture ||
       status.device?.id !== capture.deviceId || snapshot?.restart_count !== capture.restartCount);
@@ -394,7 +397,7 @@ export default function App() {
       notify('手柄连接或观察状态已改变，录入已取消。', true);
       return;
     }
-    const neutral = scoped && padInputNeutral(status);
+    const neutral = scoped && (outer ? outerRingNeutral(status) : padInputNeutral(status));
     if (scoped && capture.waitingForNeutral) {
       if (neutral) setCapture({...capture, waitingForNeutral:false});
       return;
@@ -437,7 +440,7 @@ export default function App() {
       } else if (edge) setCapture({...capture, preview:candidates});
       return;
     }
-    if (edge) {
+    if (edge && (!outer || edge.length >= padPreview.current.length)) {
       if (edge.length <= 4) { padPreview.current = edge; setCapture({...capture, preview:edge}); }
       else { padPreview.current = []; notify('组合键最多支持 4 个手柄输入，请松开后重新录入。', true); }
     }
@@ -564,8 +567,8 @@ export default function App() {
     return true;
   }
 
-  function startCapture(kind: CaptureKind, index: number | null) {
-    beginCapture({kind, index});
+  function startCapture(kind: CaptureKind, index: number | null, outerRing = false) {
+    beginCapture({kind, index, outerRing});
   }
 
   function beginCapture(target: CaptureRequest) {
@@ -573,7 +576,8 @@ export default function App() {
     if (capture) { cancelCapture(); return; }
     const gyro = 'gyroField' in target;
     const gamepad = 'onGamepadInput' in target;
-    if ((gyro && !canRecordGyro) || ((gyro || gamepad) && status?.binding_capture)) return;
+    const outer = 'outerRing' in target && target.outerRing;
+    if ((gyro && !canRecordGyro) || ((gyro || gamepad || outer) && status?.binding_capture)) return;
     if (target.kind === 'pad' && !devicePath) {
       if (target.index === null) setEditor(null);
       navigate('controllerStatus');
@@ -597,17 +601,17 @@ export default function App() {
         const current = await invoke<Snapshot>('snapshot');
         if (generation !== captureGeneration.current) return;
         const liveDevice = current.status.device;
-        if ((gyro || gamepad) && (!current.status.binding_capture || !liveDevice || liveDevice.path.toLowerCase() !== devicePath.toLowerCase())) {
+        if ((gyro || gamepad || outer) && (!current.status.binding_capture || !liveDevice || liveDevice.path.toLowerCase() !== devicePath.toLowerCase())) {
           throw new Error(gyro ? '所选手柄未连接，无法录入体感输入。' : '所选手柄未连接，无法录入手柄输入。');
         }
         setSnapshot(current);
-        previousInput.current = current.status.input_serial;
+        previousInput.current = outer ? current.status.pad_outer_capture?.serial ?? 0 : current.status.input_serial;
         padPreview.current = [];
         if ('gyroField' in target && liveDevice) {
           setCapture({...target, waitingForNeutral:!padInputNeutral(current.status), deviceId:liveDevice.id,
             restartCount:current.restart_count, split:(liveDevice.touchpads ?? 0) >= 2});
-        } else if ('onGamepadInput' in target && liveDevice) {
-          setCapture({...target, waitingForNeutral:!padInputNeutral(current.status), deviceId:liveDevice.id,
+        } else if ((gamepad || outer) && liveDevice) {
+          setCapture({...target, waitingForNeutral:!(outer ? outerRingNeutral(current.status) : padInputNeutral(current.status)), deviceId:liveDevice.id,
             restartCount:current.restart_count});
         } else if (!('gyroField' in target) && !('onGamepadInput' in target)) setCapture(target);
         listening = true;
@@ -945,7 +949,7 @@ export default function App() {
               onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
             blocked={locked} capture={actionRecording} onCapture={startCapture} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
             gamepadRecording={gamepadRecording} canRecordGamepad={!!snapshot?.engine_ready && !waiting && !status?.motion?.measuring && !status?.binding_capture}
-            onRecordGamepad={(wholeStick,onGamepadInput)=>beginCapture({kind:'pad',index:null,wholeStick,onGamepadInput})}
+            onRecordGamepad={(wholeStick,onGamepadInput,outerRing)=>beginCapture({kind:'pad',index:null,wholeStick,onGamepadInput,outerRing})}
             onUpdate={update} onEdit={openEditor} onBatch={openBatch} onTab={tab=>navigate('games',tab)}
             onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={openJsmImport}
             motion={<MotionSettings profile={profile} profileId={draft.id} update={update} split={splitTouchpad}
@@ -1003,7 +1007,8 @@ export default function App() {
       {page === 'settings' && workspace && <SystemPage components={components} snapshot={snapshot} dataDir={workspace.data_dir}
         controllerOverlay={<ControllerOverlaySettings value={workspace.settings.controller_overlay} busy={busy}
           onChange={controller_overlay=>void run(()=>changeSettings({controller_overlay}))}/>}
-        softwareUpdate={<SoftwareUpdate update={studioUpdate} blocked={updateBlocked}
+        softwareUpdate={<SoftwareUpdate key={studioUpdate.source} update={studioUpdate} blocked={updateBlocked}
+          preference={workspace.settings.update_source} busy={busy} onSourceChange={update_source=>void run(()=>changeSettings({update_source}))}
           onInstall={() => { if (!updateBlocked) void run(studioUpdate.install); }} onOpenReleases={() => openLocation('releases')}/>}
         backend={workspace.settings.output_backend ?? 'hid_maestro'} outputActive={active}
         mouseDisplaySync={workspace.settings.mouse_display_sync ?? false}
@@ -1079,7 +1084,7 @@ export default function App() {
           onClose={closeBatch} onKeep={keepBatch}/>)}
     {editor && <ActionEditor key={editingLayer+':'+String(editor.index)} action={editor.action} isNew={editor.index===null} profile={profile} index={editor.index} split={(device?.touchpads ?? 0)>=2}
       onChange={updateEditor} onClose={closeEditor} onSubmit={finishEditing} error={dialogError} busy={busy}
-      capture={actionRecording} onCapture={kind=>startCapture(kind,null)} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
+      capture={actionRecording} onCapture={(kind,outerRing)=>startCapture(kind,null,outerRing)} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
       layerName={draft?.profile.layers?.find(layer=>layer.id===editingLayer)?.name} navigation={!!status?.ui_navigation}/>}
     {deleting && <Dialog title="删除这份配置？" onClose={() => setDeleting(null)} error={dialogError} actions={<>
       <button type="button" className="secondary-btn" onClick={() => setDeleting(null)}>取消</button>

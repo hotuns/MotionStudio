@@ -1,6 +1,6 @@
 {
   "name": "motion-studio",
-  "version": "0.19.2",
+  "version": "0.19.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "package:portable": "node scripts/package-portable.mjs",
     "package:update": "node scripts/package-update.mjs",
     "release:local": "node scripts/release-local.mjs",
+    "release:both": "node scripts/release-local.mjs --sealos",
     "test:release": "node --test tests/release.test.mjs tests/mapping-checks.test.mjs",
     "test:mapping": "node scripts/check-mapping.mjs",
     "test:controller-preview": "node --test tests/controller-preview.test.mjs",
@@ -31,6 +32,7 @@
     "three": "0.187.0"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1175.0",
     "@tauri-apps/cli": "^2.11.2",
     "@types/react": "^18.2.64",
     "@types/react-dom": "^18.2.21",

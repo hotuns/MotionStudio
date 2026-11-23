@@ -104,3 +104,9 @@ lstick_overlap_degrees = 45.0
 ```
 
 `eight_way` 复用 JSM 的八向重叠方向判定，动作阈值作用于摇杆整体幅度。可用 `lstick_overlap_degrees` / `rstick_overlap_degrees` 分别指定 0–90° 的斜向双键范围；省略字段时保持原生约 36.87° 的重叠。默认 `axis_threshold` 保持原来的单轴阈值判定，不使用重叠角度。
+
+## 摇杆四向外圈
+
+在「动作映射 → 手柄输入 → 摇杆」可以选择带方向箭头的外圈，或点「监听四向外圈」后按目标方向推杆并松开。每根摇杆有四个 90° 扇区，对应 `left_stick_outer_up`、`left_stick_outer_right`、`left_stick_outer_down`、`left_stick_outer_left`。右摇杆使用前缀 `right_stick_outer_`。推入外圈时，整圈与当前扇区同时有效。沿外圈转向会释放旧方向并触发新方向，回到释放阈值以内时整圈和方向都释放。
+
+例如，只在向前推入外圈时奔跑，可以把 `left_stick_outer_up` 绑定到 `key:SHIFT`，并把触发方式设为「按住」。方向外圈也可用来触发配置层或与肩键组合。

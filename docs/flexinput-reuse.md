@@ -135,7 +135,7 @@ After the input/output integration, the pinned implementation was reviewed for p
 |---|---|---|
 | Hold, short, long, double, press-edge, release-edge | `engine/src/eval/activation.rs::apply_press_mode` | The opaque `PressGate` accepts timestamped input; Studio supplies action configuration, same-chord hold-back, chord priority, snapshot suppression and lifecycle resets |
 | Turbo | `activation.rs::apply_turbo` | The gate runs first, then turbo with a separate action period; existing wheel repeat remains a separate Studio option |
-| Radial inner/outer stick areas | `core/src/area.rs::{AreaLayout,Border,Shape}` and `band_of` | Existing geometry is configured as a circular ring; Studio adds bounded per-stick thresholds, hysteresis, a neutral exclusion and ordinary named action inputs |
+| Inner ring, whole outer ring and four directional outer inputs | `crates/core/src/area.rs` at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`, `AreaLayout::circle_ways(4)` and `locate_id` | Native cell 0 covers the disc. Cells 1, 3, 5 and 7 are up, right, down and left. Studio applies the configured entry/release radius to the native boundary and exposes both the whole outer ring and its selected cell as digital inputs. |
 | Stick rebound suppression | `engine/src/eval/device_cal.rs::StickRebound::step` | Only type and method visibility changes; Studio exposes a bounded optional duration and advances expiry when no further axis event arrives |
 | Physical controller hiding | `hidmaestro/src/hidhide.rs`; `devices/src/devnode.rs` | Original native control and topology queries; Studio owns checked policy, exact output-node protection, write-ahead journal and recovery lease |
 
@@ -217,7 +217,7 @@ The real-DLL synthetic check caught the upstream initializer disabling all gamep
 
 ## 0.12.0 shortcut inputs
 
-The shortcut path reads the existing base-profile physical source from FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Stick calibration and deadzones come from `crates/engine/src/eval/device_cal.rs`. The same `crates/core/src/area.rs` `AreaLayout::band_of` call classifies rings for actions, hold layers, and shortcuts. Touch contacts use the existing SDL event and field mapping. Studio supplies the base-profile ring bounds, hysteresis state, capture telemetry and per-rule profile switching policy, including the optional restore on a repeat trigger. Vendor files and hashes are unchanged.
+The shortcut path reads the base-profile physical source from FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Stick calibration and deadzones come from `crates/engine/src/eval/device_cal.rs`. Actions use the effective layer's calibrated vector and ring settings. Layer triggers, shortcut rules and capture read a shared base-profile position from the same native four-way layout. Studio maps a sector transition to ordinary input edges and keeps separate whole-ring and directional recording events so a quick release between UI polls can still be recorded. IPC protocol 27 carries directional recording and recognizes the new profile inputs. Touch contacts use the existing SDL event and field mapping.
 
 Studio runs the same shortcut edge evaluator once per configured controller rule against that base-profile input. The host publishes the ordered rule indices with a serial and baseline so desktop policy can apply the final target across multiple presses. Each rule has its own profile destination in local settings. The input source, calibrations and ring classification remain on the pinned FlexInput paths above.
 

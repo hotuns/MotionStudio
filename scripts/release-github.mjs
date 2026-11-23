@@ -58,7 +58,7 @@ function verifyRemoteAsset(asset, files) {
   }
 }
 
-export async function publishRelease({ api, config, files, commit, log = console.log }) {
+export async function publishRelease({ api, config, files, commit, mirrorUrl, log = console.log }) {
   const remote = await inspectRemote(api, config.tag);
   assertReleaseSource(remote, commit);
   let release = remote.release;
@@ -72,6 +72,7 @@ export async function publishRelease({ api, config, files, commit, log = console
     await api(base + '/git/refs', { method: 'POST', data: { ref: 'refs/tags/' + config.tag, sha: commit } });
   }
   const body = config.notes + '\n\n- [Windows x64 安装包](' + config.download(config.setup) + ')\n'
+    + (mirrorUrl ? '- [Windows x64 安装包（Sealos）](' + mirrorUrl + ')\n' : '')
     + '- [SHA-256 校验值](' + config.download('SHA256SUMS.txt') + ')\n\n'
     + 'Source: https://github.com/' + repository + '/commit/' + commit;
   if (!release) {

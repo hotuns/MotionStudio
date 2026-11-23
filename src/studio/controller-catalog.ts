@@ -59,7 +59,7 @@ const controllerOrder = [...new Set([
   'left_trigger', ...triggerStageInputs.filter(id => id.startsWith('left_')),
   'right_trigger', ...triggerStageInputs.filter(id => id.startsWith('right_')),
   ...['left','right'].flatMap(side => [side+'_stick', side+'_stick_click',
-    ...['up','down','left','right','inner','outer'].map(part => side+'_stick_'+part)]),
+    ...['up','down','left','right','inner','outer','outer_up','outer_down','outer_left','outer_right'].map(part => side+'_stick_'+part)]),
   'touchpad', 'touch1', 'touch2', ...swipeInputs,
   ...imuOptions.map(([id]) => id), ...inputs,
 ])];

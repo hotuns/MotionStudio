@@ -10,7 +10,14 @@ import {controllerCategory,controllerGroups} from './controller-catalog';
 import editorStyles from './ActionEditor.module.css';
 import styles from './GameProfilesPage.module.css';
 import {modifierOutputs as modifiers} from '../keyboard';
-export const inputOpposites:Record<string,string>={left_stick_up:'left_stick_down',left_stick_down:'left_stick_up',left_stick_left:'left_stick_right',left_stick_right:'left_stick_left',right_stick_up:'right_stick_down',right_stick_down:'right_stick_up',right_stick_left:'right_stick_right',right_stick_right:'right_stick_left',dpad_up:'dpad_down',dpad_down:'dpad_up',dpad_left:'dpad_right',dpad_right:'dpad_left',left_stick_inner:'left_stick_outer',left_stick_outer:'left_stick_inner',right_stick_inner:'right_stick_outer',right_stick_outer:'right_stick_inner'};
+const inputOpposites:Record<string,string>={left_stick_up:'left_stick_down',left_stick_down:'left_stick_up',left_stick_left:'left_stick_right',left_stick_right:'left_stick_left',right_stick_up:'right_stick_down',right_stick_down:'right_stick_up',right_stick_left:'right_stick_right',right_stick_right:'right_stick_left',dpad_up:'dpad_down',dpad_down:'dpad_up',dpad_left:'dpad_right',dpad_right:'dpad_left'};
+export function inputConflict(a: string, b: string) {
+  if (a === b || inputOpposites[a] === b) return true;
+  const ring = /^(left|right)_stick_(inner|outer)(?:_(up|down|left|right))?$/;
+  const first = ring.exec(a), second = ring.exec(b);
+  if (!first || !second || first[1] !== second[1]) return false;
+  return first[2] === 'inner' || second[2] === 'inner' || Boolean(first[3] && second[3]);
+}
 export function InputCaptureButton({value, recording, disabled, hint, onClick}: {
   value: string;
   recording: boolean;
@@ -27,13 +34,14 @@ export function InputCaptureButton({value, recording, disabled, hint, onClick}: 
   </>;
 }
 
-export function ControllerInputChoices({value, combo, split = false, allowed = inputs, exclusive = [], onChange}: {
+export function ControllerInputChoices({value, combo, split = false, allowed = inputs, exclusive = [], onChange, onRecordOuter}: {
   value: string;
   combo: boolean;
   split?: boolean;
   allowed?: string[];
   exclusive?: string[];
   onChange: (value: string) => void;
+  onRecordOuter?: () => void;
 }) {
   const parts = chordParts(value);
   const groups = controllerGroups(allowed, split);
@@ -55,13 +63,15 @@ export function ControllerInputChoices({value, combo, split = false, allowed = i
       {active.values.map(key => {
         const selected = parts.includes(key);
         const combine = combo && !exclusive.includes(key) && !parts.some(part => exclusive.includes(part));
-        const disabled = combine && !selected && (parts.length >= 4 || parts.some(part => inputOpposites[part] === key));
+        const disabled = combine && !selected && (parts.length >= 4 || parts.some(part => inputConflict(part, key)));
         const next = !combine ? key : (selected ? parts.filter(part => part !== key) : [...parts, key]).join('+');
         const name = t(padInputLabel(key, split));
         return <button type="button" key={key} aria-label={'选择输入 '+name} title={name}
           aria-pressed={selected} disabled={disabled} onClick={() => onChange(next)}>{name}</button>;
       })}
     </div>}
+    {active?.id === 'sticks' && onRecordOuter && <button type="button" className="secondary-btn"
+      onClick={onRecordOuter}>监听四向外圈</button>}
     {active?.id === 'touchpad' && <p className={editorStyles.hint}>滑动方向请在此选择；手柄录入暂不识别滑动手势。</p>}
   </>;
 }
@@ -109,7 +119,7 @@ export function InputChordFields({value,onChange,allowed=inputs,showHint=true,sp
   const parts=chordParts(value);
   const capture=useContext(PadInputCaptureContext);
   const locked=listen&&!!capture?.locked;
-  const blocked = (others: string[]) => others.flatMap(input => [input, inputOpposites[input]].filter(Boolean));
+  const blocked = (others: string[]) => allowed.filter(input => others.some(other => inputConflict(input, other)));
   const add = parts.length ? '添加组合按键' : '选择手柄输入';
   const Picker = listen ? PadInputPicker : OptionPicker;
   return <div className={styles.bindingFields}>

@@ -1,13 +1,16 @@
 use crate::{calibration::Calibration, guardian::Guard, io_clock::IoClock};
 use anyhow::{bail, Context, Result};
 use motion_core::{
-    engine::{Engine, Frame, InputEvent},
+    engine::{Engine, Frame, InputEvent, StickPosition},
     output::{
         emergency_stop, probe_virtual_driver, Dispatcher, GamepadBackend, ObserveSink,
         OutputBackend, Sink, SplitSink, WindowsSink,
     },
     profile::{pressed_inputs, GamepadTarget, Profile},
-    protocol::{Command, Event, PadShortcutEvent, Request, RunConfig, Status, PROTOCOL_VERSION},
+    protocol::{
+        Command, Event, PadRegionCapture, PadShortcutEvent, Request, RunConfig, Status,
+        PROTOCOL_VERSION,
+    },
     sdl::{Device, InputOrigin, Sdl},
     shortcut::{
         validate_shortcut_rules, PadShortcut, PadShortcutEdges, ShortcutRule, ShortcutTrigger,
@@ -462,6 +465,7 @@ impl Runtime {
         self.status.processed_axes = [0.0; 6];
         self.status.stick_regions = Default::default();
         self.status.pad_region_capture = Default::default();
+        self.status.pad_outer_capture = Default::default();
         self.status.calibration_progress = 0.0;
         self.status.motion = Default::default();
         result
@@ -693,6 +697,7 @@ impl Runtime {
         self.status.processed_axes = [0.0; 6];
         self.status.stick_regions = Default::default();
         self.status.pad_region_capture = Default::default();
+        self.status.pad_outer_capture = Default::default();
         self.status.touches = Default::default();
         if let Some(sdl) = &mut self.sdl {
             let sensors = sdl.set_sensors(
@@ -1344,6 +1349,7 @@ impl Runtime {
         self.status.processed_axes = [0.0; 6];
         self.status.stick_regions = Default::default();
         self.status.pad_region_capture = Default::default();
+        self.status.pad_outer_capture = Default::default();
         self.status.reconnects += 1;
         self.navigation.reset();
         self.status.navigation_events.clear();
@@ -1513,41 +1519,17 @@ impl Runtime {
         }
         if self.status.binding_capture {
             if controls_event {
+                let previous = self.base_stick_positions();
                 if let Some(engine) = &mut self.engine {
                     // Update native physical inputs while the output lease is paused.
                     engine.process_snapshot(&event);
                     self.status.processed_axes = engine.processed_axes();
                 }
-                let previous_regions = self.status.stick_regions;
                 self.track_pad_shortcut(from_snapshot);
-                use motion_core::profile::StickRegion::{Center, Inner, Outer};
-                let entered = previous_regions
-                    .into_iter()
-                    .zip(self.status.stick_regions)
-                    .any(|(before, after)| {
-                        before != after && (after == Outer || (before == Center && after == Inner))
-                    });
                 let non_stick_press = self.status.input_serial != previous_serial
                     && !matches!(event, InputEvent::Axis { index: 0..=3, .. });
-                if !from_snapshot && (entered || non_stick_press) {
-                    let mut chord = motion_core::profile::pressed_inputs(
-                        &self.status.buttons,
-                        &self.status.axes,
-                        0.6,
-                    );
-                    chord.retain(|input| {
-                        !motion_core::profile::DIRECTIONS.contains(&input.as_str())
-                    });
-                    chord.extend(
-                        self.shortcut_extra_inputs()
-                            .into_iter()
-                            .flatten()
-                            .map(String::from),
-                    );
-                    if !chord.is_empty() {
-                        self.status.pad_region_capture.serial += 1;
-                        self.status.pad_region_capture.chord = chord;
-                    }
+                if !from_snapshot {
+                    self.capture_stick_zones(previous, non_stick_press);
                 }
             }
             return Ok(());
@@ -1601,21 +1583,59 @@ impl Runtime {
         self.status.pad_shortcut_events.clear();
     }
 
+    fn base_stick_positions(&self) -> [StickPosition; 2] {
+        self.engine.as_ref().map(Engine::base_stick_positions).unwrap_or_default()
+    }
+
+    fn capture_stick_zones(&mut self, previous: [StickPosition; 2], non_stick_press: bool) {
+        use motion_core::profile::StickRegion::{Center, Inner, Outer};
+        let positions = self.base_stick_positions();
+        let entered_region = previous.iter().zip(positions).any(|(old, new)| {
+            old.region != new.region
+                && (new.region == Outer || (old.region == Center && new.region == Inner))
+        });
+        let entered_sector = previous.iter().zip(positions).any(|(old, new)| {
+            new.outer_sector.is_some() && old.outer_sector != new.outer_sector
+        });
+        if !entered_region && !entered_sector && !non_stick_press {
+            return;
+        }
+        let mut held = pressed_inputs(&self.status.buttons, &self.status.axes, 0.6);
+        held.retain(|pin| !motion_core::profile::DIRECTIONS.contains(&pin.as_str()));
+        let touch = self.shortcut_touch_inputs();
+        let record = |capture: &mut PadRegionCapture, zones: [Option<&str>; 2], keep_longer: bool| {
+            let chord: Vec<_> = held.iter().cloned()
+                .chain(zones.into_iter().chain(touch).flatten().map(String::from))
+                .collect();
+            if !chord.is_empty() && (!keep_longer || chord.len() >= capture.chord.len()) {
+                capture.serial += 1;
+                capture.chord = chord;
+            }
+        };
+        if entered_region || non_stick_press {
+            let regions = [positions[0].region.input(0), positions[1].region.input(1)];
+            record(&mut self.status.pad_region_capture, regions, false);
+        }
+        let sectors = positions.map(|position| position.outer_sector);
+        if entered_sector || (non_stick_press && sectors.iter().any(Option::is_some)) {
+            // A shorter chord during release can arrive before the UI sees the peak.
+            let continuing = previous.iter().any(|position| position.outer_sector.is_some());
+            record(&mut self.status.pad_outer_capture, sectors, continuing);
+        }
+    }
+
     fn track_pad_shortcut(&mut self, baseline: bool) {
-        self.status.stick_regions = self.engine.as_mut().zip(self.config.as_ref()).map_or(
-            Default::default(),
-            |(engine, config)| {
-                engine.base_stick_regions(&config.profile.stick_zones, self.status.stick_regions)
-            },
-        );
-        let [left, right, touch1, touch2] = self.shortcut_extra_inputs();
+        let [left, right] = self.base_stick_positions();
+        self.status.stick_regions = [left.region, right.region];
+        let [touch1, touch2] = self.shortcut_touch_inputs();
         let [lt_soft, lt_full, rt_soft, rt_full] = self
             .engine
             .as_ref()
             .map(Engine::base_trigger_inputs)
             .unwrap_or_default();
         let extra = [
-            left, right, touch1, touch2, lt_soft, lt_full, rt_soft, rt_full,
+            left.region.input(0), right.region.input(1), left.outer_sector, right.outer_sector,
+            touch1, touch2, lt_soft, lt_full, rt_soft, rt_full,
         ];
         let enabled = matches!(self.status.state.as_str(), "running" | "observing")
             && !self.status.ui_navigation
@@ -1645,9 +1665,12 @@ impl Runtime {
                 enabled,
                 baseline,
             ) {
-                let specificity = binding.input.split('+').count();
-                // Prefer the longer chord when one control completes multiple
-                // bindings, and prefer the first saved rule on a tie.
+                // A longer chord wins first, then a sector over its whole ring.
+                // Equally specific rules keep their saved order.
+                let specificity = (
+                    binding.input.split('+').count(),
+                    binding.input.split('+').filter(|pin| pin.contains("_stick_outer_")).count(),
+                );
                 if matched.is_none_or(|(_, best)| specificity > best) {
                     matched = Some((index, specificity));
                 }
@@ -1666,7 +1689,7 @@ impl Runtime {
         }
     }
 
-    fn shortcut_extra_inputs(&self) -> [Option<&'static str>; 4] {
+    fn shortcut_touch_inputs(&self) -> [Option<&'static str>; 2] {
         let split = self
             .status
             .device
@@ -1674,8 +1697,6 @@ impl Runtime {
             .is_some_and(|device| device.touchpads >= 2);
         let contacts = motion_core::touchpad::fields(&self.status.touches, split);
         [
-            self.status.stick_regions[0].input(0),
-            self.status.stick_regions[1].input(1),
             contacts[0].active.then_some("touch1"),
             contacts[1].active.then_some("touch2"),
         ]
@@ -1739,6 +1760,7 @@ impl Runtime {
                 }
                 self.reset_layer_activation()?;
                 self.status.pad_region_capture = Default::default();
+                self.status.pad_outer_capture = Default::default();
                 if let Some(engine) = &mut self.engine {
                     engine.reset();
                     if let Some(sdl) = &self.sdl {
@@ -1746,6 +1768,7 @@ impl Runtime {
                             engine.process_snapshot(&event);
                         }
                     }
+                    self.status.stick_regions = engine.base_stick_positions().map(|position| position.region);
                 }
             }
             self.capture_until = Some(Instant::now() + Duration::from_secs(5));
@@ -3115,10 +3138,10 @@ mod tests {
             .apply_layer(active)
             .unwrap();
         runtime
-            .set_pad_shortcuts(vec![PadShortcut {
-                input: "left_stick_outer".into(),
-                target: "aim".into(),
-            }])
+            .set_pad_shortcuts(vec![
+                PadShortcut { input: "left_stick_outer".into(), target: "aim".into() },
+                PadShortcut { input: "left_stick_outer_right".into(), target: "right".into() },
+            ])
             .unwrap();
         let axis = |value: f32| InputEvent::Axis {
             time: SampleTime {
@@ -3134,6 +3157,7 @@ mod tests {
         assert_eq!(runtime.status.pad_shortcut_serial, 0);
         runtime.input(axis(0.95), false).unwrap();
         assert_eq!(runtime.status.stick_regions[0], Outer);
+        assert_eq!(runtime.status.pad_shortcut_events.last().unwrap().index, 1);
         assert_eq!(
             runtime
                 .engine
@@ -3159,6 +3183,11 @@ mod tests {
             runtime.status.pad_region_capture.chord,
             ["left_stick_outer"]
         );
+        assert_eq!(runtime.status.pad_outer_capture.chord, ["left_stick_outer_right"]);
+        runtime.input(down(), false).unwrap();
+        runtime.input(axis(-0.95), false).unwrap();
+        runtime.input(axis(0.), false).unwrap();
+        assert_eq!(runtime.status.pad_outer_capture.chord, ["south", "left_stick_outer_left"]);
         assert_eq!(runtime.status.pad_shortcut_serial, 2);
         assert!(held.borrow().is_empty());
     }

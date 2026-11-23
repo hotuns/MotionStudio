@@ -390,6 +390,9 @@ mod pad_tests {
             "left_stick_up+right_paddle1",
             "left_stick_outer",
             "left_stick_inner+touch2",
+            "left_shoulder+right_stick_outer_left",
+            "left_stick_outer+left_stick_outer_up",
+            "left_stick_outer_right+right_stick_outer_up",
         ] {
             assert!(validate_pad_input(input).is_ok(), "{input}");
         }
@@ -398,6 +401,8 @@ mod pad_tests {
             "back+start",
             "back+start+south",
             "left_stick_inner+left_stick_outer",
+            "left_stick_outer_up+left_stick_outer_right",
+            "right_stick_inner+right_stick_outer_down",
             "left_stick_x",
             "dpad_up+dpad_down",
             "south+south",

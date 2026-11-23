@@ -41,6 +41,8 @@ pub struct Settings {
     pub overlay_position: OverlayPosition,
     pub controller_overlay: ControllerOverlaySettings,
     pub language: Language,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_source: Option<UpdateSource>,
     pub cursor_enabled: bool,
     pub cursor_debounce_ms: u32,
     pub cursor_shown: SwitchTarget,
@@ -69,6 +71,7 @@ impl Default for Settings {
             overlay_position: OverlayPosition::default(),
             controller_overlay: ControllerOverlaySettings::default(),
             language: Language::ZhCn,
+            update_source: None,
             cursor_enabled: false,
             cursor_debounce_ms: 250,
             cursor_shown: SwitchTarget::None,
@@ -149,6 +152,22 @@ pub enum Language {
     ZhCn,
     #[serde(rename = "en")]
     En,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateSource {
+    GitHub,
+    Sealos,
+}
+
+impl Settings {
+    pub fn effective_update_source(&self) -> UpdateSource {
+        self.update_source.unwrap_or(match self.language {
+            Language::ZhCn => UpdateSource::Sealos,
+            Language::En => UpdateSource::GitHub,
+        })
+    }
 }
 #[derive(Clone)]
 pub struct Store {

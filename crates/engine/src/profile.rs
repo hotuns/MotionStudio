@@ -76,11 +76,16 @@ pub const DIRECTIONS: &[&str] = &[
     "right_stick_up",
     "right_stick_down",
 ];
-pub const ZONES: &[&str] = &[
-    "left_stick_outer",
-    "left_stick_inner",
-    "right_stick_outer",
-    "right_stick_inner",
+/// Inner disc, whole outer ring, then its four native sectors clockwise from up.
+pub const STICK_ZONE_PINS: [[&str; 6]; 2] = [
+    [
+        "left_stick_inner", "left_stick_outer", "left_stick_outer_up",
+        "left_stick_outer_right", "left_stick_outer_down", "left_stick_outer_left",
+    ],
+    [
+        "right_stick_inner", "right_stick_outer", "right_stick_outer_up",
+        "right_stick_outer_right", "right_stick_outer_down", "right_stick_outer_left",
+    ],
 ];
 pub const TOUCH_PINS: &[&str] = &["touch1_active", "touch2_active"];
 pub const PAD_PINS: &[&str] = &[
@@ -119,7 +124,9 @@ pub fn input_pin(input: &str) -> Option<&str> {
                 .then_some(input)
         })
         .or_else(|| DIRECTIONS.contains(&input).then_some(input))
-        .or_else(|| ZONES.contains(&input).then_some(input))
+        .or_else(|| {
+            STICK_ZONE_PINS.iter().any(|pins| pins.contains(&input)).then_some(input)
+        })
         .or_else(|| crate::touchpad::SWIPE_PINS.contains(&input).then_some(input))
         .or(match input {
             "touch1" => Some("touch1_active"),
@@ -209,6 +216,11 @@ impl Default for StickZones {
         }
     }
 }
+impl StickZones {
+    pub(crate) fn boundary(&self, side: usize, was_outer: bool) -> f32 {
+        [self.left_outer, self.right_outer][side] - if was_outer { self.hysteresis } else { 0. }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -220,12 +232,11 @@ pub enum StickRegion {
 }
 impl StickRegion {
     pub fn input(self, side: usize) -> Option<&'static str> {
-        match (side, self) {
-            (0, Self::Inner) => Some("left_stick_inner"),
-            (0, Self::Outer) => Some("left_stick_outer"),
-            (1, Self::Inner) => Some("right_stick_inner"),
-            (1, Self::Outer) => Some("right_stick_outer"),
-            _ => None,
+        let pins = STICK_ZONE_PINS.get(side)?;
+        match self {
+            Self::Center => None,
+            Self::Inner => Some(pins[0]),
+            Self::Outer => Some(pins[1]),
         }
     }
 }

@@ -5,7 +5,7 @@ pub use handoff::PressHandoff;
 
 use crate::profile::{
     input_pin, Action, GamepadTarget, GyroActivationMode, GyroOutput, Profile, StickRegion,
-    StickZones, TimestampSource, Trigger, AXES, BUTTON_PINS, DIRECTIONS, PAD_PINS, ZONES,
+    StickZones, TimestampSource, Trigger, AXES, BUTTON_PINS, DIRECTIONS, PAD_PINS, STICK_ZONE_PINS,
 };
 use crate::timing::{SampleClock, SampleTime, MAX_GAP_NS};
 use crate::{
@@ -35,20 +35,40 @@ const PAD: &str = "studio.pad";
 const GYRO: &str = "studio.gyro";
 const GYRO_AIM: &str = "aim_output";
 
-fn stick_region(
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StickPosition {
+    pub region: StickRegion,
+    pub outer_sector: Option<&'static str>,
+}
+
+impl StickPosition {
+    fn pressed(self, side: usize, pin: &str) -> bool {
+        self.region.input(side) == Some(pin) || self.outer_sector == Some(pin)
+    }
+}
+
+fn stick_position(
     layout: &mut flexinput_core::area::AreaLayout,
+    side: usize,
     value: Vec2,
-    limit: f32,
-    hysteresis: f32,
-    was_outer: bool,
-) -> StickRegion {
-    layout.edges[0].pos = limit - if was_outer { hysteresis } else { 0. };
-    if layout.band_of(value.x, value.y) > 0 {
-        StickRegion::Outer
-    } else if value.length() > 0. {
-        StickRegion::Inner
-    } else {
-        StickRegion::Center
+    boundary: f32,
+) -> StickPosition {
+    if value == Vec2::ZERO {
+        return StickPosition::default();
+    }
+    layout.edges[0].pos = boundary;
+    // circle_ways(4) numbers up/right/down/left 1/3/5/7, with 0 in the disc.
+    let cell = layout.locate_id(value.x, value.y);
+    let outer_sector = match cell {
+        1 => Some(STICK_ZONE_PINS[side][2]),
+        3 => Some(STICK_ZONE_PINS[side][3]),
+        5 => Some(STICK_ZONE_PINS[side][4]),
+        7 => Some(STICK_ZONE_PINS[side][5]),
+        _ => None,
+    };
+    StickPosition {
+        region: if outer_sector.is_some() { StickRegion::Outer } else { StickRegion::Inner },
+        outer_sector,
     }
 }
 
@@ -400,7 +420,7 @@ fn controls(profile: &Profile, actions: &[Action]) -> (GraphRunner, Vec<PressCom
         .iter()
         .chain(AXES)
         .chain(DIRECTIONS)
-        .chain(ZONES)
+        .chain(STICK_ZONE_PINS.iter().flatten())
         .chain(crate::profile::TOUCH_PINS)
         .chain(&crate::touchpad::SWIPE_PINS)
         .chain(&TRIGGER_STAGE_PINS)
@@ -606,7 +626,9 @@ pub struct Engine {
     trial_scale: Option<f32>,
     measurement_scale: Option<f32>,
     raw_sticks: [Vec2; 2],
-    zone_layouts: [flexinput_core::area::AreaLayout; 2],
+    zone_layout: flexinput_core::area::AreaLayout,
+    base_zone_settings: StickZones,
+    base_positions: [StickPosition; 2],
     stick_time: f64,
     handoff_blocked: BTreeSet<String>,
 }
@@ -701,7 +723,7 @@ impl Engine {
         for pin in BUTTON_PINS {
             signals.set_pin(SOURCE, pin, Signal::Bool(false));
         }
-        for pin in AXES.iter().chain(DIRECTIONS).chain(ZONES) {
+        for pin in AXES.iter().chain(DIRECTIONS).chain(STICK_ZONE_PINS.iter().flatten()) {
             signals.set_pin(SOURCE, pin, Signal::Float(0.0));
         }
         for stick in ["left_stick", "right_stick"] {
@@ -741,6 +763,7 @@ impl Engine {
             clock: SampleClock::new(profile.gyro.timestamp_source),
             frame: Frame::default(),
             physical_pad: (profile.virtual_gamepad != GamepadTarget::None).then(PadState::default),
+            base_zone_settings: profile.stick_zones.clone(),
             profile,
             signals,
             gyro_signals: SigMap::default(),
@@ -771,13 +794,8 @@ impl Engine {
             raw_sticks: [Vec2::ZERO; 2],
             stick_time: 0.,
             handoff_blocked: BTreeSet::new(),
-            zone_layouts: [0, 1].map(|_| {
-                let mut geometry = flexinput_core::area::AreaLayout::default_for(
-                    flexinput_core::area::Shape::Circle,
-                );
-                geometry.edges = vec![flexinput_core::area::Border::hard(0.85)];
-                geometry
-            }),
+            zone_layout: flexinput_core::area::AreaLayout::circle_ways(4),
+            base_positions: Default::default(),
         };
         this.refresh_sticks(0., false);
         this.eval_controls(false, 0);
@@ -1025,12 +1043,8 @@ impl Engine {
                 .signals
                 .set_pin(SOURCE, pin, Signal::Bool(down));
         }
-        for (i, (prefix, stick, limit)) in [
-            ("left", Stick::Left, self.profile.stick_zones.left_outer),
-            ("right", Stick::Right, self.profile.stick_zones.right_outer),
-        ]
-        .into_iter()
-        .enumerate()
+        for (i, (prefix, stick)) in [("left", Stick::Left), ("right", Stick::Right)]
+            .into_iter().enumerate()
         {
             let pin = format!("{prefix}_stick");
             // Studio's controls and gyro run in separate graphs. Keep the
@@ -1064,23 +1078,19 @@ impl Engine {
                     Signal::Float(value),
                 );
             }
-            let region = stick_region(
-                &mut self.zone_layouts[i],
-                value,
-                limit,
-                self.profile.stick_zones.hysteresis,
-                previous[i],
-            );
-            self.signals.set_pin(
-                SOURCE,
-                &format!("{prefix}_stick_outer"),
-                Signal::Bool(region == StickRegion::Outer),
-            );
-            self.signals.set_pin(
-                SOURCE,
-                &format!("{prefix}_stick_inner"),
-                Signal::Bool(region == StickRegion::Inner),
-            );
+            let boundary = self.profile.stick_zones.boundary(i, previous[i]);
+            let position = stick_position(&mut self.zone_layout, i, value, boundary);
+            for zone in STICK_ZONE_PINS[i] {
+                self.signals.set_pin(SOURCE, zone, Signal::Bool(position.pressed(i, zone)));
+            }
+            let base_value = self.base_input.stick(&pin);
+            let base_boundary = self.base_zone_settings
+                .boundary(i, self.base_positions[i].region == StickRegion::Outer);
+            self.base_positions[i] = if base_value == value && base_boundary == boundary {
+                position
+            } else {
+                stick_position(&mut self.zone_layout, i, base_value, base_boundary)
+            };
         }
         self.mask_handoff_inputs();
     }
@@ -1105,27 +1115,9 @@ impl Engine {
         })
     }
 
-    /// Global shortcuts use the base profile's calibrated stick and ring bounds.
-    pub fn base_stick_regions(
-        &mut self,
-        zones: &StickZones,
-        previous: [StickRegion; 2],
-    ) -> [StickRegion; 2] {
-        let limits = [zones.left_outer, zones.right_outer];
-        std::array::from_fn(|i| {
-            let value = self.base_input.stick(["left_stick", "right_stick"][i]);
-            let layout = &mut self.zone_layouts[i];
-            let old_limit = layout.edges[0].pos;
-            let region = stick_region(
-                layout,
-                value,
-                limits[i],
-                zones.hysteresis,
-                previous[i] == StickRegion::Outer,
-            );
-            layout.edges[0].pos = old_limit;
-            region
-        })
+    /// Capture, global shortcuts and layer triggers share the base stick's hysteresis.
+    pub fn base_stick_positions(&self) -> [StickPosition; 2] {
+        self.base_positions
     }
     pub fn reset(&mut self) {
         self.mouse_gyro_enabled_at = None;
@@ -1371,7 +1363,7 @@ impl Engine {
     }
     /// Hold modifiers use physical values and base ring geometry. A layer may
     /// change filtering, deadzones or rings without changing its own trigger.
-    pub fn layer_input_value(&self, input: &str, base: &Profile, active: bool) -> f32 {
+    pub fn layer_input_value(&self, input: &str, base: &Profile, _active: bool) -> f32 {
         if self.handoff_blocked.contains(input) {
             return 0.;
         }
@@ -1387,6 +1379,9 @@ impl Engine {
         } else {
             return base_value();
         };
+        if STICK_ZONE_PINS[index].contains(&input) {
+            return f32::from(self.base_positions[index].pressed(index, input));
+        }
         let value = self.base_input.stick(if index == 0 {
             "left_stick"
         } else {
@@ -1403,29 +1398,6 @@ impl Engine {
             "right" => directions[1],
             "up" => directions[2],
             "down" => directions[3],
-            "inner" | "outer" => {
-                let mut geometry = self.zone_layouts[index].clone();
-                let previous_outer = if part == "outer" { active } else { !active };
-                let limit = [base.stick_zones.left_outer, base.stick_zones.right_outer][index];
-                let region = stick_region(
-                    &mut geometry,
-                    value,
-                    limit,
-                    base.stick_zones.hysteresis,
-                    previous_outer,
-                );
-                let pressed = region
-                    == if part == "outer" {
-                        StickRegion::Outer
-                    } else {
-                        StickRegion::Inner
-                    };
-                if pressed {
-                    1.
-                } else {
-                    0.
-                }
-            }
             _ => base_value(),
         }
     }

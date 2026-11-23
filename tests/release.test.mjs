@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { readReleaseConfig, readReleaseAssets, verifyInstaller, verifyBuildSource, sha256 } from '../scripts/release-artifacts.mjs';
 import { createGitHubClient, publishRelease } from '../scripts/release-github.mjs';
 import { signingEnvironment } from '../scripts/release-local.mjs';
+import { stageSealosRelease, publishSealosManifest, sealosDownload } from '../scripts/release-sealos.mjs';
 
 const commit = 'a'.repeat(40);
 
@@ -103,6 +104,42 @@ test('signed artifacts normalize release notes and remain tied to the exact sour
   assert.throws(() => verifyBuildSource(f.config, f.files, 'b'.repeat(40)), /original clean source/);
   f.files.get(f.config.setup).digest = 'modified';
   assert.throws(() => verifyBuildSource(f.config, f.files, commit), /original clean source/);
+});
+
+test('mirror keeps signed bytes, verifies public downloads, resumes safely and promotes the manifest last', async t => {
+  const {config, files} = fixture(t);
+  const objects = new Map();
+  const fail = status => Object.assign(new Error(String(status)), { $metadata: { httpStatusCode: status } });
+  const client = { send: async command => {
+    const {Key, Body, IfMatch, IfNoneMatch} = command.input;
+    const old = objects.get(Key);
+    if (Body) {
+      if (IfNoneMatch === '*' && old || IfMatch && IfMatch !== old?.ETag) throw fail(412);
+      objects.set(Key, {bytes: Body, ETag: '"' + sha256(Body) + '"'});
+      return {};
+    }
+    if (!old) throw fail(404);
+    return {ETag: old.ETag, Body: {transformToString: async () => old.bytes.toString()}};
+  }};
+  const request = async url => {
+    const path = new URL(url).pathname.split('/').slice(2).join('/');
+    const item = objects.get(path);
+    return new Response(item?.bytes, {status: item ? 200 : 404});
+  };
+  const manifest = await stageSealosRelease(client, config, files, request);
+  assert.equal(objects.has('releases/latest.json'), false);
+  const platform = JSON.parse(manifest.bytes).platforms['windows-x86_64-nsis'];
+  assert.equal(platform.url, sealosDownload(config, config.setup));
+  assert.equal(platform.signature, files.get(config.setup + '.sig').bytes.toString().trim());
+  assert.deepEqual(objects.get('releases/' + config.tag + '/' + config.setup).bytes, files.get(config.setup).bytes);
+  await stageSealosRelease(client, config, files, request);
+  await publishSealosManifest(client, config, manifest, request);
+  await publishSealosManifest(client, config, manifest, request);
+  assert.deepEqual(objects.get('releases/latest.json').bytes, manifest.bytes);
+  objects.get('releases/latest.json').bytes = Buffer.from('{"version":"1.12.0"}');
+  await assert.rejects(publishSealosManifest(client, config, manifest, request), /newer release/);
+  objects.get('releases/' + config.tag + '/' + config.setup).bytes = Buffer.from('corrupt');
+  await assert.rejects(stageSealosRelease(client, config, files, request), /differs/);
 });
 
 test('installer bytes, signature comments, and signed version cannot be substituted', t => {

@@ -19,7 +19,7 @@ const sectionForOutput=(value:string):KeyboardSection=>{
   return key?.group==='numpad'?'numpad':key?.group==='navigation'||key?.group==='modifier'&&!primaryModifiers.includes('key:'+key.name)||key?.group==='function'&&Number(key.name.slice(1))>12?'extended':'main';
 };
 
-export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubmit,capture,onCapture,onCancelCapture,onAssignEscape,busy,error,layerName,navigation=false,split=false}:{action:Action;isNew:boolean;profile?:Profile;index:number|null;onChange:(patch:Partial<Action>)=>void;onClose:()=>void;onSubmit:()=>void;capture:Capture|null;onCapture:(kind:CaptureKind)=>void;onCancelCapture:()=>void;onAssignEscape:()=>void;busy:boolean;error?:string;layerName?:string;navigation?:boolean;split?:boolean}) {
+export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubmit,capture,onCapture,onCancelCapture,onAssignEscape,busy,error,layerName,navigation=false,split=false}:{action:Action;isNew:boolean;profile?:Profile;index:number|null;onChange:(patch:Partial<Action>)=>void;onClose:()=>void;onSubmit:()=>void;capture:Capture|null;onCapture:(kind:CaptureKind,outerRing?:boolean)=>void;onCancelCapture:()=>void;onAssignEscape:()=>void;busy:boolean;error?:string;layerName?:string;navigation?:boolean;split?:boolean}) {
   const [inputCombo,setInputCombo]=useState(chordParts(action.input).length>1);
   const [outputCombo,setOutputCombo]=useState(chordParts(action.output).filter(value=>!modifiers.includes(value)).length>1);
   useEffect(()=>{if(chordParts(action.input).length>1)setInputCombo(true);},[action.input]);
@@ -59,12 +59,14 @@ export function ActionEditor({action,isNew,profile,index,onChange,onClose,onSubm
       <section className={styles.panel} aria-label="手柄输入设置" data-pad-zone="binding-input">
         <div className={styles.heading}><h3>手柄输入</h3><span>1</span></div>
         <InputCaptureButton value={inputName(inputPreview)} recording={capture?.kind==='pad'}
-          disabled={busy||!!capture&&capture.kind!=='pad'} onClick={()=>record('pad')}/>
+          disabled={busy||!!capture&&capture.kind!=='pad'} onClick={()=>record('pad')}
+          hint={capture?.outerRing ? '推到要录入的外圈方向，再松开摇杆。' : undefined}/>
         <fieldset className={styles.manual} disabled={locked}>
           <div className={styles.parts} aria-label="已选手柄输入">{input.map(value=><button type="button" key={value} aria-label={'移除输入 '+inputName(value)} onClick={()=>onChange({input:input.filter(part=>part!==value).join('+')})}>{inputName(value)} <span aria-hidden="true">×</span></button>)}</div>
           <div className={styles.sectionHeading}>触发方式</div><ActionTriggerFields action={action} onChange={onChange} peers={triggerPeers(profile,'action',index)}/>
           <Toggle label="组合输入" value={inputCombo} onChange={setInputCombo}/>
-          <ControllerInputChoices split={split} value={action.input} combo={inputCombo} onChange={input=>onChange({input})}/>
+          <ControllerInputChoices split={split} value={action.input} combo={inputCombo} onChange={input=>onChange({input})}
+            onRecordOuter={()=>onCapture('pad', true)}/>
           {analog&&<Range label="触发阈值" value={action.threshold} min={0} max={0.95} step={0.05} onChange={threshold=>onChange({threshold})} help="扳机或摇杆方向超过该比例时，触发对应键鼠操作。"/>}
         </fieldset>
       </section>

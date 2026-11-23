@@ -8,29 +8,31 @@
 
 ## 发布新版本
 
-更新器使用 GitHub 最新正式发行版里的 `latest.json`。预览版和草稿不会进入这个通道。清单的 `windows-x86_64-nsis` 条目指向安装包，签名使用 Motion Studio 的密钥并包含包的版本。更新签名与 Windows 的安装程序证书独立。
+从 0.19.3 起，「更新来源」默认跟随界面语言，中文选 Sealos，英文选 GitHub。手动选择的来源保存在本机，切换语言后仍然生效。更换来源会重新检查更新，下载和安装均使用所选来源的签名包。旧安装版可以先从原来的 GitHub 通道升级。
 
-默认在本机编译、签名并上传 GitHub，复用本地 Cargo 构建缓存。推送提交或版本标签不会自动启动云端发布构建。
+两个来源各有一份 `latest.json`，其 `windows-x86_64-nsis` 条目指向同一来源的安装包。两个安装包及版本签名逐字节相同。签名使用 Motion Studio 原有的密钥并包含版本号。
+
+本机双源发布使用 `npm run release:both`。它编译、签名一次，复用本地 Cargo 构建缓存。`npm run release:local` 保留单独发布到 GitHub 的入口。
 
 本机发布脚本为桌面程序依赖的 `motion-core` 使用单个代码生成单元，保留 Release 优化级别，避开本机 Windows Rust 编译器在并行代码生成时出现的访问异常。该覆盖只传给桌面构建，独立输入引擎仍使用原来的编译设置。
 
 1. 本机需有 Windows、Rust/MSVC 和 Node/npm；正式构建时脚本会执行 `npm ci`，按锁文件准备前端依赖，保留 Cargo 编译缓存。默认使用 `~/.tauri/motion-studio-release/updater.key`，并核对旁边 `.pub` 与应用公钥一致。也可以在当前终端设置 `TAURI_SIGNING_PRIVATE_KEY`（私钥路径或内容）及需要的 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。后续版本沿用现有密钥，私钥保存在仓库之外。
 2. 同步 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json` 和 `src-tauri`、`crates/engine`、`crates/host` 的 Cargo 版本及 `Cargo.lock`，写好 `docs/releases/vX.Y.Z.md`。
 3. 完成本次改动必要的检查，提交并推送到 `origin/main`，保持工作区干净。已通过且未受修改影响的检查不再重复。
-4. 运行 `npm run release:local`。脚本编译并签名 NSIS 安装包，复用现有 `package:update` 验签，创建指向该提交的版本标签，上传四个发布文件，逐个核对 GitHub 返回的 SHA-256 后发布为 Latest。
+4. 通过终端环境或凭据管理器注入 `SEALOS_ACCESS_KEY_ID` 和 `SEALOS_SECRET_ACCESS_KEY`，运行 `npm run release:both`。Sealos 的公开发布目录由 `src-tauri/sealos-release-url.txt` 指定。脚本通过 S3 写入 `releases/vX.Y.Z/` 下的安装包、签名、校验文件和该来源的清单，匿名下载并逐个核对 SHA-256。GitHub 发布为 Latest 后才更新 Sealos 的 `releases/latest.json`。
 
 GitHub 身份优先使用 `GH_TOKEN` / `GITHUB_TOKEN`，否则读取已有 Git 凭据；需要仓库 Contents 写权限，不需要安装 `gh`。签名密钥和凭据不会写入发布文件。
 
 ```powershell
-npm run release:local -- --check
-npm run release:local
+npm run release:both -- --check
+npm run release:both
 ```
 
 `--check` 只检查版本、工具、签名配置和 GitHub 权限，不编译、不创建标签、不上传。正式发布会阻止脏工作区、未推送源码、版本冲突和不匹配的资产；构建前后也会确认源码没有变化。
 
 维护者明确要求不运行测试时，可使用 `npm run release:local -- --skip-tests`。它只跳过映射回归测试，仍执行锁定依赖安装、正式构建、资源校验、更新签名校验与发布文件哈希核对。默认发布命令仍运行回归测试；跳过测试的版本应在版本说明中记录验证范围。
 
-若构建已完成、上传途中断网，在同一干净提交上运行 `npm run release:local -- --publish-only`。它重新验证签名及源码记录，只补传缺少的文件，不重新编译，也不覆盖已有文件。源码记录存于 `artifacts/release-vX.Y.Z.source.json`，包含提交和四个文件的哈希，不上传。已正式发布的版本不重新打包覆盖，后续改动使用新版本。
+若双源发布途中断网，在同一干净提交上运行 `npm run release:both -- --publish-only`。它重新验证签名及源码记录，复用已上传并通过哈希核对的文件。Sealos 的版本目录只写入缺少的对象，稳定清单使用 ETag 条件更新，并校验版本顺序。源码记录存于 `artifacts/release-vX.Y.Z.source.json`。
 
 完整发布资产在 `artifacts/release-vX.Y.Z/`：安装包、`.sig`、`latest.json`、`SHA256SUMS.txt`。`package:update` 使用正式公钥验证安装包的 BLAKE2b-512 / Ed25519 签名、可信注释签名和其中的版本号；任何一项不匹配都会中止打包。发布流程不安装软件，不运行游戏或物理手柄测试。
 

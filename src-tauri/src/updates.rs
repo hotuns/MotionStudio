@@ -1,7 +1,7 @@
 mod portable;
 
 use crate::{background, text, AppState};
-use motion_core::protocol::Command;
+use motion_core::{protocol::Command, storage::UpdateSource};
 use serde::Serialize;
 use std::{
     path::PathBuf,
@@ -12,6 +12,7 @@ use tauri::{async_runtime, ipc::Channel, Manager, State, WebviewWindow};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 const RELEASES: &str = "https://github.com/hotuns/MotionStudio/releases";
+const SEALOS_RELEASES: &str = include_str!("../sealos-release-url.txt");
 const BUSY: &str = "更新操作正在进行，请稍候。";
 const STALE: &str = "更新已失效，请重新检查。";
 const MAX_PACKAGE_BYTES: usize = 128 * 1024 * 1024;
@@ -66,13 +67,16 @@ impl Mode {
         }
     }
 
-    fn asset_url(self, version: &str) -> String {
+    fn asset_url(self, source: UpdateSource, version: &str) -> String {
         let name = match self {
             Self::Installed => format!("MotionStudio-{version}-x64-setup.exe"),
             Self::Portable => format!("MotionStudio-{version}-windows-x64.zip"),
             Self::Development => unreachable!(),
         };
-        format!("{RELEASES}/download/v{version}/{name}")
+        match source {
+            UpdateSource::GitHub => format!("{RELEASES}/download/v{version}/{name}"),
+            UpdateSource::Sealos => format!("{}/v{version}/{name}", SEALOS_RELEASES.trim()),
+        }
     }
 }
 
@@ -105,6 +109,31 @@ fn only_main(window: &WebviewWindow) -> Result<(), String> {
     Ok(())
 }
 
+fn manifest_url(source: UpdateSource) -> String {
+    match source {
+        UpdateSource::GitHub => format!("{RELEASES}/latest/download/latest.json"),
+        UpdateSource::Sealos => format!("{}/latest.json", SEALOS_RELEASES.trim()),
+    }
+}
+
+fn require_selected_source(state: &AppState, source: UpdateSource) -> Result<(), String> {
+    if state.settings.lock().map_err(text)?.effective_update_source() == source {
+        Ok(())
+    } else {
+        Err(STALE.into())
+    }
+}
+
+impl Session {
+    fn candidate_for(&self, source: UpdateSource, version: &str) -> Result<Update, String> {
+        self.candidate.as_ref()
+            .filter(|candidate| candidate.version == version
+                && candidate.download_url.as_str() == Mode::current().asset_url(source, version))
+            .cloned()
+            .ok_or_else(|| STALE.into())
+    }
+}
+
 fn failure(state: &AppState, message: &str, detail: impl std::fmt::Display) -> String {
     state.client.log(format!("Studio updater: {detail}"));
     message.into()
@@ -115,10 +144,13 @@ pub async fn check_studio_update(
     window: WebviewWindow,
     updates: State<'_, Updates>,
     app_state: State<'_, AppState>,
+    source: UpdateSource,
 ) -> Result<UpdateCheck, String> {
     only_main(&window)?;
     let mode = Mode::current();
-    let mut session = updates.session.try_lock().map_err(|_| BUSY)?;
+    let mut session = updates.session.lock().await;
+    require_selected_source(&app_state, source)?;
+    *session = Session::default();
     let check_error = |error| failure(&app_state, "无法检查更新，请稍后重试。", error);
     let availability = if mode == Mode::Development {
         Availability::Idle
@@ -126,6 +158,8 @@ pub async fn check_studio_update(
         let updater = window
             .app_handle()
             .updater_builder()
+            .endpoints(vec![manifest_url(source).parse().map_err(text)?])
+            .map_err(check_error)?
             .target(mode.target())
             .timeout(Duration::from_secs(12))
             .configure_client(|client| client.https_only(true))
@@ -142,8 +176,9 @@ pub async fn check_studio_update(
             .map_err(check_error)?;
         match updater.check().await {
             Ok(Some(candidate))
-                if candidate.download_url.as_str() == mode.asset_url(&candidate.version) =>
+                if candidate.download_url.as_str() == mode.asset_url(source, &candidate.version) =>
             {
+                require_selected_source(&app_state, source)?;
                 let availability = Availability::Available {
                     version: candidate.version.clone(),
                     notes: candidate
@@ -166,7 +201,6 @@ pub async fn check_studio_update(
             Err(error) => return Err(check_error(error)),
         }
     };
-    *session = Session::default();
     Ok(UpdateCheck { mode, availability })
 }
 
@@ -175,17 +209,14 @@ pub async fn download_studio_update(
     window: WebviewWindow,
     updates: State<'_, Updates>,
     app_state: State<'_, AppState>,
+    source: UpdateSource,
     version: String,
     progress: Channel<Transfer>,
 ) -> Result<(), String> {
     only_main(&window)?;
     let mut session = updates.session.try_lock().map_err(|_| BUSY)?;
-    let mut candidate = session
-        .candidate
-        .as_ref()
-        .filter(|candidate| candidate.version == version)
-        .cloned()
-        .ok_or(STALE)?;
+    require_selected_source(&app_state, source)?;
+    let mut candidate = session.candidate_for(source, &version)?;
     candidate.timeout = Some(Duration::from_secs(180));
     let mut received = 0;
     let interval = Duration::from_millis(120);
@@ -206,6 +237,7 @@ pub async fn download_studio_update(
     if bytes.len() > MAX_PACKAGE_BYTES {
         return Err("更新包超出大小限制。".into());
     }
+    require_selected_source(&app_state, source)?;
     session.downloaded = Some(bytes.into());
     Ok(())
 }
@@ -242,22 +274,20 @@ pub async fn install_studio_update(
     window: WebviewWindow,
     updates: State<'_, Updates>,
     app_state: State<'_, AppState>,
+    source: UpdateSource,
     version: String,
 ) -> Result<(), String> {
     only_main(&window)?;
     let session = updates.session.try_lock().map_err(|_| BUSY)?;
-    let candidate = session
-        .candidate
-        .as_ref()
-        .filter(|candidate| candidate.version == version)
-        .cloned()
-        .ok_or(STALE)?;
+    require_selected_source(&app_state, source)?;
+    let candidate = session.candidate_for(source, &version)?;
     let bytes = session.downloaded.clone().ok_or(STALE)?;
     let state = app_state.inner().clone();
     let app = window.app_handle().clone();
     let restart = updates.restart.clone();
     let result = background(move || {
         let _operation = state.operations.try_lock().map_err(|_| BUSY)?;
+        require_selected_source(&state, source)?;
         match Mode::current() {
             Mode::Installed => {
                 stop_mapping_for_update(&state)?;
@@ -302,6 +332,29 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn update_source_defaults_migrate_and_manual_selection_survives_language_changes() {
+        use motion_core::storage::{Language, Settings};
+        let mut settings: Settings = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(settings.effective_update_source(), UpdateSource::Sealos);
+        settings.language = Language::En;
+        assert_eq!(settings.effective_update_source(), UpdateSource::GitHub);
+        settings.update_source = Some(UpdateSource::GitHub);
+        settings.language = Language::ZhCn;
+        let restored: Settings = serde_json::from_value(serde_json::to_value(&settings).unwrap()).unwrap();
+        assert_eq!(restored.effective_update_source(), UpdateSource::GitHub);
+        settings.update_source = None;
+        assert_eq!(settings.effective_update_source(), UpdateSource::Sealos);
+        for source in [UpdateSource::GitHub, UpdateSource::Sealos] {
+            let manifest: tauri::Url = manifest_url(source).parse().unwrap();
+            let installer: tauri::Url = Mode::Installed.asset_url(source, "1.2.3").parse().unwrap();
+            assert_eq!(manifest.scheme(), "https");
+            assert_eq!(manifest.origin(), installer.origin());
+            assert!(installer.path().ends_with("/v1.2.3/MotionStudio-1.2.3-x64-setup.exe"));
+        }
+        assert_ne!(manifest_url(UpdateSource::GitHub), manifest_url(UpdateSource::Sealos));
+    }
+
+    #[test]
     #[ignore = "requires artifacts produced by npm run package:update"]
     fn signed_release_packages() {
         let version = env!("CARGO_PKG_VERSION");
@@ -325,7 +378,7 @@ mod tests {
         let mode = Mode::Installed;
         let updater = app.updater_builder().target(mode.target()).build().unwrap();
         let candidate = updater.restore_update(manifest.clone()).unwrap().unwrap();
-        assert_eq!(candidate.download_url.as_str(), mode.asset_url(version));
+        assert_eq!(candidate.download_url.as_str(), mode.asset_url(UpdateSource::GitHub, version));
         let name = candidate
             .download_url
             .path_segments()

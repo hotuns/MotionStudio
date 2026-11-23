@@ -3,10 +3,14 @@ import { version } from '../../package.json';
 import { t } from '../i18n';
 import { Dialog } from './Controls';
 import type { StudioUpdate } from './software-update';
+import type { UpdateSource } from '../types';
 import styles from './SettingsPage.module.css';
 
-export function SoftwareUpdate({ update, blocked, onInstall, onOpenReleases }: {
+export function SoftwareUpdate({ update, preference, busy, onSourceChange, blocked, onInstall, onOpenReleases }: {
   update: StudioUpdate;
+  preference?: UpdateSource | null;
+  busy: boolean;
+  onSourceChange: (source: UpdateSource | null) => void;
   blocked: string | null;
   onInstall: () => void;
   onOpenReleases: () => void;
@@ -32,6 +36,15 @@ export function SoftwareUpdate({ update, blocked, onInstall, onOpenReleases }: {
       <button type="button" className="secondary-btn"
         disabled={development || !!activity} onClick={() => void update.check()}>检查更新</button>
     </div>
+    <label className={styles.field}>
+      <span>更新来源</span>
+      <select value={preference ?? 'auto'} disabled={busy || downloading || installing}
+        onChange={event => onSourceChange(event.target.value === 'auto' ? null : event.target.value as UpdateSource)}>
+        <option value="auto">{t('跟随界面语言（{0}）').replace('{0}', update.languageSource === 'sealos' ? 'Sealos' : 'GitHub')}</option>
+        <option value="sealos">Sealos</option>
+        <option value="github">GitHub</option>
+      </select>
+    </label>
     <div role="status" aria-live="polite">
       {activity === 'checking' && <p>正在检查更新…</p>}
       {result?.state === 'current' && <p>已是最新版本。</p>}

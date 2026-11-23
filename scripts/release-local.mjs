@@ -40,13 +40,22 @@ function runNode(args, env = process.env) {
 
 export async function main(args = process.argv.slice(2)) {
   if (args.includes('--help')) {
-    console.log('npm run release:local                  Build, sign, verify, and publish\n'
+    console.log('npm run release:both                   Build once and publish to GitHub and Sealos\n'
+      + 'npm run release:local                  Build, sign, verify, and publish to GitHub\n'
       + 'npm run release:local -- --check        Check local tools, signing key, and GitHub access only\n'
       + 'npm run release:local -- --skip-tests   Publish without running regression tests (explicit maintainer choice)\n'
       + 'npm run release:local -- --publish-only Resume uploading the verified build from this commit');
     return;
   }
-  if (args.length > 1 || args.some(arg => !['--check', '--publish-only', '--skip-tests'].includes(arg))) throw new Error('Unknown option; use --help');
+  const mirrorRequested = args.includes('--sealos');
+  const modes = args.filter(arg => arg !== '--sealos');
+  if (modes.length > 1 || new Set(args).size !== args.length || modes.some(arg => !['--check', '--publish-only', '--skip-tests'].includes(arg))) throw new Error('Unknown option; use --help');
+  const credentials = { accessKeyId: process.env.SEALOS_ACCESS_KEY_ID, secretAccessKey: process.env.SEALOS_SECRET_ACCESS_KEY };
+  delete process.env.SEALOS_ACCESS_KEY_ID;
+  delete process.env.SEALOS_SECRET_ACCESS_KEY;
+  if (mirrorRequested && (!credentials.accessKeyId || !credentials.secretAccessKey)) {
+    throw new Error('Set SEALOS_ACCESS_KEY_ID and SEALOS_SECRET_ACCESS_KEY for dual publication');
+  }
   if (process.platform !== 'win32') throw new Error('Build Windows releases on Windows');
   const config = readReleaseConfig(root);
   if (!config.notes) throw new Error('Write docs/releases/' + config.tag + '.md first');
@@ -66,6 +75,12 @@ export async function main(args = process.argv.slice(2)) {
   if (!repositoryInfo.permissions?.push) throw new Error('GitHub credentials do not have repository write access');
   const remote = await inspectRemote(api, config.tag);
   if (args.includes('--check')) {
+    if (mirrorRequested) {
+      const {createSealosClient, checkSealosAccess} = await import('./release-sealos.mjs');
+      const client = createSealosClient(credentials);
+      try { await checkSealosAccess(client); } finally { client.destroy(); }
+      console.log('Sealos release bucket is accessible.');
+    }
     console.log('Local build prerequisites ready: Node ' + process.version + ', ' + cargo.stdout.trim());
     console.log('Existing signing key available; GitHub repository write access verified.');
     console.log(remote.release && !remote.release.draft
@@ -96,7 +111,19 @@ export async function main(args = process.argv.slice(2)) {
   const files = readReleaseAssets(config);
   verifyBuildSource(config, files, commit);
   if (cleanCommit() !== commit) throw new Error('Source changed before publication');
-  await publishRelease({ api, config, files, commit });
+  if (!mirrorRequested) {
+    await publishRelease({ api, config, files, commit });
+    return;
+  }
+  const {createSealosClient, stageSealosRelease, publishSealosManifest, sealosDownload} = await import('./release-sealos.mjs');
+  const client = createSealosClient(credentials);
+  try {
+    const manifest = await stageSealosRelease(client, config, files);
+    await publishRelease({ api, config, files, commit, mirrorUrl: sealosDownload(config, config.setup) });
+    await publishSealosManifest(client, config, manifest);
+  } finally {
+    client.destroy();
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

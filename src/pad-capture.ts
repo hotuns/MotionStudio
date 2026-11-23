@@ -22,8 +22,12 @@ export const padInputNeutral = (status: Status) => !status.buttons.some(Boolean)
   !status.touches?.some(pad => pad.some(contact => contact.active)) &&
   status.axes.every((value, i) => i < 4 ? Math.abs(value) <= 0.25 : value <= 0.1);
 
+export const outerRingNeutral = (status: Status) =>
+  padInputNeutral(status) && !status.stick_regions?.includes('outer');
+
 export type GamepadBindingRecording = {
   wholeStick: boolean;
+  outerRing?: boolean;
   waitingForNeutral: boolean;
   preview?: string[];
 };

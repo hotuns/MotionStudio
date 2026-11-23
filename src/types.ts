@@ -76,7 +76,8 @@ export type Shortcut={key:string;ctrl:boolean;alt:boolean;shift:boolean};
 export type ShortcutRule={trigger:{kind:'keyboard';key:Shortcut}|{kind:'gamepad';input:string};target:string;return_on_repeat?:boolean};
 export type IoRates = {polling_hz: number; output_hz: number};
 export type ControllerOverlayConfig={enabled:boolean;obs_enabled?:boolean;content?:'controller'|'key_mouse'|'both';width:number;opacity:number;position:'top_left'|'top_right'|'bottom_left'|'bottom_right';monitor:string|null;follow_motion:boolean};
-export type Settings = {controller_overlay?:ControllerOverlayConfig;mouse_display_sync?:boolean;io_rates?:IoRates;language?:'zh-CN'|'en';auto_hide:boolean;overlay_enabled:boolean;overlay_duration_ms:number;overlay_position:'top_left'|'top_right'|'bottom_left'|'bottom_right';output_backend:OutputBackend;gamepad_backend?:GamepadBackend;version:number;selected_profile:string;device_path:string;cursor_enabled:boolean;cursor_debounce_ms?:number;cursor_shown:Target;cursor_hidden:Target;shortcut_profile:string|null;shortcut_key:Shortcut|null;shortcut_pad?:string|null;shortcut_rules?:ShortcutRule[]|null;calibrations:Record<string,number[]>;motion_calibrations:Record<string,SensorCalibration>};
+export type UpdateSource = 'sealos' | 'github';
+export type Settings = {controller_overlay?:ControllerOverlayConfig;mouse_display_sync?:boolean;io_rates?:IoRates;language?:'zh-CN'|'en';update_source?:UpdateSource|null;auto_hide:boolean;overlay_enabled:boolean;overlay_duration_ms:number;overlay_position:'top_left'|'top_right'|'bottom_left'|'bottom_right';output_backend:OutputBackend;gamepad_backend?:GamepadBackend;version:number;selected_profile:string;device_path:string;cursor_enabled:boolean;cursor_debounce_ms?:number;cursor_shown:Target;cursor_hidden:Target;shortcut_profile:string|null;shortcut_key:Shortcut|null;shortcut_pad?:string|null;shortcut_rules?:ShortcutRule[]|null;calibrations:Record<string,number[]>;motion_calibrations:Record<string,SensorCalibration>};
 export type Device = {touchpads?:number;rumble?:boolean;lightbar?:boolean;id:number;name:string;vendor:number;product:number;path:string;origin:'physical'|'virtual'|'unknown';gyro:boolean;gamepad:boolean;accelerometer:boolean;buttons:string[];open_error?:string};
 export type NavCommand='up'|'down'|'left'|'right'|'confirm'|'back'|'edit'|'save'|'sidebar'|'menu'|'previous_zone'|'next_zone';
 export type MappingStatus={name:string;input:string;output:string;trigger:NonNullable<TriggerSettings['trigger']>;active:boolean;latched:boolean;reason:string};
@@ -84,6 +85,7 @@ export type Status = {
   mapping?:MappingStatus[];
   mouse_display_sync?:{live:boolean;frame_hz:number;reports_per_frame:number;vrr?:boolean;fallback_hz?:number};
   output_preview?: OutputPreviewStatus | null;
+  pad_outer_capture?: {serial: number; chord: string[]};
   state:string;message:string;profile_id:string|null;profile_name:string|null;device:Device|null;emitting:boolean;binding_capture?:boolean;active_layers?:string[];visibility?:{requested:boolean;active:boolean;hidden_paths:string[];error:string|null};output_backend?:OutputBackend|null;output_gamepad?:GamepadStatus|null;feedback?:{active:boolean;awaiting_new_command:boolean;rumble:number[];lightbar:number[]|null;forwarded:number;haptics?:HapticStatus|null};touches?:TouchContact[][];revision:number;reconnects:number;reload_error:string|null;buttons:boolean[];axes:number[];processed_axes?:number[];gyro:number[];calibration_progress:number;motion:MotionTelemetry;input_serial:number;stick_regions?:('center'|'inner'|'outer')[];pad_region_capture?:{serial:number;chord:string[]};pad_shortcuts?:{input:string;target:string}[];pad_shortcut_events?:{serial:number;index:number}[];pad_shortcut_serial?:number;pad_shortcut_baseline?:number;last_input:string|null;input_chord?:string[];ui_navigation?:boolean;navigation_serial?:number;navigation_events?:{serial:number;command:NavCommand}[];navigation_held?:NavCommand[];stats:{gyro_events:number;gyro_hz:number;stale_events:number;invalid_timestamps:number;gaps:number;process_p99_us:number;queue_p99_us:number;mouse_counts:number[];output?:{queued:number;coalesced_motion:number;mouse_reports:number;keyboard_reports:number;wait_total_us:number;wait_max_us:number;queue_max_us:number}};
 };
 export type JsmReport={profile:Profile;lines:{file:string;line:number;source:string;status:'converted'|'approximate'|'skipped'|'ignored'|'overridden'|'included';message:string}[];warnings:string[];converted:number;approximate:number;skipped:number};
@@ -94,6 +96,13 @@ export const buttonNames = ['south','east','west','north','back','guide','start'
 export const labels:Record<string,string> = {south:'A / 南键',east:'B / 东键',west:'X / 西键',north:'Y / 北键',back:'View / 返回',guide:'主菜单',start:'Menu / 开始',left_stick_click:'左摇杆按下',right_stick_click:'右摇杆按下',left_shoulder:'LB / 左肩键',right_shoulder:'RB / 右肩键',dpad_up:'方向键 ↑',dpad_down:'方向键 ↓',dpad_left:'方向键 ←',dpad_right:'方向键 →',left_trigger:'LT / 左扳机',right_trigger:'RT / 右扳机',left_stick_up:'左摇杆 ↑',left_stick_down:'左摇杆 ↓',left_stick_left:'左摇杆 ←',left_stick_right:'左摇杆 →',right_stick_up:'右摇杆 ↑',right_stick_down:'右摇杆 ↓',right_stick_left:'右摇杆 ←',right_stick_right:'右摇杆 →',left_paddle1:'左扩展键 1',right_paddle1:'右扩展键 1',left_paddle2:'左扩展键 2',right_paddle2:'右扩展键 2',touchpad:'触摸板按下'};
 for(let n=1;n<=6;n++) labels['misc'+n]='扩展键 '+n;
 Object.assign(labels,{touch1:'触摸接触 1',touch2:'触摸接触 2',left_stick_outer:'左摇杆外圈',left_stick_inner:'左摇杆内圈',right_stick_outer:'右摇杆外圈',right_stick_inner:'右摇杆内圈'});
+const outerSectorLabels = {
+  left_stick_outer_up:'左摇杆外圈 ↑', left_stick_outer_down:'左摇杆外圈 ↓',
+  left_stick_outer_left:'左摇杆外圈 ←', left_stick_outer_right:'左摇杆外圈 →',
+  right_stick_outer_up:'右摇杆外圈 ↑', right_stick_outer_down:'右摇杆外圈 ↓',
+  right_stick_outer_left:'右摇杆外圈 ←', right_stick_outer_right:'右摇杆外圈 →',
+};
+Object.assign(labels, outerSectorLabels);
 Object.assign(labels,{
   left_trigger_soft:'LT 轻拉', left_trigger_full:'LT 全拉',
   right_trigger_soft:'RT 轻拉', right_trigger_full:'RT 全拉',
@@ -101,7 +110,7 @@ Object.assign(labels,{
 export const triggerStageInputs = ['left_trigger_soft','left_trigger_full','right_trigger_soft','right_trigger_full'];
 export const swipeInputs = ['touch_swipe_up','touch_swipe_down','touch_swipe_left','touch_swipe_right'];
 Object.assign(labels,{touch_swipe_up:'触摸板上滑',touch_swipe_down:'触摸板下滑',touch_swipe_left:'触摸板左滑',touch_swipe_right:'触摸板右滑'});
-export const inputs = [...swipeInputs,'touch1','touch2','left_stick_outer','left_stick_inner','right_stick_outer','right_stick_inner',...buttonNames,'left_trigger','right_trigger',...triggerStageInputs,'left_stick_up','left_stick_down','left_stick_left','left_stick_right','right_stick_up','right_stick_down','right_stick_left','right_stick_right'];
+export const inputs = [...swipeInputs,'touch1','touch2','left_stick_outer','left_stick_inner','right_stick_outer','right_stick_inner',...Object.keys(outerSectorLabels),...buttonNames,'left_trigger','right_trigger',...triggerStageInputs,'left_stick_up','left_stick_down','left_stick_left','left_stick_right','right_stick_up','right_stick_down','right_stick_left','right_stick_right'];
 export const chordParts=(value:string)=>value.split('+').map(v=>v.trim()).filter(Boolean);
 export const inputLabel=(value:string)=>chordParts(value).map(v=>t(labels[v]??v)).join(' + ');
 export const mouseOutputs=['mouse:left','mouse:right','mouse:middle','mouse:x1','mouse:x2'];

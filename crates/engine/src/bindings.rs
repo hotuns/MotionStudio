@@ -26,10 +26,15 @@ pub fn input_chord(value: &str) -> Option<Vec<&str>> {
         ["right_stick_left", "right_stick_right"],
         ["dpad_up", "dpad_down"],
         ["dpad_left", "dpad_right"],
-        ["left_stick_inner", "left_stick_outer"],
-        ["right_stick_inner", "right_stick_outer"],
     ] {
         if pair.iter().all(|v| p.contains(v)) {
+            return None;
+        }
+    }
+    // The whole outer ring can be held together with its active sector.
+    for zones in &crate::profile::STICK_ZONE_PINS {
+        let sectors = zones[2..].iter().filter(|pin| p.contains(pin)).count();
+        if sectors > 1 || (p.contains(&zones[0]) && (sectors > 0 || p.contains(&zones[1]))) {
             return None;
         }
     }

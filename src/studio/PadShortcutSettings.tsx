@@ -1,26 +1,27 @@
 import {useEffect, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {t} from '../i18n';
-import {padInputNeutral, padBindingCandidates} from '../pad-capture';
+import {outerRingNeutral, padInputNeutral, padBindingCandidates} from '../pad-capture';
 import {chordParts, inputs, type Status} from '../types';
-import {InputChordFields, inputOpposites} from './BindingFields';
+import {InputChordFields, inputConflict} from './BindingFields';
 import {padInputLabel} from './binding-choices';
 import {PadInputRow, PadInputValue} from './PadInputPicker';
 import styles from './CursorSwitchPanel.module.css';
 
-const modes = [['controls', '按键与方向'], ['regions', '摇杆内外圈']] as const;
+const modes = [['controls', '按键与方向'], ['regions', '摇杆内外圈'], ['outer', '四向外圈']] as const;
 type Mode = (typeof modes)[number][0];
 
-const isNeutral = (status: Status, mode: Mode) => padInputNeutral(status)
-  && (mode !== 'regions' || (status.stick_regions ?? []).every(region => region === 'center'));
+const isNeutral = (status: Status, mode: Mode) => mode === 'outer' ? outerRingNeutral(status) :
+  padInputNeutral(status) && (mode !== 'regions' || (status.stick_regions ?? []).every(region => region === 'center'));
 const inputSerial = (status: Status, mode: Mode) =>
+  mode === 'outer' ? status.pad_outer_capture?.serial ?? 0 :
   mode === 'regions' ? status.pad_region_capture?.serial ?? 0 : status.input_serial;
 const outerCount = (parts: string[]) => parts.filter(part => part.endsWith('_outer')).length;
 
 export function validatePadShortcut(input: string) {
   const parts = chordParts(input);
   if (!parts.length || parts.length > 4 || new Set(parts).size !== parts.length ||
-      parts.some(part => !inputs.includes(part) || parts.includes(inputOpposites[part]))) {
+      parts.some((part, i) => !inputs.includes(part) || parts.slice(0, i).some(other => inputConflict(part, other)))) {
     return '请选择 1–4 个有效且不冲突的手柄输入。';
   }
   if (parts.includes('back') && parts.includes('start')) return 'View + Menu 已用于进入手柄界面操作，请选择其他组合。';
@@ -101,7 +102,8 @@ export function PadShortcutSettings({input, status, busy, onChange, onPrepare, o
     }
     if (nextSerial > serial.current) {
       serial.current = nextSerial;
-      const raw = mode === 'regions' ? status.pad_region_capture?.chord ?? [] :
+      const raw = mode === 'outer' ? status.pad_outer_capture?.chord ?? [] :
+        mode === 'regions' ? status.pad_region_capture?.chord ?? [] :
         status.input_chord?.length ? status.input_chord : status.last_input ? [status.last_input] : [];
       const next = padBindingCandidates(raw, split);
       const failure = validatePadShortcut(next.join('+'));
@@ -176,7 +178,8 @@ export function PadShortcutSettings({input, status, busy, onChange, onPrepare, o
         onClick={() => changeDraft('')}>清除手柄快捷键</button>
     </div>}
     {recording && <p className={styles.hint} role="status">
-      {candidate.length ? <strong translate="no">{label(candidate)}</strong> : mode === 'regions' ?
+      {candidate.length ? <strong translate="no">{label(candidate)}</strong> : mode === 'outer' ?
+        '推到要录入的外圈方向，再松开摇杆。' : mode === 'regions' ?
         '请让摇杆回中，再推到要录入的区域并松开。' : '请先松开已有按键，再按住所需组合并全部松开。'}
       <br/>录入期间暂停游戏输出，手柄保持连接。Esc 取消，录入后点击保存。
     </p>}

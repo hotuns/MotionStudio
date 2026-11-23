@@ -95,7 +95,7 @@ impl PressHandoff {
                     continue;
                 }
                 blocked.insert(input.clone());
-                for side in ["left", "right"] {
+                for (index, side) in ["left", "right"].into_iter().enumerate() {
                     if input.starts_with(&format!("{side}_trigger")) {
                         for suffix in ["", "_soft", "_full"] {
                             blocked.insert(format!("{side}_trigger{suffix}"));
@@ -103,9 +103,10 @@ impl PressHandoff {
                     }
                     if input.starts_with(&format!("{side}_stick_")) && !input.ends_with("_click") {
                         blocked.insert(format!("{side}_stick"));
-                        for suffix in ["x", "y", "up", "down", "left", "right", "inner", "outer"] {
+                        for suffix in ["x", "y", "up", "down", "left", "right"] {
                             blocked.insert(format!("{side}_stick_{suffix}"));
                         }
+                        blocked.extend(STICK_ZONE_PINS[index].map(String::from));
                     }
                 }
             }
@@ -136,6 +137,9 @@ impl PressHandoff {
     }
 }
 fn held(engine: &Engine, input: &str, threshold: f32) -> bool {
+    if input.contains("_stick_outer_") {
+        return engine.input_value(input) > threshold;
+    }
     for side in ["left", "right"] {
         if input.starts_with(&format!("{side}_trigger")) {
             return engine.input_value(&format!("{side}_trigger")) > 0.02;

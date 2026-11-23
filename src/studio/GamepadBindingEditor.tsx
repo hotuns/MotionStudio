@@ -59,7 +59,7 @@ type Props = {
   locked: boolean;
   recording?: GamepadBindingRecording;
   canRecord: boolean;
-  onRecord: (wholeStick: boolean, onInput: (input: string) => void) => void;
+  onRecord: (wholeStick: boolean, onInput: (input: string) => void, outerRing?: boolean) => void;
   onCancelRecording: () => void;
   onClose: () => void;
   onSave: (binding: GamepadBinding) => void;
@@ -95,10 +95,10 @@ export function GamepadBindingEditor({value, index, bindings, profile, target, s
   const chooseOutput = (output: string) => change({
     output, input: layout.sticks.includes(output) === stickInput ? draft.input : '',
   });
-  const record = (wholeStick: boolean) => onRecord(wholeStick, input => {
+  const record = (wholeStick: boolean, outerRing = false) => onRecord(wholeStick, input => {
     if (chordParts(input).length > 1) setInputCombo(true);
     chooseInput(input);
-  });
+  }, outerRing);
   const inputName = (input: string) => layout.sticks.includes(input) ? gamepadControlLabel(input) : t(padInputLabel(input, split));
   const preview = recording?.preview?.length ? recording.preview : parts;
   const outputGroups = controllerGroups(available).map(({label,values}) => ({label,controls:values}));
@@ -117,6 +117,7 @@ export function GamepadBindingEditor({value, index, bindings, profile, target, s
         <InputCaptureButton value={preview.map(inputName).join(' + ')} recording={!!recording}
           disabled={!recording && (locked || !canRecord)}
           hint={recording?.waitingForNeutral ? '请先松开当前输入并让摇杆回中。' :
+            recording?.outerRing ? '推到要录入的外圈方向，再松开摇杆。' :
             (recording?.wholeStick ?? wholeStick) ? '拨动要录入的摇杆，回中后完成。' : undefined}
           onClick={recording ? onCancelRecording : () => record(wholeStick)}/>
         {recording && <p className={styles.hint} role="status">录入期间暂停游戏输出，Esc 可取消。</p>}
@@ -132,7 +133,8 @@ export function GamepadBindingEditor({value, index, bindings, profile, target, s
           </div>}
           <Toggle label="组合输入" value={inputCombo} onChange={setInputCombo}/>
           <ControllerInputChoices value={draft.input} combo={inputCombo} split={split}
-            allowed={[...inputs,...layout.sticks]} exclusive={layout.sticks} onChange={chooseInput}/>
+            allowed={[...inputs,...layout.sticks]} exclusive={layout.sticks} onChange={chooseInput}
+            onRecordOuter={!stickOutput && canRecord ? () => record(false, true) : undefined}/>
           {!wholeStick && <button type="button" className="secondary-btn" disabled={!canRecord}
             onClick={() => record(true)}>监听摇杆</button>}
           {selected && !analog && <details className={styles.advanced}>
