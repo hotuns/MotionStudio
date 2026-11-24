@@ -1,5 +1,6 @@
 // Plain-language help shared by settings controls. Explicit help at a call site takes precedence.
 export const settingHelp: Record<string, string> = {
+  "游戏摇杆响应": "例如，游戏推杆 50% 时有 20% 满杆转速，体感需要 20% 转速时就会输出 50% 推杆。曲线描述固定推杆量对应的转速，游戏中随持杆时间增加的转向加速需要单独关闭。",
   "仅拨动（关闭外圈转动）": "推到外圈时拨动一次，回到释放区域后可以再次拨动。",
   "拨动角度吸附": "四向按 90°、八向按 45° 对齐初始拨动方向。吸附不作用于后续转动，也不改变体感方向。",
   "拨动角度吸附强度": "100% 完全对齐最近方向，0% 保留原始角度。中间值按比例偏向最近方向。",

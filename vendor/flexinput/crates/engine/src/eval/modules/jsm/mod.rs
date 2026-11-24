@@ -46,7 +46,7 @@ pub mod jsm_aim {
     pub use super::analog::{Analog, Pad as PadInput, Settings as AnalogSettings, StickMode};
     pub use super::motion::{Gravity, Motion, Settings as MotionSettings, Space};
     pub use super::names::GyroAction;
-    pub use super::pad::{Dest, Pad, Settings as PadSettings};
+    pub use super::pad::{Dest, Pad, Settings as PadSettings, StickResponse};
 }
 pub(crate) use aim::{snap_flick_angle, flick_rotates, SnapMode as JsmFlickSnap};
 pub(crate) use analog::StickMode as JsmStickMode;

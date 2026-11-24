@@ -4,6 +4,7 @@ use crate::{
     motion::{cc_settings, filter_sample, filter_screen_rate},
     motion_config::{FlickSnap, Smoothing, Space},
     profile::{Gyro, GyroOutput},
+    stick_response::RightStickCurve,
     timing::SampleTime,
 };
 use flexinput_engine::eval::{jsm_aim as jsm, jsm_motion_curves};
@@ -18,6 +19,7 @@ struct Settings {
     curves: jsm_motion_curves::Settings,
     analog: jsm::AnalogSettings,
     pad: jsm::PadSettings,
+    right_stick_curve: Option<RightStickCurve>,
     gesture_mode: jsm::StickMode,
     stick_scale: f32,
     auto_calibrate: bool,
@@ -165,6 +167,7 @@ impl Settings {
             curves,
             analog,
             pad,
+            right_stick_curve: g.right_stick_curve.as_ref().filter(|curve| curve.enabled).cloned(),
             gesture_mode,
             stick_scale: stick_speed / pad.calibration,
             auto_calibrate: response.auto_calibrate_gyro,
@@ -416,7 +419,7 @@ impl JsmAim {
         );
         self.right = self
             .pad
-            .tick(
+            .tick_with_response(
                 &pad,
                 dt,
                 &self.analog,
@@ -424,6 +427,7 @@ impl JsmAim {
                 aimed.gyro_dps,
                 aimed.flick_dps,
                 None,
+                [None, s.right_stick_curve.as_ref().map(|curve| curve as &dyn jsm::StickResponse)],
             )
             .sticks[1];
         aimed.mouse

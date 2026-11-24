@@ -14,7 +14,8 @@ export type PadTracePoint = {sequence:number;time_ms:number;axes:[number,number,
 export type OutputPreviewStatus = {generation:number;mouse:MouseTracePoint[];key_mouse?:KeyMousePreview;pad:VirtualPadPreview|null;pad_trace?:PadTracePoint[];pad_time_ms?:number;sample_ms?:number};
 export type GamepadTarget = 'none'|'xbox_360'|'dualshock_4'|'dualsense';
 export type AimOutput='mouse'|'right_stick'|'both';
-export type MotionBinding={name:string;input:string;output:string;range:number;threshold:number;mode:'hold'|'toggle'|'turbo';turbo_ms:number;curve:number[][]};
+export type ResponsePoint = [x:number, y:number];
+export type MotionBinding={name:string;input:string;output:string;range:number;threshold:number;mode:'hold'|'toggle'|'turbo';turbo_ms:number;curve:ResponsePoint[]};
 export type FilterStage='raw_gyro'|'before_builtin'|'after_builtin';
 export type CustomFilter={api_version:number;id:string;name:string;enabled:boolean;requires_accel?:boolean;stage:FilterStage;source:string;params:Record<string,number>};
 export type ImuFilter={smoothing_ms?:number;noise_gate?:number;use_custom_filters?:boolean};
@@ -34,8 +35,10 @@ export type MotionConfig={
   flick:{enabled:boolean;only?:boolean;rotate_only?:boolean;rotate_smooth_override?:number;snap_mode?:'none'|'four'|'eight';snap_strength?:number;standalone?:boolean;stick:'right'|'left';enable_input:string|null;pause_input?:string|null;deadzone:number;release_ratio?:number;disengage_ms?:number;time_exponent?:number;smooth_ms:number;release_ease:number;forward_deadzone:number;stabilise_ms:number;speed_gate_ms:number;slow_lock:boolean;suppress:'full'|'deadzone'|'off';stick_aim:boolean;aim_sensitivity:number;max_dps:number;vertical_ratio:number};
   trackball:{horizontal_input:string|null;vertical_input:string|null;decay:number};bindings:MotionBinding[];turns:TurnBinding[];custom_filters?:CustomFilter[];
 };
+export type StickResponsePoint = [travel:number, speed:number, exponent?:number];
 export type Gyro = {
   enabled:boolean;
+  right_stick_curve?:{enabled?:boolean;points?:StickResponsePoint[]};
   jsm_response?:{
     auto_calibrate_gyro?:boolean; mouse_x_axes?:number|null; mouse_y_axes?:number|null;
     smooth_time_ms?:number; smooth_threshold_dps?:number; decay_smoothing?:boolean; one_euro?:boolean;
@@ -55,7 +58,7 @@ export type Gyro = {
   ds4_imu_filter?:ImuFilter;
   smoothing_ms:number;
   noise_threshold:number;
-  acceleration:{fast_multiplier:number;start_dps:number;full_dps:number;curve:'linear'|'natural'|'power'|'quadratic'|'sigmoid'|'jump'|'custom';natural_half:number;power_reference:number;power_exponent:number;sigmoid_mid:number;sigmoid_width:number;jump_width:number;points:number[][]};
+  acceleration:{fast_multiplier:number;start_dps:number;full_dps:number;curve:'linear'|'natural'|'power'|'quadratic'|'sigmoid'|'jump'|'custom';natural_half:number;power_reference:number;power_exponent:number;sigmoid_mid:number;sigmoid_width:number;jump_width:number;points:ResponsePoint[]};
   motion:MotionConfig;
 };
 export type StickDirections = 'axis_threshold'|'eight_way';
@@ -68,7 +71,7 @@ export type JsmFile = {name:string;text:string};
 export type TriggerStageMode = 'no_full'|'no_skip'|'no_skip_exclusive'|'may_skip'|'must_skip'|'may_skip_r'|'must_skip_r';
 export type TriggerStagesConfig = {left_mode:TriggerStageMode;right_mode:TriggerStageMode;soft_threshold:number;skip_delay_ms:number};
 export type GamepadBinding = TriggerSettings & {input:string;output:string;threshold?:number};
-export type Profile = {trigger_stages?:TriggerStagesConfig;feedback?:FeedbackConfig;touchpad?:TouchpadConfig;input?:ControllerInputConfig;schema_version:number;name:string;virtual_gamepad:GamepadTarget;gamepad_bindings?:GamepadBinding[];stick_deadzone:number;gyro:Gyro;stick_mouse:{enabled:boolean;stick:string;speed:number;deadzone:number;exponent:number};actions:Action[];stick_rebound_ms?:number|null;stick_zones?:{left_outer:number;right_outer:number;hysteresis:number};layer_reset_input?:string|null;layers?:ProfileLayer[]};
+export type Profile = {trigger_stages?:TriggerStagesConfig;feedback?:FeedbackConfig;touchpad?:TouchpadConfig;input?:ControllerInputConfig;schema_version:number;name:string;virtual_gamepad:GamepadTarget;gamepad_bindings?:GamepadBinding[];stick_deadzone:number;gyro:Gyro;stick_mouse:{enabled:boolean;stick:string;speed:number;deadzone:number;exponent:number;response_points?:ResponsePoint[]|null};actions:Action[];stick_rebound_ms?:number|null;stick_zones?:{left_outer:number;right_outer:number;hysteresis:number};layer_reset_input?:string|null;layers?:ProfileLayer[]};
 export type ProfileLayer={id:string;name:string;input:string;activation_mode?:'hold'|'toggle';exit_input?:string|null;activation_threshold?:number;activation_hysteresis?:number;settings:Record<string,unknown>;actions:Action[];disabled_inputs:string[]};
 export type Entry = {id:string;profile:Profile};
 export type Target = {kind:'none'|'restore'}|{kind:'profile';profile_id:string};

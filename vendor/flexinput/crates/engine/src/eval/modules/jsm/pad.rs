@@ -155,6 +155,12 @@ pub struct Pad {
     winding: [f32; 2],
 }
 
+/// A game's full radial stick response, in fractions of travel and maximum turn rate.
+pub trait StickResponse {
+    fn speed_at(&self, travel: f32) -> f32;
+    fn travel_at(&self, speed: f32) -> f32;
+}
+
 impl Pad {
     /// Work out what the virtual sticks should read. `gyro` and `flick` are camera
     /// rates in deg/s — what phase 3 computed before it turned them into mouse
@@ -168,6 +174,21 @@ impl Pad {
         gyro: Vec2,
         flick: Vec2,
         steer: Option<(f32, f32)>,
+    ) -> Out {
+        self.tick_with_response(s, dt, analog, stick_power, gyro, flick, steer, [None, None])
+    }
+
+    /// Supply a game's full response at the two conversions around the native rate mixer.
+    pub fn tick_with_response(
+        &mut self,
+        s: &Settings,
+        dt: f32,
+        analog: &Analog,
+        stick_power: f32,
+        gyro: Vec2,
+        flick: Vec2,
+        steer: Option<(f32, f32)>,
+        responses: [Option<&dyn StickResponse>; 2],
     ) -> Out {
         // What camera rate each virtual stick is owed before any stick is read.
         let mut owed = [Vec2::ZERO; 2];
@@ -210,7 +231,7 @@ impl Pad {
                 // `VirtualStick`, and the only other thing `pad_side` answers for.
                 _ => {
                     carried[side] = true;
-                    virtual_stick(s, side, prev, st.len, owed[side])
+                    virtual_stick(s, side, prev, st.len, owed[side], responses[side])
                 }
             };
         }
@@ -219,7 +240,7 @@ impl Pad {
         for side in 0..2 {
             let owes = s.gyro_dest.side() == Some(side) || s.flick_dest.side() == Some(side);
             if owes && !carried[side] {
-                out.sticks[side] = virtual_stick(s, side, Vec2::ZERO, 0.0, owed[side]);
+                out.sticks[side] = virtual_stick(s, side, Vec2::ZERO, 0.0, owed[side], responses[side]);
             }
         }
         out
@@ -270,10 +291,10 @@ impl Pad {
 
 /// JSM's `processGyroStick`: a stick push and a camera rate, combined in deg/s
 /// and converted back into a stick position.
-fn virtual_stick(s: &Settings, side: usize, push: Vec2, len: f32, rate: Vec2) -> Option<Vec2> {
+fn virtual_stick(s: &Settings, side: usize, push: Vec2, len: f32, rate: Vec2, response: Option<&dyn StickResponse>) -> Option<Vec2> {
     let o = &s.out[side];
     let livezone = 1.0 - o.undeadzone_outer - o.undeadzone_inner;
-    if livezone <= 0.0 || s.calibration <= 0.0 {
+    if (response.is_none() && livezone <= 0.0) || s.calibration <= 0.0 {
         // No band to put anything in, or no idea how fast full stick is.
         return None;
     }
@@ -282,8 +303,11 @@ fn virtual_stick(s: &Settings, side: usize, push: Vec2, len: f32, rate: Vec2) ->
     // The push, as the camera rate it is asking for.
     let mut want = Vec2::ZERO;
     if len > 0.0 {
-        let reach = ((len - o.undeadzone_inner) / livezone).clamp(0.0, 1.0);
-        let speed = reach.powf(unpower) * s.calibration * o.virtual_scale;
+        let fraction = match response {
+            Some(curve) => curve.speed_at(len),
+            None => ((len - o.undeadzone_inner) / livezone).clamp(0.0, 1.0).powf(unpower),
+        };
+        let speed = fraction * s.calibration * o.virtual_scale;
         if speed > 0.0 {
             // JSM counts a stick's y up and a camera's y down.
             want = Vec2::new(push.x / len * speed, -push.y / len * speed);
@@ -293,6 +317,11 @@ fn virtual_stick(s: &Settings, side: usize, push: Vec2, len: f32, rate: Vec2) ->
 
     let target = want.length();
     let mut strength = (target / s.calibration).min(1.0);
+    if let Some(curve) = response {
+        if target == 0.0 { return Some(Vec2::ZERO); }
+        let stick = want / target * curve.travel_at(strength);
+        return Some(Vec2::new(stick.x, -stick.y));
+    }
     strength = strength.powf(1.0 / unpower);
     let mut stick = Vec2::ZERO;
     // Below a hundredth of full there is nothing worth sending, and dividing by

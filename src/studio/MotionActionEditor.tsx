@@ -63,7 +63,7 @@ function MotionFields({action, onChange}: {action: MotionBinding; onChange: (pat
     {action.mode==='turbo' && <Range label="连发周期" value={action.turbo_ms} min={20} max={2000} step={10} unit=" ms"
       onChange={turbo_ms=>onChange({turbo_ms})}/>}
     <details><summary>动作响应曲线</summary>
-      <CurveEditor points={action.curve} onChange={curve=>onChange({curve})} maxX={1} maxY={1}/>
+      <CurveEditor kind="action" points={action.curve} onChange={curve=>onChange({curve})}/>
     </details>
   </>;
 }

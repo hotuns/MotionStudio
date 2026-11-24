@@ -283,6 +283,8 @@ pub struct Gyro {
     pub legacy_aim_engine: LegacyAimEngine,
     #[serde(skip_serializing_if = "JsmResponse::is_default")]
     pub jsm_response: JsmResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right_stick_curve: Option<crate::stick_response::RightStickCurve>,
     pub output: GyroOutput,
     pub activation: String,
     pub activation_mode: GyroActivationMode,
@@ -331,6 +333,7 @@ impl Default for Gyro {
             enabled: false,
             legacy_aim_engine: LegacyAimEngine::default(),
             jsm_response: JsmResponse::default(),
+            right_stick_curve: None,
             output: GyroOutput::Mouse,
             activation: "always".into(),
             activation_mode: GyroActivationMode::Hold,
@@ -519,6 +522,21 @@ pub struct StickMouse {
     pub speed: f32,
     pub deadzone: f32,
     pub exponent: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_points: Option<Vec<[f32; 2]>>,
+}
+impl StickMouse {
+    /// Point table supplied to FlexInput's radial vector response node.
+    pub fn response_table(&self) -> Vec<[f32; 2]> {
+        self.response_points.clone().unwrap_or_else(|| {
+            (0..=128)
+                .map(|i| {
+                    let x = i as f32 / 128.;
+                    [x, x.powf(self.exponent)]
+                })
+                .collect()
+        })
+    }
 }
 impl Default for StickMouse {
     fn default() -> Self {
@@ -528,6 +546,7 @@ impl Default for StickMouse {
             speed: 1200.0,
             deadzone: 0.15,
             exponent: 1.6,
+            response_points: None,
         }
     }
 }
@@ -736,6 +755,9 @@ impl Profile {
         g.motion.validate()?;
         g.acceleration.validate()?;
         g.jsm_response.validate()?;
+        if let Some(curve) = &g.right_stick_curve {
+            curve.validate()?;
+        }
         g.ds4_imu_filter.validate()?;
         let needs_pad = g.motion.mode != crate::motion_config::MotionMode::Pointer
             || g.motion
@@ -775,6 +797,12 @@ impl Profile {
             || !(1.0..=4.0).contains(&s.exponent)
         {
             bail!("摇杆鼠标参数无效");
+        }
+        if let Some(points) = &s.response_points {
+            crate::motion_config::points("摇杆鼠标响应曲线", points, 1., 1.)?;
+            if points.first() != Some(&[0., 0.]) || points.last() != Some(&[1., 1.]) {
+                bail!("摇杆鼠标响应的起点和终点必须分别是 (0%, 0%) 和 (100%, 100%)。");
+            }
         }
         if g.activation != "always" && input_pin(&g.activation).is_none() {
             bail!("Unknown gyro activation: {}", g.activation);

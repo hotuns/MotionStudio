@@ -26,5 +26,20 @@
   "以减速到 30 °/s 为例，观察急停时保留多少速度。": "This example shows the speed retained when a turn decelerates to 30 °/s.",
   "倾斜误差曲线": "Tilt error over time",
   "倾斜误差（°）": "Tilt error (°)",
-  "示例展示手柄放稳后，约 6° 的倾斜误差如何随时间变化。": "This example starts with about 6° of tilt error and shows how it changes while the controller is still."
+  "示例展示手柄放稳后，约 6° 的倾斜误差如何随时间变化。": "This example starts with about 6° of tilt error and shows how it changes while the controller is still.",
+  "摇杆推杆量（%）": "Stick travel (%)",
+  "输入幅度（%）": "Input magnitude (%)",
+  "鼠标速度（%）": "Mouse speed (%)",
+  "输出幅度（%）": "Output magnitude (%)",
+  "数值超出此轴范围。": "Enter a value within this axis range.",
+  "横坐标必须位于相邻控制点之间。": "Keep the input value between its neighboring points.",
+  "适应当前曲线": "Fit to curve",
+  "显示全范围": "Show full range",
+  "摇杆鼠标响应曲线": "Stick-to-mouse response curve",
+  "自定义加速曲线": "Custom acceleration curve",
+  "精确调整选中点": "Edit selected coordinates",
+  "拖动图上的标记调整参数，选中后可用方向键微调。": "Drag a marker to adjust its setting. Select a marker and use the arrow keys to fine-tune it.",
+  "恢复指数曲线": "Restore exponent curve",
+  "首次编辑控制点时切换为分段响应，可随时恢复原指数。": "Editing a point switches to a piecewise curve. You can restore the original exponent at any time.",
+  "摇杆鼠标响应的起点和终点必须分别是 (0%, 0%) 和 (100%, 100%)。": "The stick-to-mouse curve must start at (0%, 0%) and end at (100%, 100%)."
 }

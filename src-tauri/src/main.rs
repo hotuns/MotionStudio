@@ -638,6 +638,20 @@ async fn preview_gyro_acceleration(
     .await
 }
 #[tauri::command]
+fn preview_stick_mouse_response(exponent: f32) -> Result<Vec<[f32; 2]>, String> {
+    if !(1.0..=4.0).contains(&exponent) {
+        return Err("摇杆鼠标参数无效".into());
+    }
+    Ok(motion_core::profile::StickMouse { exponent, ..Default::default() }.response_table())
+}
+#[tauri::command]
+async fn preview_right_stick_curve(
+    curve: motion_core::stick_response::RightStickCurve,
+    target_percent: f32,
+) -> Result<(Vec<[f32; 3]>, f32), String> {
+    curve.preview(target_percent).map_err(text)
+}
+#[tauri::command]
 async fn preview_flick_release(strength: f32) -> Result<Vec<[f32; 3]>, String> {
     background(move || {
         motion_core::motion::stability_preview::flick_release(strength).map_err(text)
@@ -908,6 +922,8 @@ fn main() {
             preview_motion_filter,
             preview_motion_stability,
             preview_gyro_acceleration,
+            preview_stick_mouse_response,
+            preview_right_stick_curve,
             preview_flick_release,
             save_sensor_calibration,
             restore_backup,

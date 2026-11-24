@@ -558,7 +558,7 @@ impl Panel {
             panel.heading = "对齐参照物后试转";
             let hint = match view.output {
                 GyroOutput::Mouse => "没转够 → 调大数值；转过头 → 调小数值。鼠标转角系数表示每度需要的移动量。",
-                GyroOutput::RightStick => "没转够 → 调小数值；转过头 → 调大数值。使用摇杆 Flick 前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。",
+                GyroOutput::RightStick => "没转够就调小数值，转过头就调大数值。使用固定的游戏转向速度，按游戏实际曲线设置右摇杆响应补偿。",
                 GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => IMU_CALIBRATION_UNAVAILABLE,
             };
             panel.detail = format!("{}\r\n\r\n{}", tr(hint), tr("每次重新对齐参照物，确认完整转一圈。修改后再次试转，保存时才写入配置。校准后保持游戏灵敏度不变。"));

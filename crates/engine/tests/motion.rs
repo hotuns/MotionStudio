@@ -54,6 +54,72 @@ fn gamepad(p: &mut Profile) {
 }
 
 #[test]
+fn piecewise_response_handles_plateaus_local_powers_and_layer_roundtrips() {
+    use flexinput_engine::eval::jsm_aim::StickResponse;
+    let source = include_str!("../../../examples/gyro-mouse.toml");
+    let p = parse_profile(&format!("{source}\n{}", r#"
+[gyro.right_stick_curve]
+enabled = true
+points = [[0, 0], [0.1, 0, 2], [0.5, 0.2], [0.6, 0.2], [0.9, 1], [1, 1]]
+[[layers]]
+id = "ads"
+name = "ADS"
+input = "left_shoulder"
+[layers.settings.gyro.right_stick_curve]
+enabled = false
+"#)).unwrap();
+    let saved = parse_profile(&toml::to_string(&p).unwrap()).unwrap();
+    let curve = saved.gyro.right_stick_curve.as_ref().unwrap();
+    assert!((curve.speed_at(0.3) - 0.05).abs() < 1e-6);
+    assert!((curve.travel_at(0.05) - 0.3).abs() < 1e-6);
+    assert_eq!(curve.travel_at(0.), 0.);
+    assert!(curve.travel_at(0.0001) > 0.1);
+    assert_eq!(curve.travel_at(0.2), 0.5);
+    assert!(curve.travel_at(0.2001) > 0.6);
+    assert_eq!(curve.travel_at(1.5), 0.9);
+    let (graph, travel) = curve.preview(20.).unwrap();
+    assert!(graph.contains(&[50., 50., 20.]));
+    assert_eq!(travel, 50.);
+    let ads = motion_core::layers::resolve(&saved, &[0]).unwrap();
+    let inherited = ads.gyro.right_stick_curve.unwrap();
+    assert!(!inherited.enabled);
+    assert_eq!(inherited.points, curve.points);
+    let mut invalid = curve.clone();
+    invalid.points[3].1 = 0.1;
+    assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn piecewise_response_converts_the_mixed_rate_once_and_bypasses_legacy_deadzones() {
+    use motion_core::stick_response::{ResponsePoint, RightStickCurve};
+    let mut p = profile();
+    gamepad(&mut p);
+    p.gyro.stick_full_scale_dps = 360.;
+    p.gyro.jsm_response.right_unpower = 2.;
+    p.gyro.jsm_response.right_undeadzone_inner = 0.18;
+    p.gyro.right_stick_curve = Some(RightStickCurve {
+        enabled: true,
+        points: vec![ResponsePoint(0., 0., 1.), ResponsePoint(0.5, 0.2, 1.),
+            ResponsePoint(0.9, 1., 1.), ResponsePoint(1., 1., 1.)],
+    });
+    let mut engine = Engine::new(p.clone()).unwrap();
+    axis(&mut engine, 2, 16384);
+    for ms in [10, 20, 30] {
+        gyro(&mut engine, ms, 0., 0., 72.);
+        engine.advance_output(0.01, time(ms).host_ns);
+    }
+    // Half stick asks for 20% of full speed, and the gyro asks for another 20%.
+    let x = engine.frame.pad.unwrap().right_x as f32 / 32767.;
+    assert!((x - 0.6).abs() < 0.001, "{x}");
+
+    p.gyro.motion.flick.enabled = true;
+    let mut flick = Engine::new(p).unwrap();
+    axis(&mut flick, 2, i16::MAX);
+    let x = flick.advance_output(0.002, time(2).host_ns).pad.unwrap().right_x as f32 / 32767.;
+    assert!((x - 0.9).abs() < 0.001, "{x}");
+}
+
+#[test]
 fn legacy_aim_engine_choices_load_and_drop_out_of_saved_profiles_and_layers() {
     let source = include_str!("../../../examples/gyro-mouse.toml");
     for choice in ["studio", "jsm"] {

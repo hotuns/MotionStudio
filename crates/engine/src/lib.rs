@@ -24,6 +24,7 @@ pub mod profile;
 pub mod protocol;
 pub mod sdl;
 pub mod shortcut;
+pub mod stick_response;
 pub mod storage;
 pub mod switching;
 pub mod timing;

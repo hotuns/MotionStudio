@@ -297,9 +297,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/mod.rs",
       "upstreamSha256": "e317c5c110afcdbaa630e0ea9006b0c3bc3a0a944495997e5fe3afdd2907797e",
-      "vendoredSha256": "389d71bdb57fe12450a0ac25884ede9e69ab661ec53f32616cf4cfe78e3bb2c9",
+      "vendoredSha256": "a353f1d2db0322f78abacb66eacc527d4574e52e2186af138f17a361a818059c",
       "modified": true,
-      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point, shared NoMouse stick direction predicate and its configurable-ratio entry. Expose native aim defaults and internal shared flick snapping/mode helpers. The jsm_aim namespace exports the same Aim, Analog, Motion and Pad components used by jsm_publish."
+      "notes": "Expose source naming, the existing curves, headless gyro timing, trigger-only entry point, shared NoMouse stick direction predicate and its configurable-ratio entry. Expose native aim defaults and internal shared flick snapping/mode helpers. The jsm_aim namespace exports the same Aim, Analog, Motion and Pad components used by jsm_publish and the optional radial StickResponse interface."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/motion.rs",
@@ -316,8 +316,9 @@
     {
       "path": "crates/engine/src/eval/modules/jsm/pad.rs",
       "upstreamSha256": "066e1c56ad1e4f3b613beddda8f7e853f7d9b540b39627164c4942cc60d82afb",
-      "vendoredSha256": "066e1c56ad1e4f3b613beddda8f7e853f7d9b540b39627164c4942cc60d82afb",
-      "modified": false
+      "vendoredSha256": "7a5b62ce1157084e9e41df1d9c64cb8547e79c54df58e086696f48b8b88c7d5f",
+      "modified": true,
+      "notes": "Allow a headless caller to supply a full forward/inverse game response around the native stick/gyro/Flick rate sum. Pad::tick keeps the upstream exponent path."
     },
     {
       "path": "crates/engine/src/eval/modules/jsm/parse.rs",

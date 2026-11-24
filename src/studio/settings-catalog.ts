@@ -50,6 +50,7 @@ export const settingsCatalog: SettingTarget[] = [
     ['smoothing_ms','直通平滑时间'], ['noise_gate','直通噪声抑制倍率'], ['use_custom_filters','直通应用原始角速度脚本','Rhai'],
   ]),
   ...group('motion','motion-calibration','gyro.',[
+    ['right_stick_curve.enabled','游戏摇杆响应','分段曲线 线性补偿'], ['right_stick_curve.points','游戏曲线点'],
     ['jsm_response.right_undeadzone_inner','右摇杆内死区补偿'], ['jsm_response.right_undeadzone_outer','右摇杆外死区补偿'], ['jsm_response.right_unpower','右摇杆响应指数'],
     ['output','体感输出','DS4 DualSense PS5 传感器直通 ViGEm USB/IP IMU'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),
@@ -58,7 +59,7 @@ export const settingsCatalog: SettingTarget[] = [
   ...group('sticks','stick-calibration','input.',[['lstick_center','左摇杆中心偏移'], ['rstick_center','右摇杆中心偏移'], ['lstick_radial','左摇杆圆周倍率'], ['rstick_radial','右摇杆圆周倍率']]),
   ...group('sticks','stick-zones','stick_zones.',[['left_outer','左摇杆外圈阈值'], ['right_outer','右摇杆外圈阈值'], ['hysteresis','区域切换回差']]),
   ...group('sticks','stick-input','', [['stick_rebound_ms','防回弹窗口','启用摇杆防回弹']]),
-  ...group('sticks','stick-mouse','stick_mouse.',[['enabled','启用摇杆鼠标'], ['stick','摇杆鼠标使用的摇杆'], ['speed','最大移动速度'], ['exponent','摇杆鼠标响应']]),
+  ...group('sticks','stick-mouse','stick_mouse.',[['enabled','启用摇杆鼠标'], ['stick','摇杆鼠标使用的摇杆'], ['speed','最大移动速度'], ['exponent','摇杆鼠标响应'], ['response_points','摇杆鼠标响应曲线']]),
   ...group('sticks','flick-main','gyro.motion.flick.',[
     ['only','仅拨动','FLICK_ONLY'], ['rotate_only','仅转动','ROTATE_ONLY'], ['rotate_smooth_override','外圈转动平滑阈值','ROTATE_SMOOTH_OVERRIDE'], ['snap_mode','拨动角度吸附','FLICK_SNAP_MODE'], ['snap_strength','拨动角度吸附强度','FLICK_SNAP_STRENGTH'],
     ['enabled','启用拨动／转动','快速转向 Flick Stick'], ['smooth_ms','180° 基准释放时间','转角释放时间 转身完成时间'], ['time_exponent','按转角调整时间','拨动时间指数 FLICK_TIME_EXPONENT'], ['stick','拨动使用的摇杆'], ['deadzone','拨动转身阈值'],

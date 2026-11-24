@@ -669,13 +669,7 @@ fn stick_mouse_graph(profile: &Profile) -> GraphRunner {
     src.node_uid = 0;
     let mut curve = node(1, "module.vec_response_curve", 1);
     curve.input_sources = vec![Some((0, 0))];
-    let points: Vec<_> = (0..=128)
-        .map(|i| {
-            let x = i as f32 / 128.;
-            [x, x.powf(m.exponent)]
-        })
-        .collect();
-    curve.params.insert("points".into(), json!(points));
+    curve.params.insert("points".into(), json!(m.response_table()));
     let mut rate = node(2, "processing.rws", 5);
     rate.input_sources = vec![Some((1, 0)), None, None];
     rate.params = HashMap::from([

@@ -1,15 +1,37 @@
-import {memo} from 'react';
+import {memo, useMemo} from 'react';
+import {invoke} from '@tauri-apps/api/core';
 import {useLanguage} from '../i18n';
 import {Range,Toggle} from './Controls';
 import {OptionPicker} from './OptionPicker';
 import {FlickStickSettings,type MotionUpdate} from './AdvancedMotion';
 import {StickInputSettings,StickDirectionSettings,StickCalibrationSettings} from './ControllerInputSettings';
 import {freezeInputDeadzones} from '../controller-input';
-import type {Profile} from '../types';
+import type {Profile, ResponsePoint} from '../types';
+import {CurveEditor} from './CurveEditor';
+import {useCurvePreview} from './useCurvePreview';
 import {SettingField,SettingLabel,SettingSection,settingStyles} from './SettingLayout';
 import styles from './MotionControls.module.css';
 
 const stickChoices=[{options:[{value:'left',label:'左摇杆'},{value:'right',label:'右摇杆'}]}];
+
+const linearResponse: ResponsePoint[] = [[0,0],[1,1]];
+function StickMouseCurve({stick, update}: {stick: Profile['stick_mouse']; update: MotionUpdate}) {
+  const custom = stick.response_points;
+  const key = !custom && stick.exponent!==1 ? String(stick.exponent) : undefined;
+  const reply = useCurvePreview(key,()=>invoke<ResponsePoint[]>('preview_stick_mouse_response',{exponent:stick.exponent}));
+  const sampled = stick.exponent===1 ? linearResponse : reply?.key===key ? reply?.data : undefined;
+  // Show the complete native table and a small editable selection of its knots.
+  // Merely viewing the graph or selecting a handle keeps the exponent profile intact.
+  const handles = useMemo(()=>sampled?.filter((_,i)=>i%16===0 || i===sampled.length-1),[sampled]);
+  const points = custom??handles;
+  return <SettingField label="摇杆鼠标响应曲线">
+    {points && <CurveEditor kind="stick" points={points} sampled={custom?undefined:sampled}
+      onChange={next=>update(p=>{p.stick_mouse.response_points=next;})}/>}
+    {custom ? <button type="button" className="ghost-btn" onClick={()=>update(p=>{delete p.stick_mouse.response_points;})}>恢复指数曲线</button>
+      : points ? <p className={styles.hint}>首次编辑控制点时切换为分段响应，可随时恢复原指数。</p>
+      : <p className={styles.hint} role="status">{reply?.key===key?'曲线暂未更新，请检查当前参数。':'正在计算响应曲线…'}</p>}
+  </SettingField>;
+}
 
 export const StickSettings = memo(function StickSettings({profile,update}:{profile:Profile;update:MotionUpdate}) {
   useLanguage();
@@ -28,9 +50,9 @@ export const StickSettings = memo(function StickSettings({profile,update}:{profi
         </div></SettingField>
         <Range label="最大移动速度" value={stick.speed} min={100} max={10000} step={100} unit=" 计数/s"
           onChange={value=>update(draft=>{draft.stick_mouse.speed=value;})}/>
-        <Range label="摇杆鼠标响应" value={stick.exponent} min={1} max={4} step={0.1}
-          onChange={value=>update(draft=>{draft.stick_mouse.exponent=value;})} help="1 为线性。数值越大，小幅拨动时移动越慢。"/>
-        <p className={styles.hint}>最大移动速度控制满杆速度；响应值越大，小幅推杆越慢，1 为线性。游戏内转速还取决于游戏鼠标灵敏度。</p>
+        {!stick.response_points && <Range label="摇杆鼠标响应" value={stick.exponent} min={1} max={4} step={0.1}
+          onChange={value=>update(draft=>{draft.stick_mouse.exponent=value;})} help="1 为线性。数值越大，小幅拨动时移动越慢。"/>}
+        <StickMouseCurve stick={stick} update={update}/>
       </>}
     </SettingSection>
     <StickDirectionSettings profile={profile} update={update}/>
