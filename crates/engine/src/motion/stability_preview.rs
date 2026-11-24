@@ -19,6 +19,9 @@ use std::sync::OnceLock;
 type Point = [f32; 3];
 
 pub fn jsm_acceleration(a: &GyroAcceleration) -> Result<Vec<Point>> {
+    if a.curve == Curve::Bezier {
+        return acceleration(a);
+    }
     a.validate()?;
     let mut cfg = jsm_compile("", &[]);
     cfg.aim.min_sens = (1., 1.);
@@ -53,6 +56,7 @@ pub fn acceleration(a: &GyroAcceleration) -> Result<Vec<Point>> {
             speeds.extend([before.max(start), a.full_dps]);
         }
         Curve::Custom => speeds.extend(a.points.iter().map(|point| point[0])),
+        Curve::Bezier => speeds.extend(a.bezier_points.iter().step_by(3).map(|point| point[0])),
     }
     speeds.sort_by(f32::total_cmp);
     speeds.dedup();

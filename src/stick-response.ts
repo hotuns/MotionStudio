@@ -1,4 +1,5 @@
-import type {Gyro, StickResponsePoint} from './types';
+import type {CurveModel, Gyro, StickResponsePoint} from './types';
+import {bezierFromKnots} from './bezier';
 
 export type CurveRow = [travel: string, speed: string, exponent: string];
 export const linearStickResponse: StickResponsePoint[] = [[0, 0], [1, 1]];
@@ -39,21 +40,26 @@ export function insertCurvePoint(points: StickResponsePoint[], travel: number, s
   return {points: [...points.slice(0, index), point, ...points.slice(index)], index};
 }
 
-export function selectStickResponse(gyro: Gyro, piecewise: boolean) {
-  const curve = {...gyro.right_stick_curve, enabled: piecewise};
-  if (piecewise && !curve.points) {
-    const inner = gyro.jsm_response?.right_undeadzone_inner ?? 0;
-    const outer = gyro.jsm_response?.right_undeadzone_outer ?? 0;
-    const power = gyro.jsm_response?.right_unpower || 1;
-    // Seed the first point table with the user's existing in-game response.
-    // With the default linear settings, leave points available for inheritance.
-    if (inner || outer || power !== 1) {
-      const points: StickResponsePoint[] = [];
-      if (inner > 0) points.push([0, 0]);
-      points.push(power === 1 ? [inner, 0] : [inner, 0, power], [1 - outer, 1]);
-      if (outer > 0) points.push([1, 1]);
-      curve.points = points;
-    }
+function powerKnots(gyro: Gyro): StickResponsePoint[] {
+  const inner=gyro.jsm_response?.right_undeadzone_inner??0;
+  const edge=Math.fround(1-(gyro.jsm_response?.right_undeadzone_outer??0));
+  const power=gyro.jsm_response?.right_unpower || 1;
+  if (inner===0 && edge===1 && power===1) return linearStickResponse;
+  const points: StickResponsePoint[]=[];
+  if (inner>0) points.push([0,0]);
+  points.push(power===1?[inner,0]:[inner,0,power],[edge,1]);
+  if (edge<1) points.push([1,1]);
+  return points;
+}
+
+export function selectStickResponse(gyro: Gyro, mode: 'power' | CurveModel) {
+  const saved=gyro.right_stick_curve;
+  const curve={...saved, enabled:mode!=='power'};
+  const power=powerKnots(gyro);
+  if (mode==='points' && !curve.points && power!==linearStickResponse) curve.points=power;
+  if (mode!=='power') curve.model=mode;
+  if (mode==='bezier' && !curve.bezier_points?.length) {
+    curve.bezier_points=bezierFromKnots(saved?.enabled ? curve.points??linearStickResponse : power);
   }
   gyro.right_stick_curve = curve;
 }

@@ -180,7 +180,7 @@ export function GameProfilesPage(props: Props) {
         onUpdate={onUpdate} onEdit={props.onEdit} onBatch={props.onBatch} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :
         <fieldset className="studio-content" disabled={blocked || !!capture || measuring}>
           {(tab==='motion'||tab==='sticks')&&<MotionOutputSettings profile={profile} update={onUpdate}
-            vigemGamepad={props.vigemGamepad}
+            vigemGamepad={props.vigemGamepad} showGameResponse={tab==='motion'}
             canMeasure={props.canMeasure} onOpenCalibration={props.onOpenCalibration}/>}
           {tab==='sticks' && <StickSettings profile={profile} update={onUpdate}/>}
           {tab==='triggers' && <TriggerSettings profile={profile} layerMode={layerMode} update={onUpdate} onEditBase={props.onEditBase}/>}

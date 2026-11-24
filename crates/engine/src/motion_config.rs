@@ -17,7 +17,7 @@ impl Space {
 }
 choices!(MotionMode, Pointer, Steering, StickRotation);
 choices!(Smoothing, Ema, Decay, OneEuro);
-choices!(Curve, Linear, Natural, Power, Quadratic, Sigmoid, Jump, Custom);
+choices!(Curve, Linear, Natural, Power, Quadratic, Sigmoid, Jump, Custom, Bezier);
 choices!(EdgeMode, Off, Ramp, Momentum, Both);
 choices!(Stick, Right, Left);
 choices!(AimOutput, Mouse, RightStick, Both);
@@ -242,6 +242,10 @@ pub struct MotionBinding {
     pub mode: BindingMode,
     pub turbo_ms: f32,
     pub curve: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "crate::bezier::CurveModel::is_points")]
+    pub curve_model: crate::bezier::CurveModel,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub curve_bezier: Vec<[f32; 2]>,
 }
 impl Default for MotionBinding {
     fn default() -> Self {
@@ -254,6 +258,8 @@ impl Default for MotionBinding {
             mode: BindingMode::Hold,
             turbo_ms: 100.0,
             curve: vec![[0.0, 0.0], [1.0, 1.0]],
+            curve_model: Default::default(),
+            curve_bezier: Vec::new(),
         }
     }
 }
@@ -478,6 +484,7 @@ impl MotionConfig {
             range("动作阈值", b.threshold, 0., 0.99)?;
             range("连发周期", b.turbo_ms, 20., 2000.)?;
             points("动作曲线", &b.curve, 1., 1.)?;
+            b.curve_model.validate(crate::bezier::Domain::Action, &b.curve_bezier)?;
         }
         for b in &self.turns {
             if b.name.trim().is_empty() || input_pin(&b.input).is_none() {

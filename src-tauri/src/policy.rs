@@ -12,17 +12,29 @@ pub fn start(state: AppState) {
     std::thread::spawn(move || {
         let mut cursor = CursorEdges::default();
         let mut shortcut_edges = Vec::new();
-        let mut capture_revision = 0;
+        let mut input_revision = 0;
         let mut last_rules = Vec::new();
+        let mut last_scope = None;
         let mut last_cursor_settings = None;
         let mut pending_edge = None;
         let mut pending_shortcuts = Vec::new();
         let mut pad_cursor = PadShortcutCursor::default();
         while !state.client.stopping.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
-            let settings = state.settings.lock().unwrap().clone();
             let snapshot = state.client.snapshot.lock().unwrap().clone();
-            let rules = settings.effective_shortcut_rules();
+            let profile_id = snapshot.status.profile_id.as_deref();
+            let (scope, settings) = state.settings.lock().unwrap().switching_for(profile_id);
+            let rules = &settings.shortcut_rules;
+            if last_scope != scope {
+                pending_edge = None;
+                pending_shortcuts.clear();
+                last_cursor_settings = None;
+                shortcut_edges.fill_with(ShortcutEdges::default);
+                // The same bindings can be present in two scopes. Do not replay an
+                // already reported press when the engine can keep its existing table.
+                pad_cursor.serial = snapshot.status.pad_shortcut_serial;
+                last_scope = scope.clone();
+            }
             let (pad_rule_indices, desired_pad): (Vec<_>, Vec<_>) = rules
                 .iter()
                 .enumerate()
@@ -39,7 +51,9 @@ pub fn start(state: AppState) {
                 .unzip();
             if snapshot.engine_ready && snapshot.status.pad_shortcuts != desired_pad {
                 if let Ok(_operation) = state.operations.try_lock() {
-                    let rules_current = state.settings.lock().unwrap().effective_shortcut_rules() == rules;
+                    let latest = state.client.snapshot.lock().unwrap().status.profile_id.clone();
+                    let (owner, policy) = state.settings.lock().unwrap().switching_for(latest.as_deref());
+                    let rules_current = owner == scope && policy.shortcut_rules == *rules;
                     if rules_current {
                         if let Err(error) = state.client.request(Command::SetPadShortcuts {
                             bindings: desired_pad,
@@ -62,23 +76,25 @@ pub fn start(state: AppState) {
                 .lock()
                 .unwrap()
                 .is_some_and(|until| Instant::now() < until);
-            let current_capture_revision = state.shortcut_capture_revision.load(Ordering::Acquire);
+            let current_input_revision = state.switch_input_revision.load(Ordering::Acquire);
             if rebase_after_capture(
                 &mut shortcut_edges,
-                &mut capture_revision,
-                current_capture_revision,
+                &mut input_revision,
+                current_input_revision,
             ) {
                 pending_shortcuts.clear();
+                pending_edge = None;
+                last_cursor_settings = None;
             }
             let down = |key: u16| unsafe {
                 windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(key))
                     < 0
             };
-            if last_rules != rules {
+            if last_rules != *rules {
                 shortcut_edges.clear();
                 shortcut_edges.resize_with(rules.len(), ShortcutEdges::default);
                 pending_shortcuts.clear();
-                last_rules.clone_from(&rules);
+                last_rules.clone_from(rules);
             }
             let mut presses: Vec<_> = pad_cursor
                 .update(
@@ -163,8 +179,14 @@ pub fn start(state: AppState) {
             let Ok(_operation) = state.operations.try_lock() else {
                 continue;
             };
-            let current_settings = state.settings.lock().unwrap().clone();
-            if current_settings.effective_shortcut_rules() != rules {
+            let latest_status = state.client.snapshot.lock().unwrap().status.clone();
+            let (current_scope, current_settings) = state.settings.lock().unwrap().switching_for(latest_status.profile_id.as_deref());
+            if current_scope != scope || latest_status.profile_id != snapshot.status.profile_id {
+                pending_edge = None;
+                pending_shortcuts.clear();
+                continue;
+            }
+            if current_settings.shortcut_rules != *rules {
                 pending_shortcuts.clear();
                 continue;
             }
@@ -179,8 +201,8 @@ pub fn start(state: AppState) {
             let shortcuts = std::mem::take(&mut pending_shortcuts);
             let shortcut = !shortcuts.is_empty();
             if (shortcut || edge.is_some())
-                && (state.shortcut_capture_revision.load(Ordering::Acquire)
-                    != current_capture_revision
+                && (state.switch_input_revision.load(Ordering::Acquire)
+                    != current_input_revision
                     || state
                         .shortcut_capture_until
                         .lock()
@@ -189,7 +211,6 @@ pub fn start(state: AppState) {
             {
                 continue;
             }
-            let latest_status = state.client.snapshot.lock().unwrap().status.clone();
             if !matches!(latest_status.state.as_str(), "running" | "observing")
                 || latest_status.binding_capture
                 || latest_status.ui_navigation
@@ -226,6 +247,13 @@ pub fn start(state: AppState) {
                 })
             };
             if let Some(target) = target {
+                // A profile remembered for Restore can have moved since the
+                // original switch, even when the rule itself has not changed.
+                if scope.as_ref().is_some_and(|id| !state.settings.lock().unwrap().games.iter()
+                    .any(|game| &game.id == id && game.contains(&target))) {
+                    state.history.lock().unwrap().clear();
+                    continue;
+                }
                 if target == current {
                     *state.history.lock().unwrap() = history;
                     continue;
@@ -237,6 +265,9 @@ pub fn start(state: AppState) {
                 };
                 match result {
                     Ok(()) => {
+                        if state.settings.lock().unwrap().switching_for(Some(&target)).0 != scope {
+                            history.clear();
+                        }
                         *state.history.lock().unwrap() = history;
                         state.client.snapshot.lock().unwrap().policy_error = None;
                         crate::notify_profile(&state, &target);

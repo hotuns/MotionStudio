@@ -8,6 +8,43 @@ use std::{
     time::{Duration, Instant},
 };
 struct Sandbox(PathBuf);
+
+#[test]
+fn interrupted_game_import_discards_only_uncommitted_profiles() {
+    use motion_core::{game_library::Game, storage::{game_import_profile_ids, Settings}};
+    let tmp = Sandbox::new();
+    let store = Store::open(tmp.0.clone()).unwrap();
+    let current = Settings::default();
+    store.save_settings(&current).unwrap();
+    let batch = uuid::Uuid::new_v4();
+    let mut game = Game::new(batch.to_string(), "Imported".into());
+    for id in game_import_profile_ids(batch, 2) { game.add(&id); }
+    let first = store.profile_path(&game.profile_ids[0]).unwrap();
+    let pending = tmp.0.join("pending-game-import.json");
+    let planned = Settings { games: vec![game.clone()], ..current.clone() };
+    let doc = include_str!("../../../examples/blank.toml").to_owned();
+    let docs = vec![doc.clone(), doc.clone()];
+    std::fs::write(&pending, serde_json::to_vec(&planned).unwrap()).unwrap();
+    std::fs::write(&first, &doc).unwrap();
+    store.recover_game_import().unwrap();
+    assert!(!first.exists() && !pending.exists());
+    assert!(store.settings().unwrap().games.is_empty());
+    assert!(store.load("blank").is_ok());
+
+    // A backup failure occurs after writing both members and before committing the index.
+    let backup = tmp.0.join("settings.json.bak");
+    std::fs::create_dir(&backup).unwrap();
+    let mut current = current;
+    assert!(store.import_game(&mut current, game.clone(), &docs).is_err());
+    assert!(game.profile_ids.iter().all(|id| !store.profile_path(id).unwrap().exists()));
+    assert!(current.games.is_empty() && !pending.exists());
+    std::fs::remove_dir(backup).unwrap();
+    store.import_game(&mut current, game, &docs).unwrap();
+    store.recover_game_import().unwrap();
+    assert!(first.exists() && !pending.exists());
+    assert_eq!(store.settings().unwrap().games, planned.games);
+}
+
 #[test]
 fn output_backend_defaults_migrate_locally_and_do_not_enter_game_profiles() {
     use motion_core::{output::OutputBackend, storage::Settings};
@@ -32,6 +69,49 @@ impl Sandbox {
     fn new() -> Self {
         Self(std::env::temp_dir().join(format!("motion-test-{}", uuid::Uuid::new_v4())))
     }
+}
+
+#[test]
+fn game_rules_follow_the_running_profile_and_repair_deleted_members_on_restore() {
+    use motion_core::{game_library::Game, storage::Settings};
+    let tmp = Sandbox::new();
+    let store = Store::open(tmp.0.clone()).unwrap();
+    let original = std::fs::read(store.profile_path("keyboard").unwrap()).unwrap();
+    let mut settings: Settings = serde_json::from_str(
+        r#"{"selected_profile":"gyro","shortcut_profile":"cursor"}"#,
+    ).unwrap();
+    assert!(settings.games.is_empty());
+    for (id, members) in [("first", ["gyro", "keyboard"]), ("second", ["gamepad", "blank"])] {
+        let mut game = Game::new(id.into(), id.into());
+        let mut local = settings.global_switching();
+        for member in members { game.add(member); }
+        local.shortcut_rules[0].target = members[1].into();
+        local.cursor_shown = SwitchTarget::Profile(members[1].into());
+        game.use_game_rules = true;
+        game.switching = Some(local);
+        settings.games.push(game);
+    }
+    settings.remember_manual_profile("keyboard");
+    store.save_settings(&settings).unwrap();
+    let restored = store.settings().unwrap();
+    assert_eq!(restored.switching_for(Some("gyro")).1.shortcut_rules[0].target, "keyboard");
+    assert_eq!(restored.switching_for(Some("gamepad")).1.shortcut_rules[0].target, "blank");
+    assert_eq!(restored.switching_for(Some("cursor")).1.shortcut_rules[0].target, "cursor");
+    assert_eq!(std::fs::read(store.profile_path("keyboard").unwrap()).unwrap(), original);
+    assert_eq!(restored.games[0].last_profile.as_deref(), Some("keyboard"));
+
+    // A backup can still point to a profile the user deleted afterwards.
+    settings.games[0].default_profile = Some("keyboard".into());
+    store.save_settings(&settings).unwrap();
+    store.save_settings(&settings).unwrap();
+    store.delete("keyboard").unwrap();
+    let repaired = store.restore_settings().unwrap();
+    let game = &repaired.games[0];
+    assert_eq!(game.default_profile.as_deref(), Some("gyro"));
+    assert_eq!(game.last_profile, None);
+    assert!(game.switching.as_ref().unwrap().shortcut_rules.is_empty());
+    assert_eq!(game.switching.as_ref().unwrap().cursor_shown, SwitchTarget::None);
+    assert_eq!(store.settings().unwrap().games, repaired.games);
 }
 impl Drop for Sandbox {
     fn drop(&mut self) {

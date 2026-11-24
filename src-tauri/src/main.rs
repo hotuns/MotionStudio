@@ -4,6 +4,8 @@ mod client;
 mod components;
 mod controller_overlay;
 mod game_calibration;
+mod game_library;
+mod game_share;
 mod hid_inventory;
 mod import_files;
 mod installers;
@@ -37,7 +39,7 @@ pub struct AppState {
     pub history: Arc<Mutex<SwitchHistory>>,
     pub operations: Arc<Mutex<()>>,
     pub shortcut_capture_until: Arc<Mutex<Option<std::time::Instant>>>,
-    pub shortcut_capture_revision: Arc<std::sync::atomic::AtomicU64>,
+    pub switch_input_revision: Arc<std::sync::atomic::AtomicU64>,
     pub startup_warnings: Vec<String>,
     pub overlay: overlay::Overlay,
     pub game_calibration: game_calibration::CalibrationWindow,
@@ -68,6 +70,24 @@ fn active(state: &AppState) -> bool {
             | "capture_release"
     )
 }
+
+fn record_profile_use(state: &AppState, id: Option<&str>, device_path: Option<String>) -> Result<Settings, String> {
+    state.history.lock().map_err(text)?.clear();
+    state.switch_input_revision.fetch_add(1, std::sync::atomic::Ordering::Release);
+    let mut current = state.settings.lock().map_err(text)?;
+    let mut next = current.clone();
+    if let Some(id) = id {
+        next.remember_manual_profile(id);
+        next.selected_profile = id.into();
+    }
+    if let Some(path) = device_path {
+        next.device_path = path;
+    }
+    state.store.save_settings(&next).map_err(text)?;
+    *current = next.clone();
+    Ok(next)
+}
+
 pub fn apply_profile(state: &AppState, id: &str) -> Result<(), String> {
     let entry = state.store.load(id).map_err(text)?;
     state.client.request(Command::Apply {
@@ -110,10 +130,20 @@ async fn preview_overlay(state: State<'_, AppState>) -> Result<(), String> {
 async fn workspace(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let state = state.inner().clone();
     background(move || {
-        let (profiles, mut warnings) = state.store.list().map_err(text)?;
+        // Loading the catalog can compile many profiles. Keep automatic
+        // switching available while reading and retry if membership changed.
+        let (profiles, mut warnings, settings) = loop {
+            let (before, ids) = {
+                let settings = state.settings.lock().map_err(text)?;
+                (settings.games.clone(), state.store.profile_ids().map_err(text)?)
+            };
+            let (profiles, warnings) = state.store.load_profiles(ids);
+            let settings = state.settings.lock().map_err(text)?.clone();
+            if settings.games == before { break (profiles, warnings, settings); }
+        };
         warnings.extend(state.startup_warnings.clone());
         Ok(serde_json::json!({
-            "profiles": profiles, "settings": state.settings.lock().unwrap().clone(),
+            "profiles": profiles, "settings": settings,
             "snapshot": state.client.snapshot.lock().unwrap().clone(), "warnings": warnings,
             "data_dir": state.store.root,
         }))
@@ -179,6 +209,8 @@ async fn create_profile(
     state: State<'_, AppState>,
     name: String,
     template: String,
+    game_id: Option<String>,
+    new_game_name: Option<String>,
 ) -> Result<ProfileEntry, String> {
     let state = state.inner().clone();
     background(move || {
@@ -208,12 +240,7 @@ async fn create_profile(
             }
         }
         profile.name = name.trim().into();
-        let entry = ProfileEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            profile,
-        };
-        state.store.save(&entry).map_err(text)?;
-        Ok(entry)
+        game_library::insert_profile(&state, profile, game_id, new_game_name)
     })
     .await
 }
@@ -221,17 +248,14 @@ async fn create_profile(
 async fn import_profile(
     state: State<'_, AppState>,
     content: String,
+    game_id: Option<String>,
+    new_game_name: Option<String>,
 ) -> Result<ProfileEntry, String> {
     let state = state.inner().clone();
     background(move || {
         let _lock = state.operations.lock().map_err(text)?;
         let profile = motion_core::storage::parse_profile(&content).map_err(text)?;
-        let entry = ProfileEntry {
-            id: uuid::Uuid::new_v4().to_string(),
-            profile,
-        };
-        state.store.save(&entry).map_err(text)?;
-        Ok(entry)
+        game_library::insert_profile(&state, profile, game_id, new_game_name)
     })
     .await
 }
@@ -244,6 +268,8 @@ async fn import_jsm(
     state: State<'_, AppState>,
     files: Vec<JsmFile>,
     name: String,
+    game_id: Option<String>,
+    new_game_name: Option<String>,
 ) -> Result<ProfileEntry, String> {
     let state = state.inner().clone();
     background(move || {
@@ -254,12 +280,12 @@ async fn import_jsm(
         }
         let mut profile = report.profile;
         profile.name = name.trim().into();
-        save_imported_jsm(&state, profile)
+        save_imported_jsm(&state, profile, game_id, new_game_name)
     })
     .await
 }
 
-fn save_imported_jsm(state: &AppState, profile: Profile) -> Result<ProfileEntry, String> {
+fn save_imported_jsm(state: &AppState, profile: Profile, game_id: Option<String>, new_game_name: Option<String>) -> Result<ProfileEntry, String> {
     // Validate the complete program before touching a live mapping session.
     motion_core::engine::Engine::new(profile.clone()).map_err(text)?;
     let emitting = {
@@ -273,14 +299,10 @@ fn save_imported_jsm(state: &AppState, profile: Profile) -> Result<ProfileEntry,
         snapshot.status.emitting
     };
     if emitting {
+        game_library::check_destination(state, game_id.clone(), new_game_name.clone())?;
         state.client.request(Command::Stop)?;
     }
-    let entry = ProfileEntry {
-        id: uuid::Uuid::new_v4().to_string(),
-        profile,
-    };
-    state.store.save(&entry).map_err(text)?;
-    Ok(entry)
+    game_library::insert_profile(state, profile, game_id, new_game_name)
 }
 #[tauri::command]
 async fn set_ui_navigation(
@@ -324,13 +346,11 @@ async fn export_profile(
         if path.extension().and_then(|x| x.to_str()) != Some("toml") {
             return Err("请保存为 .toml 文件".into());
         }
-        motion_core::storage::atomic_write(
-            &path,
-            toml::to_string_pretty(&entry.profile)
-                .map_err(text)?
-                .as_bytes(),
-        )
-        .map_err(text)
+        let content = toml::to_string_pretty(&entry.profile).map_err(text)?;
+        let settings = state.settings.lock().map_err(text)?;
+        let game = settings.games.iter().find(|game| game.contains(&id));
+        let portable = profile_share::with_game_name(content, game.map(|game| game.name.as_str())).map_err(text)?;
+        motion_core::storage::atomic_write(&path, portable.as_bytes()).map_err(text)
     })
     .await
 }
@@ -352,35 +372,37 @@ async fn delete_profile(state: State<'_, AppState>, id: String) -> Result<(), St
         {
             return Err("请先停止或切换配置，再删除正在使用的配置".into());
         }
-        state.store.delete(&id).map_err(text)?;
-        let mut settings = state.settings.lock().map_err(text)?;
-        let shortcuts_before = settings.effective_shortcut_rules();
-        if settings.cursor_shown == SwitchTarget::Profile(id.clone()) {
-            settings.cursor_shown = SwitchTarget::None;
-        }
-        if settings.cursor_hidden == SwitchTarget::Profile(id.clone()) {
-            settings.cursor_hidden = SwitchTarget::None;
-        }
-        if settings.shortcut_profile.as_deref() == Some(&id) {
-            settings.shortcut_profile = None;
-        }
-        if let Some(rules) = &mut settings.shortcut_rules {
-            rules.retain(|rule| rule.target != id);
-        }
-        if settings.selected_profile == id {
-            settings.selected_profile = state
-                .store
-                .list()
-                .map_err(text)?
-                .0
-                .first()
-                .map(|p| p.id.clone())
-                .unwrap_or_default();
+        let path = state.store.profile_path(&id).map_err(text)?;
+        let mut current = state.settings.lock().map_err(text)?;
+        let mut settings = current.clone();
+        settings.forget_profile(&id);
+        if current.selected_profile == id {
+            let (remaining, _) = state.store.list().map_err(text)?;
+            if !remaining.iter().any(|entry| entry.id == settings.selected_profile) {
+                let owner = current.games.iter().find(|game| game.contains(&id));
+                let candidates = || remaining.iter().filter(|entry| entry.id != id);
+                settings.selected_profile = candidates().find(|entry| owner.is_some_and(|game| game.contains(&entry.id)))
+                    .or_else(|| candidates().next()).map(|entry| entry.id.clone()).unwrap_or_default();
+            }
         }
         state.store.save_settings(&settings).map_err(text)?;
-        if shortcuts_before != settings.effective_shortcut_rules() {
-            state.history.lock().unwrap().clear();
+        // First make every index reference safe. Even an interruption here can
+        // only leave a recoverable, unassigned profile file.
+        if let Err(error) = state.store.delete(&id) {
+            if path.exists() {
+                if let Err(rollback) = state.store.save_settings(&current) {
+                    *current = settings;
+                    state.history.lock().unwrap().clear();
+                    return Err(format!("{error} ({rollback})"));
+                }
+            } else {
+                *current = settings;
+                state.history.lock().unwrap().clear();
+            }
+            return Err(text(error));
         }
+        *current = settings;
+        state.history.lock().unwrap().clear();
         Ok(())
     })
     .await
@@ -418,16 +440,12 @@ async fn save_settings(
         {
             return Err("请先停止映射，再切换输出后端或自动隐藏设置".into());
         }
-        let previous_rules = current.effective_shortcut_rules();
-        let previous_targets: std::collections::HashSet<_> =
-            previous_rules.iter().map(|rule| &rule.target).collect();
-        let switching_changed = settings.cursor_enabled != current.cursor_enabled
-            || settings.cursor_shown != current.cursor_shown
-            || settings.cursor_hidden != current.cursor_hidden
-            || validated_targets != previous_targets;
         settings.calibrations = current.calibrations.clone();
         settings.motion_calibrations = current.motion_calibrations.clone();
         settings.selected_profile = current.selected_profile.clone();
+        settings.games = current.games.clone();
+        let running = state.client.snapshot.lock().map_err(text)?.status.profile_id.clone();
+        let switching_changed = current.switching_history_changed(&settings, running.as_deref());
         settings.device_path = current.device_path.clone();
         settings.validate().map_err(text)?;
         let previous_overlay = current.controller_overlay.clone();
@@ -469,7 +487,8 @@ async fn start_mapping(
     id: String,
     device_path: String,
     emit: bool,
-) -> Result<(), String> {
+    remember: Option<bool>,
+) -> Result<Settings, String> {
     let state = state.inner().clone();
     background(move || {
         let _lock = state.operations.lock().map_err(text)?;
@@ -507,17 +526,12 @@ async fn start_mapping(
                 sensor_calibration,
             }),
         })?;
-        let mut settings = state.settings.lock().unwrap();
-        settings.selected_profile = id;
-        settings.device_path = device_path;
-        state.store.save_settings(&settings).map_err(text)?;
-        state.history.lock().unwrap().clear();
-        Ok(())
+        record_profile_use(&state, remember.unwrap_or(true).then_some(id.as_str()), Some(device_path))
     })
     .await
 }
 #[tauri::command]
-async fn activate_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn activate_profile(state: State<'_, AppState>, id: String, already_applied: Option<bool>) -> Result<(), String> {
     let state = state.inner().clone();
     background(move || {
         let _lock = state.operations.lock().map_err(text)?;
@@ -532,16 +546,14 @@ async fn activate_profile(state: State<'_, AppState>, id: String) -> Result<(), 
                 .profile_id
                 .as_deref()
                 != Some(id.as_str());
-            apply_profile(&state, &id)?;
+            if changed || !already_applied.unwrap_or(false) {
+                apply_profile(&state, &id)?;
+            }
             if changed {
                 notify_profile(&state, &id);
             }
         }
-        let mut settings = state.settings.lock().unwrap();
-        settings.selected_profile = id;
-        state.store.save_settings(&settings).map_err(text)?;
-        state.history.lock().unwrap().clear();
-        Ok(())
+        record_profile_use(&state, Some(&id), None).map(|_| ())
     })
     .await
 }
@@ -580,7 +592,7 @@ fn update_shortcut_capture(state: &AppState, active: bool) -> Result<(), String>
     *until = active.then(|| now + std::time::Duration::from_secs(5));
     if active != was_active {
         state
-            .shortcut_capture_revision
+            .switch_input_revision
             .fetch_add(1, std::sync::atomic::Ordering::Release);
     }
     Ok(())
@@ -650,6 +662,19 @@ async fn preview_right_stick_curve(
     target_percent: f32,
 ) -> Result<(Vec<[f32; 3]>, f32), String> {
     curve.preview(target_percent).map_err(text)
+}
+#[tauri::command]
+async fn split_bezier_curve(
+    points: Vec<[f32; 2]>,
+    travel: f32,
+    domain: motion_core::bezier::Domain,
+) -> Result<(Vec<[f32; 2]>, usize), String> {
+    motion_core::bezier::split(points, travel, domain).map_err(text)
+}
+#[tauri::command]
+fn preview_bezier_travel(points: Vec<[f32; 2]>, target_percent: f32) -> Result<f32, String> {
+    motion_core::bezier::Domain::Game.validate(&points).map_err(text)?;
+    Ok(100. * motion_core::bezier::sample(&points, target_percent / 100., 1))
 }
 #[tauri::command]
 async fn preview_flick_release(strength: f32) -> Result<Vec<[f32; 3]>, String> {
@@ -832,6 +857,9 @@ fn main() {
             let root = runtime::runtime_dir(&handle).map_err(anyhow::Error::msg)?;
             let store = Store::open(root)?;
             let mut warnings = vec![];
+            if let Err(error) = store.recover_game_import() {
+                warnings.push(error.to_string());
+            }
             let settings = match store.settings() {
                 Ok(settings) => settings,
                 Err(error) => {
@@ -849,7 +877,7 @@ fn main() {
                 history: Arc::new(Mutex::new(SwitchHistory::default())),
                 operations: Arc::new(Mutex::new(())),
                 shortcut_capture_until: Arc::new(Mutex::new(None)),
-                shortcut_capture_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                switch_input_revision: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 startup_warnings: warnings,
             };
             app.manage(state.clone());
@@ -907,6 +935,12 @@ fn main() {
             profile_share::read_profile_code,
             profile_share::preview_shared_profile,
             profile_share::import_shared_profile,
+            game_share::copy_game_code,
+            game_share::preview_shared_game,
+            game_share::import_shared_game,
+            profile_share::preview_profile_import,
+            game_library::edit_game_library,
+            game_library::duplicate_profile,
             preview_jsm,
             import_jsm,
             set_ui_navigation,
@@ -924,6 +958,8 @@ fn main() {
             preview_gyro_acceleration,
             preview_stick_mouse_response,
             preview_right_stick_curve,
+            split_bezier_curve,
+            preview_bezier_travel,
             preview_flick_release,
             save_sensor_calibration,
             restore_backup,

@@ -469,7 +469,7 @@ impl Aim {
         let sample_dt = clock.interval(dt);
         if let Some(seconds) = sample_dt {
             let projected = Self::project_motion(s, m, c, gravity, gyro);
-            self.sampled_gyro = self.gyro_sample(s, p, c, projected, seconds, gyro, actions, blocked);
+            self.sampled_gyro = self.gyro_sample(s, p, c, projected, seconds, gyro, actions, blocked, None);
         } else if blocked { self.block_sampled_gyro(); }
         let Vec2 { x: vel_x, y: vel_y } = self.sampled_gyro.velocity;
 
@@ -534,7 +534,16 @@ impl Aim {
         projected: (f32, f32), dt: f32, gyro: Gyro, actions: &HashSet<GyroAction>,
         blocked: bool, transform: impl FnOnce(Vec2) -> Vec2,
     ) -> Vec2 {
-        self.sampled_gyro = self.gyro_sample(s, p, c, projected, dt, gyro, actions, blocked);
+        self.sample_projected_motion_with_gain(s, p, c, projected, dt, gyro, actions, blocked, None, transform)
+    }
+
+    /// Optional user gain at the native sensitivity stage, before braking and base axis scaling.
+    pub fn sample_projected_motion_with_gain(
+        &mut self, s: &Settings, p: &pad::Settings, c: &super::cc::Settings,
+        projected: (f32, f32), dt: f32, gyro: Gyro, actions: &HashSet<GyroAction>,
+        blocked: bool, gain: Option<&dyn Fn(f32) -> f32>, transform: impl FnOnce(Vec2) -> Vec2,
+    ) -> Vec2 {
+        self.sampled_gyro = self.gyro_sample(s, p, c, projected, dt, gyro, actions, blocked, gain);
         if !blocked { self.sampled_gyro.velocity = transform(self.sampled_gyro.velocity); }
         if p.gyro_dest == Dest::Mouse { self.gyro_mouse_delta(s, dt) } else { Vec2::ZERO }
     }
@@ -629,6 +638,7 @@ impl Aim {
         gyro: Gyro,
         actions: &HashSet<GyroAction>,
         blocked: bool,
+        gain: Option<&dyn Fn(f32) -> f32>,
     ) -> GyroAim {
         let (mut gx, mut gy) = projected;
 
@@ -720,7 +730,8 @@ impl Aim {
         vel_y = sy;
 
         // ── the sensitivity ramp ─────────────────────────────────────────────
-        let magnitude = (vel_x * vel_x + vel_y * vel_y).sqrt() - s.min_threshold;
+        let speed = (vel_x * vel_x + vel_y * vel_y).sqrt();
+        let magnitude = speed - s.min_threshold;
         let magnitude = magnitude.max(0.0);
         let denom = s.max_threshold - s.min_threshold;
         let ramp = if denom <= 0.0 {
@@ -733,8 +744,14 @@ impl Aim {
         // `LINEAR` is the straight line stock JSM draws; the fork's five curves take
         // their shape from their own parameters instead. Note that three of the six
         // never look at `MAX_GYRO_THRESHOLD` at all.
-        vel_x *= super::cc::sensitivity(c, magnitude, ramp, s.max_threshold, s.min_sens.0, s.max_sens.0);
-        vel_y *= super::cc::sensitivity(c, magnitude, ramp, s.max_threshold, s.min_sens.1, s.max_sens.1);
+        if let Some(gain) = gain {
+            let multiplier = gain(speed);
+            vel_x *= s.min_sens.0 * multiplier;
+            vel_y *= s.min_sens.1 * multiplier;
+        } else {
+            vel_x *= super::cc::sensitivity(c, magnitude, ramp, s.max_threshold, s.min_sens.0, s.max_sens.0);
+            vel_y *= super::cc::sensitivity(c, magnitude, ramp, s.max_threshold, s.min_sens.1, s.max_sens.1);
+        }
         if brake < 1.0 {
             vel_x *= brake;
             vel_y *= brake;

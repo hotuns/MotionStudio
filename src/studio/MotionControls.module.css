@@ -77,6 +77,10 @@
 .activationModes button { margin: 0; font-size: 12px; }
 .activationModes button[aria-pressed='true'] { border-color: color-mix(in srgb, var(--accent) 38%, var(--border-1)); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg-2)); }
 .freeCurve, .parameterChart { min-width: 0; }
+.bezierEditor { min-width: 0; margin: 0; padding: 0; border: 0; }
+.bezierParameters { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 12px; }
+.bezierParameters label { flex-basis: 100%; }
+.bezierParameters input { min-width: 0; flex: 1 1 225px; font-variant-numeric: tabular-nums; }
 .accelerationLayout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: start; gap: 20px; }
 .accelerationLayout .parameterChart, .freeCurve { max-width: 900px; }
 @media (min-width: 901px) {
@@ -111,6 +115,8 @@
 .stickPlotPoint::before { content: ''; box-sizing: border-box; width: 11px; height: 11px; border: 2px solid var(--accent); border-radius: 50%; background: var(--bg-2); }
 .stickPlotSurface .stickPlotPoint[data-fixed=true] { cursor: pointer; }
 .stickPlotPoint[data-fixed=true]::before { border-radius: 2px; }
+.stickPlotPoint[data-tangent]::before { width: 9px; height: 9px; border-radius: 1px; transform: rotate(45deg); }
+.bezierTangents { fill: none; stroke: var(--text-muted); stroke-width: 1.25px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
 .stickPlotPoint:hover::before, .stickPlotPoint[aria-pressed=true]::before { background: var(--accent); box-shadow: 0 0 0 3px var(--bg-2), 0 0 0 4px var(--accent); }
 .stickPlotPoint[aria-pressed=true] { z-index: 1; }
 .stickPlotSurface[data-dragging=true], .stickPlotSurface[data-dragging=true] .stickPlotPoint { cursor: grabbing; }

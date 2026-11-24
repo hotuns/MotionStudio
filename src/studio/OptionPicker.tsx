@@ -12,7 +12,7 @@ export type PickerOption = {
   disabled?: boolean;
   localize?: false;
 };
-export type PickerGroup = {label?: string; options: PickerOption[]};
+export type PickerGroup = {label?: string; localizeLabel?: boolean; options: PickerOption[]};
 
 const display = (option: PickerOption) => option.localize === false ? option.label : t(option.label);
 
@@ -34,7 +34,7 @@ type OptionListProps = {
 function sameGroups(previous: PickerGroup[], next: PickerGroup[]) {
   return previous === next || (previous.length === next.length && previous.every((group, index) => {
     const other = next[index];
-    return group.label === other.label && (group.options === other.options ||
+    return group.label === other.label && group.localizeLabel === other.localizeLabel && (group.options === other.options ||
       (group.options.length === other.options.length && group.options.every((option, i) => {
         const item = other.options[i];
         return option.value === item.value && option.label === item.label && option.search === item.search &&
@@ -48,7 +48,7 @@ const OptionResults = memo(function OptionResults({value, groups, query, gamepad
   useLanguage();
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const sections = groups.map((group, index) => {
-    const heading = group.label && t(group.label);
+    const heading = group.label && (group.localizeLabel === false ? group.label : t(group.label));
     const buttons = group.options.flatMap(option => {
       const label = display(option);
       if (terms.length) {
@@ -68,7 +68,7 @@ const OptionResults = memo(function OptionResults({value, groups, query, gamepad
     });
     if (!buttons.length) return null;
     return <section key={index} aria-label={group.label}>
-      {group.label && <h3>{group.label}</h3>}
+      {group.label && <h3 translate={group.localizeLabel === false ? 'no' : undefined}>{group.label}</h3>}
       <div className={layout === 'list' ? styles.options+' '+styles.listOptions : styles.options}>{buttons}</div>
     </section>;
   });

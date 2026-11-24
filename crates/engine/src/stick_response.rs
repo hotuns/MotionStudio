@@ -1,4 +1,5 @@
 //! A known game's radial right-stick travel → turn speed, both normalized to full scale.
+use crate::bezier::{self, CurveModel};
 use anyhow::{ensure, Result};
 use flexinput_engine::eval::{jsm_aim::StickResponse, sample_curve};
 use serde::{Deserialize, Serialize};
@@ -15,19 +16,59 @@ pub struct ResponsePoint(pub f32, pub f32, #[serde(default = "linear")] pub f32)
 #[serde(default, deny_unknown_fields)]
 pub struct RightStickCurve {
     pub enabled: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub linearize_stick: bool,
     pub points: Vec<ResponsePoint>,
+    #[serde(skip_serializing_if = "CurveModel::is_points")]
+    pub model: CurveModel,
+    /// One anchor, then two handles and the next anchor for every cubic.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bezier_points: Vec<[f32; 2]>,
 }
 
 impl Default for RightStickCurve {
     fn default() -> Self {
         Self {
             enabled: false,
+            linearize_stick: false,
             points: vec![ResponsePoint(0., 0., 1.), ResponsePoint(1., 1., 1.)],
+            model: CurveModel::Points,
+            bezier_points: Vec::new(),
         }
     }
 }
 
 impl RightStickCurve {
+    /// Build once for both the native rate mixer and ordinary virtual reports.
+    pub(crate) fn configured(g: &crate::profile::Gyro) -> Option<Self> {
+        let saved = g.right_stick_curve.as_ref()?;
+        if saved.enabled {
+            return Some(saved.clone());
+        }
+        if !saved.linearize_stick {
+            return None;
+        }
+        let s = &g.jsm_response;
+        let power = if s.right_unpower == 0. {
+            1.
+        } else {
+            s.right_unpower
+        };
+        let mut points = Vec::new();
+        if s.right_undeadzone_inner > 0. {
+            points.push(ResponsePoint(0., 0., 1.));
+        }
+        points.push(ResponsePoint(s.right_undeadzone_inner, 0., power));
+        points.push(ResponsePoint(1. - s.right_undeadzone_outer, 1., 1.));
+        if 1. - s.right_undeadzone_outer < 1. {
+            points.push(ResponsePoint(1., 1., 1.));
+        }
+        Some(Self {
+            linearize_stick: true,
+            points,
+            ..Default::default()
+        })
+    }
     pub fn validate(&self) -> Result<()> {
         ensure!(
             (2..=256).contains(&self.points.len()),
@@ -60,7 +101,8 @@ impl RightStickCurve {
             }
         }
         ensure!(last.2 == 1., "终点没有下一段，段指数请留空或填 1。");
-        Ok(())
+        self.model
+            .validate(bezier::Domain::Game, &self.bezier_points)
     }
 
     fn sample(&self, input: f32, inverse: bool) -> f32 {
@@ -68,6 +110,9 @@ impl RightStickCurve {
             return 0.;
         }
         let input = input.min(1.);
+        if self.model == CurveModel::Bezier {
+            return bezier::sample(&self.bezier_points, input, usize::from(inverse));
+        }
         let axes = |p: &ResponsePoint| if inverse { (p.1, p.0) } else { (p.0, p.1) };
         // The first match chooses the start of a speed plateau at equality and
         // the interval after its far edge for a slightly higher request.
@@ -92,6 +137,13 @@ impl RightStickCurve {
     pub fn preview(&self, target_percent: f32) -> Result<(Vec<[f32; 3]>, f32)> {
         self.validate()?;
         let mut graph = vec![[0.; 3]];
+        if self.model == CurveModel::Bezier {
+            graph = bezier::table(&self.bezier_points)
+                .into_iter()
+                .map(|[x, y]| [x * 100., x * 100., y * 100.])
+                .collect();
+            return Ok((graph, self.travel_at(target_percent / 100.) * 100.));
+        }
         for segment in self.points.windows(2) {
             let from = segment[0];
             let to = segment[1];

@@ -539,6 +539,9 @@ impl MotionRuntime {
     }
 }
 fn acceleration_gain(a: &GyroAcceleration, settings: &cc::Settings, speed: f32) -> f32 {
+    if a.curve == Curve::Bezier {
+        return crate::bezier::sample(&a.bezier_points, speed, 0);
+    }
     if a.curve == Curve::Custom {
         return sample_curve(&a.points, speed, &[]);
     }

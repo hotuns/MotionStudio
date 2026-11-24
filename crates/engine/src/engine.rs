@@ -1195,9 +1195,9 @@ impl Engine {
                 pad.right_y = 0;
             }
             let aim = self.gyro_stick;
-            let right = self.jsm.right
-                .filter(|_| self.measuring.is_none())
-                .unwrap_or_else(|| Vec2::new(axis_from_i16(pad.right_x), axis_from_i16(pad.right_y)));
+            let right = self.jsm.right.filter(|_| self.measuring.is_none()).unwrap_or_else(|| {
+                self.jsm.mapped_right(Vec2::new(axis_from_i16(pad.right_x), axis_from_i16(pad.right_y)))
+            });
             let mut right_x = right.x + aim.x;
             pad.right_y = axis_to_i16(right.y + aim.y);
             for (pin, v) in &self.motion_pad {
@@ -2085,8 +2085,11 @@ impl Engine {
         {
             let p = flexinput_core::imu::imu_pin(&b.input).expect("validated motion input");
             let physical = p.physical(&self.motion.reading);
-            let value = sample_curve(&b.curve, (physical.abs() / b.range).clamp(0., 1.), &[])
-                * physical.signum();
+            let input = (physical.abs() / b.range).clamp(0., 1.);
+            let value = match b.curve_model {
+                crate::bezier::CurveModel::Bezier => crate::bezier::sample(&b.curve_bezier, input, 0),
+                crate::bezier::CurveModel::Points => sample_curve(&b.curve, input, &[]),
+            } * physical.signum();
             let pressed =
                 value.abs() > (b.threshold - if state.pressed { 0.05 } else { 0. }).max(0.);
             if pressed && !state.pressed {

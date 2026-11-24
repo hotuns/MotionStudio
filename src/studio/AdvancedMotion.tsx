@@ -1,14 +1,17 @@
-import {memo} from 'react';
+import {memo, useLayoutEffect, useRef, useState} from 'react';
+import {invoke} from '@tauri-apps/api/core';
 import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import type { MotionConfig, Profile } from '../types';
 import {useLanguage} from '../i18n';
 import {nativeSmoothing,usesJsmAim} from '../motion-presets';
 import {selectStickResponse} from '../stick-response';
+import {bezierFromGainPreview,bezierFromKnots} from '../bezier';
 import { Range, Toggle } from './Controls';
 import {SettingField, SettingLabel, SettingSection, settingStyles} from './SettingLayout';
 import {PadInputPicker} from './PadInputPicker';
 import {padChoices} from './binding-choices';
 import { CurveEditor } from './CurveEditor';
+import {BezierCurveEditor} from './BezierCurveEditor';
 import {StickResponseEditor} from './StickResponseEditor';
 import { AccelerationCurve, FlickReleaseCurve, ResponseCurve, StabilityCurve, useStabilityPreview, withStabilityValue } from './StabilityCurves';
 import styles from './MotionControls.module.css';
@@ -97,12 +100,47 @@ export function AccelerationSettings({profile,update}:Props) {
   const jsm=usesJsmAim(profile.gyro);
   const curves:[string,string][]=[["linear","线性"],["natural","自然"],["power","幂函数"],["quadratic","二次"],["sigmoid","S 曲线"],["jump","跳变"]];
   if(!jsm)curves.push(["custom","自定义控制点"]);
+  curves.push(['bezier','贝塞尔曲线']);
   const set=(key:string,value:unknown)=>update(p=>{(p.gyro.acceleration as unknown as Record<string,unknown>)[key]=value;});
   const custom = !jsm && a.curve==='custom';
-  return <SettingSection id="motion-acceleration" title="转动加速" summary={custom?'自定义控制点':a.fast_multiplier>1?`${a.fast_multiplier}×`:'关闭'} lazy>
-    <Choice label="加速度曲线" value={jsm&&a.curve==='custom'?'linear':a.curve} options={curves} onChange={v=>set('curve',v)}/>
+  const bezier=a.curve==='bezier';
+  const bezierPaths=['gyro.acceleration.curve','gyro.acceleration.bezier_points'];
+  const generation=useRef(0);
+  const [converting,setConverting]=useState(false);
+  const [failed,setFailed]=useState(false);
+  const sourceKey=JSON.stringify([a,jsm]);
+  useLayoutEffect(()=>{
+    setConverting(false); setFailed(false);
+    return ()=>{generation.current++;};
+  },[sourceKey]);
+  async function selectCurve(value: string) {
+    const curve=value as typeof a.curve;
+    if (curve!=='bezier' || a.bezier_points?.length) {set('curve',curve);return;}
+    let path=bezierFromKnots(a.curve==='custom'?a.points:[[a.start_dps,1],[a.full_dps,a.fast_multiplier]]);
+    if (a.fast_multiplier>1 && a.curve!=='linear' && a.curve!=='custom') {
+      const token=++generation.current;
+      setConverting(true); setFailed(false);
+      try {
+        const samples=await invoke<[number,number,number][]>('preview_gyro_acceleration',{acceleration:a,jsm});
+        if (generation.current!==token) return;
+        path=bezierFromGainPreview(samples)??path;
+      } catch {
+        if (generation.current===token) setFailed(true);
+        return;
+      } finally {
+        if (generation.current===token) setConverting(false);
+      }
+    }
+    update(p=>{p.gyro.acceleration.bezier_points=path;p.gyro.acceleration.curve=curve;});
+  }
+  return <SettingSection id="motion-acceleration" title="转动加速" summary={bezier?'贝塞尔曲线':custom?'自定义控制点':a.fast_multiplier>1?`${a.fast_multiplier}×`:'关闭'} lazy>
+    <Choice label="加速度曲线" settingPath={bezierPaths} disabled={converting} value={jsm&&a.curve==='custom'?'linear':a.curve} options={curves} onChange={v=>void selectCurve(v)}/>
+    {failed && <p role="status" className={styles.hint}>曲线暂未更新，请检查当前参数。</p>}
     {jsm&&a.curve==='custom'&&<p className={styles.hint}>这份配置保存了自定义控制点，角速度瞄准当前使用线性曲线。</p>}
-    {custom ? <SettingField label="自定义控制点"><CurveEditor kind="acceleration" points={a.points} onChange={v=>set('points',v)}/></SettingField>
+    {bezier && a.bezier_points?.length ? <SettingField label="贝塞尔加速曲线" path={bezierPaths}>
+      <p className={styles.hint}>横轴是手柄转速，纵轴是基础灵敏度的倍率。1× 保持原灵敏度，低于 1× 可以放慢微调。</p>
+      <BezierCurveEditor domain="acceleration" points={a.bezier_points} onChange={v=>set('bezier_points',v)}/>
+    </SettingField> : custom ? <SettingField label="自定义控制点"><CurveEditor kind="acceleration" points={a.points} onChange={v=>set('points',v)}/></SettingField>
       : <div className={styles.accelerationLayout}>
         <div><AccelerationCurve acceleration={a} jsm={jsm} onChange={set}/></div>
         <div>
@@ -326,7 +364,7 @@ export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: G
   return <>
     <p className={styles.hint}>保存并应用基础层配置，启用映射后打开悬浮窗。对准参照物试转 360°，直接调整数值后再次试转，满意后保存。原来的手动转动测量保留在「更多校准方式」。</p>
     {profile.gyro.output==='right_stick'&&<p className={styles.hint}>{usesJsmAim(profile.gyro)||profile.gyro.motion.flick.enabled||profile.gyro.motion.flick.stick_aim
-      ? '先校准游戏满杆角速度，再按游戏实际响应选择单一指数或分段曲线。校准后保持游戏灵敏度不变。'
+      ? '先校准游戏满杆角速度，再选择游戏的摇杆响应曲线。校准后保持游戏灵敏度不变。'
       : '使用摇杆拨动前，请将游戏摇杆响应曲线设为线性，并关闭边缘及其他转向加速。校准后保持游戏灵敏度不变。'}</p>}
     <div className="studio-actions">
       <button type="button" className="primary-btn" disabled={!canMeasure||(!profile.gyro.enabled&&!(profile.gyro.motion.flick.standalone&&(profile.gyro.motion.flick.enabled||profile.gyro.motion.flick.stick_aim)))}
@@ -335,8 +373,36 @@ export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: G
     </>;
 }
 
-export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad}:
-  Props&GameCalibrationProps&{vigemGamepad:boolean}) {
+export function GameStickResponse({profile,update}:Props) {
+  const gyro=profile.gyro, curve=gyro.right_stick_curve;
+  const mode=curve?.enabled ? curve.model??'points' : 'power';
+  const settings=['gyro.right_stick_curve.enabled','gyro.right_stick_curve.model','gyro.right_stick_curve.bezier_points'];
+  return <>
+    <Choice label="游戏摇杆响应" settingPath={settings} value={mode}
+      options={[['power','单一指数'],['points','分段曲线'],['bezier','贝塞尔曲线']]}
+      onChange={v=>update(p=>selectStickResponse(p.gyro,v as typeof mode))}/>
+    {mode==='bezier' && curve?.bezier_points?.length ? <SettingField label="游戏贝塞尔曲线" path={settings}>
+      <p className={styles.hint}>填入游戏从中心到满杆的原始响应，包含内外死区。转速按满杆转速的百分比填写，软件会反算所需推杆量。</p>
+      <BezierCurveEditor domain="game" points={curve.bezier_points} onChange={bezier_points=>update(p=>{
+        p.gyro.right_stick_curve={...p.gyro.right_stick_curve,bezier_points};
+      })}/>
+    </SettingField> : mode==='points' ? <StickResponseEditor points={curve?.points} onChange={points=>update(p=>{
+      p.gyro.right_stick_curve={...p.gyro.right_stick_curve,points};
+    })}/> : <>
+      <Range label="右摇杆内死区补偿" value={(gyro.jsm_response?.right_undeadzone_inner??0)*100} min={0} max={99-Math.round((gyro.jsm_response?.right_undeadzone_outer??0)*100)} step={1} unit="%"
+        onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_undeadzone_inner:v/100};})}
+        help={curve?.linearize_stick?'填入游戏忽略的摇杆中心范围。实体摇杆回中后输出归零。':'填入游戏忽略的摇杆中心范围。手柄静止时，输出会停在这个边界，方便观察镜头是否开始转动。'}/>
+      <Range label="右摇杆外死区补偿" value={(gyro.jsm_response?.right_undeadzone_outer??0)*100} min={0} max={99-Math.round((gyro.jsm_response?.right_undeadzone_inner??0)*100)} step={1} unit="%"
+        onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_undeadzone_outer:v/100};})}/>
+      <Range label="右摇杆响应指数" value={gyro.jsm_response?.right_unpower??0} min={0} max={10} step={0.05}
+        onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_unpower:v};})}
+        help="填入游戏的摇杆响应指数以补偿曲线。线性响应可用 0 或 1。"/>
+    </>}
+  </>;
+}
+
+export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,showGameResponse}:
+  Props&GameCalibrationProps&{vigemGamepad:boolean;showGameResponse:boolean}) {
   useLanguage();
   const gyro=profile.gyro;
   const passthrough=isSensorOutput(gyro.output);
@@ -374,24 +440,8 @@ export const MotionOutputSettings = memo(function MotionOutputSettings({profile,
     </>}
     {showStickScale&&<Range label="游戏满杆角速度" value={gyro.stick_full_scale_dps} min={30} max={1440} step={1} unit=" °/s" slider={false}
       onChange={v=>update(p=>{p.gyro.stick_full_scale_dps=v;})} help="填写游戏实际满杆时的转向速度，用于将目标转角换算成摇杆输出。提高这里的值不会让游戏转得更快。"/>}
-    {showStickScale&&!passthrough&&(usesJsmAim(gyro)||gyro.motion.flick.enabled||gyro.motion.flick.stick_aim)&&<>
-      <Choice label="游戏摇杆响应" value={gyro.right_stick_curve?.enabled?'points':'power'}
-        options={[['power','单一指数'],['points','分段曲线']]} onChange={v=>update(p=>selectStickResponse(p.gyro,v==='points'))}/>
-      {gyro.right_stick_curve?.enabled
-        ? <StickResponseEditor points={gyro.right_stick_curve.points} onChange={points=>update(p=>{
-          p.gyro.right_stick_curve={...p.gyro.right_stick_curve,enabled:true,points};
-        })}/>
-        : <>
-          <Range label="右摇杆内死区补偿" value={(gyro.jsm_response?.right_undeadzone_inner??0)*100} min={0} max={99-Math.round((gyro.jsm_response?.right_undeadzone_outer??0)*100)} step={1} unit="%"
-            onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_undeadzone_inner:v/100};})}
-            help="填入游戏忽略的摇杆中心范围。手柄静止时，输出会停在这个边界，方便观察镜头是否开始转动。"/>
-          <Range label="右摇杆外死区补偿" value={(gyro.jsm_response?.right_undeadzone_outer??0)*100} min={0} max={99-Math.round((gyro.jsm_response?.right_undeadzone_inner??0)*100)} step={1} unit="%"
-            onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_undeadzone_outer:v/100};})}/>
-          <Range label="右摇杆响应指数" value={gyro.jsm_response?.right_unpower??0} min={0} max={10} step={0.05}
-            onChange={v=>update(p=>{p.gyro.jsm_response={...p.gyro.jsm_response,right_unpower:v};})}
-            help="填入游戏的摇杆响应指数以补偿曲线。线性响应可用 0 或 1。"/>
-        </>}
-    </>}
+    {showGameResponse&&showStickScale&&!passthrough&&(usesJsmAim(gyro)||gyro.motion.flick.enabled||gyro.motion.flick.stick_aim)&&
+      <GameStickResponse profile={profile} update={update}/>}
     {showMouseScale&&<Range label="基础鼠标计数" value={gyro.counts_per_degree} min={1} max={100} step={0.5} unit=" /°" slider={false}
       onChange={v=>update(p=>{p.gyro.counts_per_degree=v;})} help="每旋转一度产生的基础鼠标计数，再乘以体感灵敏度。"/>}
     {!passthrough&&<GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>}

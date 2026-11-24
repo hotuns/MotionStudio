@@ -7,6 +7,8 @@ import {PadInputCaptureContext,PadInputPicker} from './PadInputPicker';
 import {outputChoices, padChoices, motionPadChoices} from './binding-choices';
 import {imuOptions, motionPadOutputs, padInputLabel} from './controller-catalog';
 import {CurveEditor} from './CurveEditor';
+import {bezierFromKnots} from '../bezier';
+import {BezierCurveEditor} from './BezierCurveEditor';
 import styles from './MotionControls.module.css';
 
 
@@ -63,7 +65,15 @@ function MotionFields({action, onChange}: {action: MotionBinding; onChange: (pat
     {action.mode==='turbo' && <Range label="连发周期" value={action.turbo_ms} min={20} max={2000} step={10} unit=" ms"
       onChange={turbo_ms=>onChange({turbo_ms})}/>}
     <details><summary>动作响应曲线</summary>
-      <CurveEditor kind="action" points={action.curve} onChange={curve=>onChange({curve})}/>
+      <label className="studio-field">曲线类型<select value={action.curve_model??'points'} onChange={e=>{
+        const curve_model=e.currentTarget.value as NonNullable<MotionBinding['curve_model']>;
+        if (curve_model==='bezier' && !action.curve_bezier?.length)
+          onChange({curve_model,curve_bezier:bezierFromKnots(action.curve)});
+        else onChange({curve_model});
+      }}><option value="points">分段曲线</option><option value="bezier">贝塞尔曲线</option></select></label>
+      {action.curve_model==='bezier' && action.curve_bezier?.length ? <BezierCurveEditor domain="action" points={action.curve_bezier}
+        onChange={curve_bezier=>onChange({curve_bezier})}/> :
+        <CurveEditor kind="action" points={action.curve} onChange={curve=>onChange({curve})}/>}
     </details>
   </>;
 }

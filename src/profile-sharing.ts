@@ -2,7 +2,9 @@ import type {GamepadTarget, Profile} from './types';
 
 const catalogRoot = 'https://raw.githubusercontent.com/hotuns/MotionStudio/main/community-configs/';
 const maxBytes = 512 * 1024;
-export const maxShareCodeLength = 4 + Math.ceil((maxBytes + 1024) * 4 / 3);
+export const gameCodePrefix = 'MSG1.';
+const maxGameBytes = 8 * 1024 * 1024;
+export const maxShareCodeLength = gameCodePrefix.length + Math.ceil((maxGameBytes + maxGameBytes / 512) * 4 / 3);
 
 export type CommunityProfile = {
   code: string;
@@ -21,7 +23,14 @@ export type SharedSource =
   | {kind: 'code'; code: string}
   | {kind: 'community'; content: string; sha256: string};
 
-export type SharedPreview = {profile: Profile; custom_filters: number};
+export type SharedPreview = {profile: Profile; custom_filters: number; game_name?:string|null};
+export type SharedGamePreview = {
+  name: string;
+  profiles: {name: string; output: GamepadTarget; layers: number}[];
+  default_profile: number;
+  use_game_rules: boolean;
+  custom_filters: number;
+};
 
 let catalog: CommunityProfile[] | undefined;
 

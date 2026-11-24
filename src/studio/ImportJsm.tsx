@@ -1,6 +1,8 @@
 import {useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
-import type {Entry, JsmFile, JsmReport} from '../types';
+import type {Entry, JsmFile, JsmReport, LibraryGame} from '../types';
+import {importDestination, newGameValue} from '../game-library';
+import {GameDestination} from './GameGroups';
 import {Dialog} from './Controls';
 import {pickImportFile} from '../import-file';
 import {t} from '../i18n';
@@ -8,7 +10,9 @@ import styles from './ImportJsm.module.css';
 
 const statusNames = {converted:'已转换', approximate:'需要核验', skipped:'未迁移', ignored:'程序设置', overridden:'已覆盖', included:'已展开'};
 
-export function ImportJsm({onClose, onImported}: {onClose: () => void; onImported: (entry: Entry) => Promise<void>}) {
+export function ImportJsm({onClose, onImported, games, initialGame}: {onClose: () => void; onImported: (entry: Entry) => Promise<void>; games:LibraryGame[]; initialGame:string}) {
+  const [game,setGame] = useState(initialGame);
+  const [gameName,setGameName] = useState('');
   const [files, setFiles] = useState<JsmFile[]>(() => [{name:t('手柄配置.txt'), text:''}]);
   const [selected, setSelected] = useState(0);
   const [name, setName] = useState('');
@@ -64,7 +68,7 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
     setBusy(true);
     setError('');
     try {
-      const entry = await invoke<Entry>('import_jsm', {files, name:name.trim()});
+      const entry = await invoke<Entry>('import_jsm', {files, name:name.trim(), ...importDestination(game,gameName)});
       await onImported(entry);
     } catch (error) {
       setError(String(error));
@@ -81,7 +85,7 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
     actions={<>
       <button type="button" className="secondary-btn" onClick={onClose}>取消导入</button>
       {report
-        ? <button type="submit" className="primary-btn" disabled={busy || !ready || !name.trim()}>创建新配置</button>
+        ? <button type="submit" className="primary-btn" disabled={busy || !ready || !name.trim() || (game===newGameValue && !gameName.trim())}>创建新配置</button>
         : <button type="submit" className="primary-btn" disabled={busy || !files[0].text.trim()}>预览转换</button>}
     </>}>
     {!report ? <>
@@ -113,6 +117,7 @@ export function ImportJsm({onClose, onImported}: {onClose: () => void; onImporte
         <button type="button" className="ghost-btn" disabled={busy} onClick={clearReport}>修改原文</button></div>
       <label className={styles.field}>新配置名称<input autoFocus aria-label="导入后的配置名称" maxLength={100}
         value={name} disabled={busy} onChange={event => setName(event.target.value)}/></label>
+      <GameDestination games={games} value={game} onChange={setGame} allowNew newName={gameName} onNewName={setGameName} disabled={busy}/>
       <div className={styles.stats}><span><strong>{report.converted}</strong> 已转换</span>
         <span><strong>{report.approximate}</strong> 需要核验</span><span><strong>{report.skipped}</strong> 未迁移</span></div>
       <p>{report.profile.actions.length} 个动作 · 体感{report.profile.gyro.enabled?'已配置':'关闭'} · {report.profile.virtual_gamepad==='none'?'键鼠输出':report.profile.virtual_gamepad==='xbox_360'?'虚拟 Xbox 360':'虚拟 DualShock 4'}</p>

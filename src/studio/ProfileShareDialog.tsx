@@ -1,18 +1,27 @@
 import {useEffect, useState} from 'react';
 import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import {invoke} from '@tauri-apps/api/core';
-import {inputLabel, outputLabel, type Profile} from '../types';
+import {inputLabel, outputLabel, type Profile, type LibraryGame} from '../types';
+import {GameDestination} from './GameGroups';
+import {availableGameName, newGameValue} from '../game-library';
 import {
-  loadCommunityProfile, maxShareCodeLength, resolveCommunityCode,
-  type CommunityProfile, type SharedPreview, type SharedSource,
+  gameCodePrefix, loadCommunityProfile, maxShareCodeLength, resolveCommunityCode,
+  type CommunityProfile, type SharedGamePreview, type SharedPreview, type SharedSource,
 } from '../profile-sharing';
 import {Dialog, gamepadNames} from './Controls';
 import styles from './ProfileManager.module.css';
+import gameStyles from './GameGroups.module.css';
 
 type Lookup = {code: string} | {entry: CommunityProfile};
-type Result = {source: SharedSource; preview: SharedPreview; entry?: CommunityProfile};
+type Result =
+  | {kind: 'profile'; source: SharedSource; preview: SharedPreview; entry?: CommunityProfile}
+  | {kind: 'game'; code: string; preview: SharedGamePreview};
 
 async function inspect(lookup: Lookup, signal: AbortSignal): Promise<Result> {
+  if ('code' in lookup && lookup.code.startsWith(gameCodePrefix)) {
+    const preview = await invoke<SharedGamePreview>('preview_shared_game', {code: lookup.code});
+    return {kind: 'game', code: lookup.code, preview};
+  }
   const entry = 'entry' in lookup ? lookup.entry :
     /^MS-[a-f0-9]{8}$/i.test(lookup.code) ? await resolveCommunityCode(lookup.code, signal) : undefined;
   const source: SharedSource = entry ? await loadCommunityProfile(entry, signal) :
@@ -22,7 +31,7 @@ async function inspect(lookup: Lookup, signal: AbortSignal): Promise<Result> {
   if (entry && (entry.name !== preview.profile.name || entry.output !== preview.profile.virtual_gamepad)) {
     throw Error('社区配置与目录信息不一致');
   }
-  return {source, preview, entry};
+  return {kind: 'profile', source, preview, entry};
 }
 
 function ProfilePreview({profile}: {profile: Profile}) {
@@ -57,11 +66,15 @@ function ProfilePreview({profile}: {profile: Profile}) {
   </>;
 }
 
-export function ProfileShareDialog({community, onClose, onImport}: {
+export function ProfileShareDialog({community, onClose, onImport, onImportGame, games, initialGame}: {
   community?: CommunityProfile;
   onClose: () => void;
-  onImport: (source: SharedSource) => Promise<void>;
+  onImport: (source: SharedSource, game:string, gameName:string) => Promise<void>;
+  onImportGame: (code: string, name: string) => Promise<void>;
+  games:LibraryGame[]; initialGame:string;
 }) {
+  const [target,setTarget] = useState<string|null>(null);
+  const [newName,setNewName] = useState<string|null>(null);
   const [code, setCode] = useState('');
   const [lookup, setLookup] = useState<Lookup | null>(community ? {entry: community} : null);
   const [result, setResult] = useState<Result | null>(null);
@@ -70,6 +83,12 @@ export function ProfileShareDialog({community, onClose, onImport}: {
   const [operation, setOperation] = useState<'paste' | 'copy' | 'save' | null>(null);
   const [copied, setCopied] = useState(false);
   const processing = loading || !!operation;
+  const suggestedName = result?.kind === 'profile' ? result.preview.game_name ?? result.entry?.game ?? '' : '';
+  const suggestedGame = games.find(game=>game.name.toLowerCase() === suggestedName.toLowerCase());
+  const game = target ?? (initialGame || suggestedGame?.id || '');
+  const gameName = newName ?? (result?.kind === 'game' ? availableGameName(result.preview.name, games) : suggestedName);
+  const duplicateGame = result?.kind === 'game' && games.some(item => item.name.trim().toLowerCase() === gameName.trim().toLowerCase());
+  const needsName = result?.kind === 'game' || (result?.kind === 'profile' && game === newGameValue);
 
   useEffect(() => {
     if (!lookup) return;
@@ -90,11 +109,13 @@ export function ProfileShareDialog({community, onClose, onImport}: {
 
   function startLookup(value: string) {
     const trimmed = value.trim();
-    if (!trimmed.startsWith('MS1.') && !/^MS-[a-f0-9]{8}$/i.test(trimmed)) {
+    if (!trimmed.startsWith('MS1.') && !trimmed.startsWith(gameCodePrefix) && !/^MS-[a-f0-9]{8}$/i.test(trimmed)) {
       setError('请输入有效的配置码');
       return;
     }
     setLoading(true);
+    setTarget(null);
+    setNewName(null);
     setLookup({code: trimmed});
   }
 
@@ -119,10 +140,12 @@ export function ProfileShareDialog({community, onClose, onImport}: {
       } else startLookup(code);
       return;
     }
+    if ((needsName && !gameName.trim()) || duplicateGame) return;
     setOperation('save');
     setError('');
     try {
-      await onImport(result.source);
+      if (result.kind === 'game') await onImportGame(result.code, gameName);
+      else await onImport(result.source, game, gameName);
       onClose();
     } catch (error) {
       setError(String(error));
@@ -142,26 +165,44 @@ export function ProfileShareDialog({community, onClose, onImport}: {
   }
 
   const close = () => { if (operation !== 'save') onClose(); };
-  return <Dialog title={community ? '预览配置' : '输入配置码'} onClose={close} onSubmit={() => void submit()} error={error}
+  return <Dialog title={result?.kind === 'game' ? '预览整组配置' : community ? '预览配置' : '输入配置码'} onClose={close} onSubmit={() => void submit()} error={error}
     description={result ? '添加后可在本地配置中编辑，由你决定何时应用。' :
-      community ? undefined : '支持社区短码和好友分享的完整配置码。'}
+      community ? undefined : '粘贴好友分享的单份或整组配置码，也支持社区短码。'}
     actions={<>
       <button type="button" className="secondary-btn" disabled={operation === 'save'} onClick={close}>取消</button>
       {result && !community && <button type="button" className="secondary-btn" disabled={processing}
         onClick={() => { setLookup(null); setResult(null); setError(''); }}>换一个配置码</button>}
-      <button type="submit" className="primary-btn" disabled={processing || (!community && !result && !code.trim())}>
-        {result ? '添加到本地' : community ? '重试' : '预览配置'}
+      <button type="submit" className="primary-btn" disabled={processing || (!community && !result && !code.trim()) || (needsName && !gameName.trim()) || duplicateGame}>
+        {result?.kind === 'game' ? '导入整组配置' : result ? '添加到本地' : community ? '重试' : '预览配置'}
       </button>
     </>}>
     {!community && !result && <div className={styles.codeField}>
       <label htmlFor="studio-profile-code">配置码</label>
       <textarea id="studio-profile-code" value={code} maxLength={maxShareCodeLength} spellCheck={false}
-        placeholder="MS-1234ABCD" disabled={processing} onChange={event => { setCode(event.target.value); setError(''); }}/>
+        placeholder="MS1.… / MSG1.…" disabled={processing} onChange={event => { setCode(event.target.value); setError(''); }}/>
       <button type="button" className="secondary-btn" disabled={processing} onClick={() => void paste()}>粘贴并预览</button>
     </div>}
     {loading && <p role="status">正在检查配置…</p>}
-    {result && <>
+    {result?.kind === 'game' && <>
+      <label className={gameStyles.destination}>导入为新游戏
+        <input required maxLength={100} value={gameName} disabled={processing} aria-invalid={duplicateGame}
+          onChange={event => {setNewName(event.target.value); setError('');}}/>
+      </label>
+      {duplicateGame && <p role="alert">已有同名游戏</p>}
+      <div className={styles.shareBindings}>
+        <h3 className={styles.shareName}>{`包含 ${result.preview.profiles.length} 份配置`}</h3>
+        <ul className={styles.sharedGameMembers}>{result.preview.profiles.map((member, index) => <li key={index}>
+          <strong translate="no">{member.name}</strong>
+          {index === result.preview.default_profile && <span className={styles.profileLibraryActiveBadge}>默认配置</span>}
+          <small>{gamepadNames[member.output]} · <span>{`共 ${member.layers} 层`}</span></small>
+        </li>)}</ul>
+      </div>
+      {result.preview.use_game_rules && <p className="studio-note">包含游戏专用切换规则</p>}
+    </>}
+    {result?.kind === 'profile' && <>
       <h3 className={styles.shareName} translate="no">{result.preview.profile.name}</h3>
+      {result.preview.game_name && !result.entry && <p><span>分享者的游戏</span> · <strong translate="no">{result.preview.game_name}</strong></p>}
+      <GameDestination games={games} value={game} onChange={setTarget} allowNew newName={gameName} onNewName={setNewName} disabled={processing}/>
       {result.entry && <div className={styles.shareSource}>
         <p translate="no">{result.entry.game} · {result.entry.controller} · {result.entry.author}</p>
         <p translate="no">{result.entry.description}</p>
@@ -172,9 +213,9 @@ export function ProfileShareDialog({community, onClose, onImport}: {
         {copied && <p role="status">配置码已复制</p>}
       </div>}
       <ProfilePreview profile={result.preview.profile}/>
-      {result.preview.custom_filters > 0 && <p className="studio-note">
-        此配置包含自定义滤波脚本。导入后脚本为关闭状态，可在进阶设置中查看。
-      </p>}
     </>}
+    {result && result.preview.custom_filters > 0 && <p className="studio-note">
+      此配置包含自定义滤波脚本。导入后脚本为关闭状态，可在进阶设置中查看。
+    </p>}
   </Dialog>;
 }

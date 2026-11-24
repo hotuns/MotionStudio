@@ -101,6 +101,7 @@ fn piecewise_response_converts_the_mixed_rate_once_and_bypasses_legacy_deadzones
         enabled: true,
         points: vec![ResponsePoint(0., 0., 1.), ResponsePoint(0.5, 0.2, 1.),
             ResponsePoint(0.9, 1., 1.), ResponsePoint(1., 1., 1.)],
+        ..Default::default()
     });
     let mut engine = Engine::new(p.clone()).unwrap();
     axis(&mut engine, 2, 16384);
@@ -117,6 +118,68 @@ fn piecewise_response_converts_the_mixed_rate_once_and_bypasses_legacy_deadzones
     axis(&mut flick, 2, i16::MAX);
     let x = flick.advance_output(0.002, time(2).host_ns).pad.unwrap().right_x as f32 / 32767.;
     assert!((x - 0.9).abs() < 0.001, "{x}");
+}
+
+#[test]
+fn mapped_thumb_uses_the_game_inverse_when_idle_and_combines_once_when_aiming() {
+    use motion_core::bezier::CurveModel;
+    use motion_core::stick_response::RightStickCurve;
+    let mut p = profile();
+    gamepad(&mut p);
+    p.gyro.enabled = false;
+    p.gyro.stick_full_scale_dps = 360.;
+    // This cubic is exactly y = x².
+    p.gyro.right_stick_curve = Some(RightStickCurve {
+        enabled: true,
+        linearize_stick: true,
+        model: CurveModel::Bezier,
+        bezier_points: vec![[0., 0.], [1./3., 0.], [2./3., 1./3.], [1., 1.]],
+        ..Default::default()
+    });
+    let saved = parse_profile(&toml::to_string(&p).unwrap()).unwrap();
+    let mut e = Engine::new(saved).unwrap();
+    axis(&mut e, 2, 8192);
+    let right = |engine: &Engine| engine.frame.pad.unwrap().right_x as f32 / 32767.;
+    assert!((right(&e) - 0.5).abs() < 0.001);
+    p.gyro.output = GyroOutput::Mouse;
+    e.apply_layer(p.clone()).unwrap();
+    assert!((right(&e) - 0.5).abs() < 0.001);
+    p.gyro.enabled = true;
+    p.gyro.output = GyroOutput::RightStick;
+    e.apply_layer(p.clone()).unwrap();
+    for ms in [10, 20, 30] {
+        gyro(&mut e, ms, 0., 0., 90.);
+        e.advance_output(0.01, time(ms).host_ns);
+    }
+    // 25% from the thumb + 25% from the gyro gives sqrt(0.5) travel.
+    assert!((right(&e) - 0.5_f32.sqrt()).abs() < 0.001);
+    p.gyro.enabled = false;
+    p.gyro.right_stick_curve.as_mut().unwrap().linearize_stick = false;
+    e.apply_layer(p).unwrap();
+    assert!((right(&e) - 0.25).abs() < 0.001);
+}
+
+#[test]
+fn bezier_gain_on_timestamped_angular_aim_precedes_the_post_filter_and_base_sensitivity() {
+    for with_script in [false,true] {
+        let mut p = profile();
+        p.gyro.sensitivity = 2.;
+        p.gyro.acceleration.curve = Curve::Bezier;
+        p.gyro.acceleration.bezier_points = vec![[0.,1.],[100./3.,1.],[200./3.,1.+2./3.],[100.,3.]];
+        if with_script {
+            p.gyro.motion.custom_filters.push(FilterConfig {
+                id: "post".into(), name: "post".into(), stage: Stage::AfterBuiltin,
+                source: "fn process(s, p) { [s.x + 10.0, s.y, 0.0] }".into(),
+                ..Default::default()
+            });
+        }
+        let mut e = Engine::new(p).unwrap();
+        gyro(&mut e,10,0.,0.,50.);
+        gyro(&mut e,20,0.,0.,50.);
+        // 50 °/s at 1.5× gain, then the script, then 2× base sensitivity.
+        let expected = if with_script {17.} else {15.};
+        assert!((e.frame.mouse_delta[0] - expected).abs() < 0.001);
+    }
 }
 
 #[test]

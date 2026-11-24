@@ -9,8 +9,25 @@ use crate::{
 };
 use flexinput_engine::eval::{jsm_aim as jsm, jsm_motion_curves};
 use glam::{Vec2, Vec3};
+use jsm::StickResponse;
 use motion_filters::{FilterChain, Stage};
 use std::collections::HashSet;
+
+/// A linearized thumb already expresses a target rate. The mixer's return
+/// conversion still uses the game's actual response for the combined rate.
+struct StickCarrier<'a>(&'a RightStickCurve);
+impl StickResponse for StickCarrier<'_> {
+    fn speed_at(&self, travel: f32) -> f32 {
+        if self.0.linearize_stick {
+            travel
+        } else {
+            self.0.speed_at(travel)
+        }
+    }
+    fn travel_at(&self, speed: f32) -> f32 {
+        self.0.travel_at(speed)
+    }
+}
 
 #[derive(PartialEq)]
 struct Settings {
@@ -24,6 +41,7 @@ struct Settings {
     stick_scale: f32,
     auto_calibrate: bool,
     fast_multiplier: f32,
+    bezier_gain: Option<Vec<[f32; 2]>>,
 }
 
 fn axis_mask(bits: u8) -> jsm::AxisMask {
@@ -167,11 +185,13 @@ impl Settings {
             curves,
             analog,
             pad,
-            right_stick_curve: g.right_stick_curve.as_ref().filter(|curve| curve.enabled).cloned(),
+            right_stick_curve: RightStickCurve::configured(g),
             gesture_mode,
             stick_scale: stick_speed / pad.calibration,
             auto_calibrate: response.auto_calibrate_gyro,
             fast_multiplier: fast,
+            bezier_gain: (g.acceleration.curve == crate::motion_config::Curve::Bezier)
+                .then(|| g.acceleration.bezier_points.clone()),
         }
     }
 }
@@ -215,6 +235,9 @@ impl JsmAim {
             || next.aim.mouse_y_from != self.settings.aim.mouse_y_from
         {
             self.clear_rate();
+        }
+        if next.right_stick_curve != self.settings.right_stick_curve {
+            self.right = None;
         }
         self.settings = next;
     }
@@ -305,17 +328,22 @@ impl JsmAim {
             self.actions.insert(jsm::GyroAction::TrackballY);
         }
         self.has_sample = active;
+        let gain = s.bezier_gain.as_deref()
+            .map(|path| move |speed| crate::bezier::sample(path, speed, 0));
+        let gain = gain.as_ref().map(|f| f as &dyn Fn(f32) -> f32);
         let Some((chain, time)) = filters.filter(|(chain, _)| active && chain.has_active()) else {
-            return self.aim.sample_motion(
+            let projected = jsm::Aim::project_motion(&s.aim, &s.motion, &s.curves, self.gravity, gyro);
+            return self.aim.sample_projected_motion_with_gain(
                 &s.aim,
                 &s.pad,
-                &s.motion,
                 &s.curves,
-                self.gravity,
+                projected,
                 dt,
                 gyro,
                 &self.actions,
                 !active,
+                gain,
+                std::convert::identity,
             );
         };
 
@@ -346,7 +374,7 @@ impl JsmAim {
             aim.min_sens = (1., 1.);
             aim.max_sens = (s.fast_multiplier, s.fast_multiplier);
         }
-        self.aim.sample_projected_motion(
+        self.aim.sample_projected_motion_with_gain(
             &aim,
             &s.pad,
             &s.curves,
@@ -355,6 +383,7 @@ impl JsmAim {
             gyro,
             &self.actions,
             !active,
+            gain,
             |rate| {
                 if after {
                     filter_screen_rate(chain, Stage::AfterBuiltin, sample, rate)
@@ -364,6 +393,18 @@ impl JsmAim {
                 }
             },
         )
+    }
+
+    pub fn mapped_right(&self, stick: Vec2) -> Vec2 {
+        let Some(curve) = self.settings.right_stick_curve.as_ref().filter(|c| c.linearize_stick) else {
+            return stick;
+        };
+        let length = stick.length();
+        if length == 0. {
+            Vec2::ZERO
+        } else {
+            stick * (curve.travel_at(length.min(1.)) / length)
+        }
     }
 
     pub fn output(&mut self, dt: f32, gesture: Option<Vec2>, mapped_right: Vec2) -> Vec2 {
@@ -417,6 +458,7 @@ impl JsmAim {
             &|_| false,
             jsm::JsmGyroClock::Unchanged,
         );
+        let carrier = s.right_stick_curve.as_ref().map(StickCarrier);
         self.right = self
             .pad
             .tick_with_response(
@@ -427,7 +469,7 @@ impl JsmAim {
                 aimed.gyro_dps,
                 aimed.flick_dps,
                 None,
-                [None, s.right_stick_curve.as_ref().map(|curve| curve as &dyn jsm::StickResponse)],
+                [None, carrier.as_ref().map(|curve| curve as &dyn StickResponse)],
             )
             .sticks[1];
         aimed.mouse

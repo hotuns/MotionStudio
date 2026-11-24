@@ -4,6 +4,12 @@ The product is a Studio-style configuration and interaction layer over FlexInput
 
 For the complete upstream crate inventory, the current 0.8.0 integration and remaining optional scope, see [FlexInput 模块与接入范围](flexinput-module-plan.md).
 
+## Game, profile and layer selection
+
+The game library groups Studio profile IDs in local settings. On manual activation or a game-specific shortcut, the host loads the chosen profile through its existing apply path. Its layers keep using the current Studio layer adapter and the press processing in FlexInput `engine/src/eval/activation.rs` at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. Game membership, shortcuts and cursor target selection are Studio workspace preferences. Selecting a game in the library only changes which profiles appear.
+
+An offline game share code (`MSG1.`) groups the same Studio profile TOMLs as individual `MS1.` codes. Studio encodes the default and game-specific switching targets by member position and assigns new local profile IDs on import. Mapping and motion continue through the adapters described above.
+
 ## Virtual DualSense sensor passthrough
 
 Studio uses FlexInput commit `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`. The virtual/USB-IP `CompositeDevice`, bundled `dualsense-composite.json`, HIDMaestro `PinState` and `encode_report_into`, and USB/IP feature report 0x05 provide the device, six-axis layout, Sony axis conversion and calibration response. The virtual device exposes a wired DualSense through the existing usbip-win2 connection.
@@ -498,6 +504,12 @@ Studio extends its output DTO with a separate calibrated six-axis sample, transl
 The direct report uses Studio's existing gyro activation and pause bindings. Optional profile settings under `gyro.ds4_imu_filter` apply the existing Rhai `RawGyro` stage, FlexInput's calibrated radial `gyro_dz_ease` gate in `crates/engine/src/eval/device_cal.rs` at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`, and the Studio aiming EMA coefficient over the three sensor axes. This adapter keeps physical angular velocity in degrees per second and leaves the calibrated acceleration and original sample timestamp intact. The mouse and stick aim projection, sensitivity, and two-dimensional script stages are outside the DS4 filter path. Filter history resets on activation transitions, stale samples, and changes to the direct filter settings. IPC protocol 23 carries the optional profile field. Existing profiles default to unfiltered passthrough.
 
 ## Known game right-stick response curves
+
+The same game response can linearize a physical stick routed to the virtual right stick. In that mode the physical deflection requests a linear fraction of full camera rate. The existing `Pad::tick_with_response` adds gyro and Flick, then performs one inverse lookup. Ordinary mapped reports use that same inverse when the native mixer is idle or aimed at the mouse. This option defaults off.
+
+The Studio editor stores cubic handles separately from the existing point table and built-in settings. Straight segments convert exactly. On first use, a non-linear acceleration preset seeds editable anchors from the existing native sensitivity preview, and a game segment with an exponent seeds its handles from interior samples. Adding an anchor to an existing cubic uses de Casteljau subdivision. Stick mouse builds a bounded, adaptive point table for FlexInput's `module.vec_response_curve`, with at most 256 points covering all the saved anchors.
+
+FlexInput `eval/curves.rs::sample_curve` at `c69f53ad3bca4ed34ef5f2d63509addaa7c767be` supports linear segments with an optional quadratic bias. Studio's `bezier.rs` supplies two independently positioned cubic handles per segment and a bounded forward/inverse solver. Game response requires monotone speed. Acceleration, motion actions and stick mouse use forward sampling and can decrease. The stick mouse adapter builds the native vector-response point table when the profile is configured. The vendor change in `crates/engine/src/eval/modules/jsm/aim.rs` adds an optional gain callback at the existing sensitivity calculation. It receives post-filter, post-angle-snap speed on each timestamped sample. Existing native callers use their original gain. IPC protocol 30 carries these opt-in profile settings.
 
 Motion Studio uses FlexInput `c69f53ad3bca4ed34ef5f2d63509addaa7c767be`'s `crates/engine/src/eval/modules/jsm/pad.rs` to combine managed stick travel, gyro and Flick in camera degrees per second. The upstream mixer models the game with a single exponent and inner/outer deadzones. Its headless `Pad::tick_with_response` adapter accepts an optional forward/inverse radial response for each virtual stick. The ordinary `Pad::tick` entry retains the upstream exponent, low-speed threshold and idle parking.
 

@@ -1,4 +1,6 @@
-import { chordParts, targetFrom, targetValue, type Entry, type Settings, type Shortcut, type ShortcutRule, type Status, type Target } from '../types';
+import { chordParts, targetFrom, targetValue, type Entry, type GameEdit, type Settings, type Shortcut, type ShortcutRule, type Status, type Target } from '../types';
+import {gameOf} from '../game-library';
+import gameStyles from './GameGroups.module.css';
 import {useCallback,useEffect,useRef,useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {t} from '../i18n';
@@ -11,7 +13,7 @@ import {Dialog, Toggle} from './Controls';
 
 const keyChoices = keyboardChoices(shortcutKeys);
 
-export function SwitchSettings({ entries, settings, busy, onChange, onSaveRules, status, onPreparePad, onPadCapture }: {
+type SwitchProps = {
   entries: Entry[];
   settings: Settings;
   busy: boolean;
@@ -20,7 +22,49 @@ export function SwitchSettings({ entries, settings, busy, onChange, onSaveRules,
   status?:Status;
   onPreparePad:()=>Promise<Status>;
   onPadCapture:(active:boolean)=>Promise<void>;
+  gameOnly?:boolean;
+};
+
+export function ScopedSwitchSettings({gameId, onEdit, ...props}: SwitchProps & {
+  gameId:string; onEdit:(edit:GameEdit)=>Promise<void>;
 }) {
+  const [scope,setScope] = useState(gameId);
+  const [error,setError] = useState('');
+  const {settings, busy, entries} = props;
+  const games = settings.games ?? [];
+  const game = games.find(item=>item.id === scope);
+  const local = game?.use_game_rules ? game.switching : null;
+  const running = props.status && !props.status.ui_navigation && props.status.state !== 'idle' && gameOf(games,props.status.profile_id ?? undefined);
+  const choose = (id:string) => {setScope(id);setError('');};
+  return <>
+    {games.length > 0 && <section className={styles.panel}>
+      <div className={styles.heading}><div><h4>切换规则范围</h4>
+        <p>运行时按正在使用的配置所属游戏选择规则。</p></div>
+        {running && <span><span>引擎使用中</span> · <strong translate="no">{running.name}</strong></span>}
+      </div>
+      <div className={gameStyles.actions}>
+        <label className={gameStyles.destination}>编辑规则
+          <select value={game?.id ?? ''} disabled={busy} onChange={e=>choose(e.target.value)}>
+            <option value="">全局规则</option>
+            {games.map(g=><option key={g.id} value={g.id} translate="no">{g.name}</option>)}
+          </select>
+        </label>
+        {game && <label className={gameStyles.check}><input type="checkbox" checked={game.use_game_rules} disabled={busy}
+          onChange={e=>void onEdit({kind:'enable_rules',id:game.id,enabled:e.target.checked}).catch(e=>setError(String(e)))}/>使用游戏专用规则</label>}
+      </div>
+      {game && !local && <p className={styles.hint}>此游戏使用全局规则。 <button type="button" className="secondary-btn" onClick={()=>choose('')}>编辑全局规则</button></p>}
+      {local && <p className={styles.hint}>快捷键和光标切换都使用此游戏的专用规则。关闭后可恢复全局规则。</p>}
+      {error && <p role="alert" className={styles.error}>{error}</p>}
+    </section>}
+    {!game ? <SwitchSettings key="global" {...props}/> : local && <SwitchSettings key={game.id} {...props} gameOnly
+      settings={{...settings,...local}} entries={entries.filter(entry=>game.profile_ids.includes(entry.id))}
+      onChange={patch=>void onEdit({kind:'set_rules',id:game.id,switching:{...local,...patch,shortcut_rules:local.shortcut_rules}})
+        .catch(e=>setError(String(e)))}
+      onSaveRules={shortcut_rules=>onEdit({kind:'set_rules',id:game.id,switching:{...local,shortcut_rules}})}/>}
+  </>;
+}
+
+function SwitchSettings({ entries, settings, busy, onChange, onSaveRules, status, onPreparePad, onPadCapture, gameOnly }: SwitchProps) {
   const [editing,setEditing]=useState<{index:number|null}|null>(null);
   const [removing,setRemoving]=useState(false);
   const [ruleError,setRuleError]=useState<string|null>(null);
@@ -45,7 +89,11 @@ export function SwitchSettings({ entries, settings, busy, onChange, onSaveRules,
     catch (error) { setRuleError(String(error)); }
     finally { setRemoving(false); }
   };
-  const profiles = {label:'游戏配置', options:entries.map(entry => ({value:entry.id, label:entry.profile.name, localize:false as const}))};
+  const profileLabel = (entry:Entry) => {
+    const owner = !gameOnly && gameOf(settings.games ?? [],entry.id);
+    return owner ? owner.name+' / '+entry.profile.name : entry.profile.name;
+  };
+  const profiles = {label:'游戏配置', options:entries.map(entry => ({value:entry.id, label:profileLabel(entry), localize:false as const}))};
   const targetOptions = (label: string, value: Target, onSelect: (target: Target) => void) => (
     <div className={styles.field}>{label}
       <OptionPicker label={label} value={targetValue(value)} disabled={locked}
@@ -90,7 +138,7 @@ export function SwitchSettings({ entries, settings, busy, onChange, onSaveRules,
               chordParts(rule.trigger.input).map(input => t(padInputLabel(input,split))).join(' + ')}</kbd>
           </div>
           <div className={styles.ruleTarget}>
-            <strong translate="no">{entries.find(entry => entry.id === rule.target)?.profile.name ?? rule.target}</strong>
+            <strong translate="no">{profiles.options.find(entry => entry.value === rule.target)?.label ?? rule.target}</strong>
             <span>{rule.return_on_repeat !== false ? '再次触发时返回' : '只切换到目标配置'}</span>
           </div>
           <div className={styles.shortcutActions}>
@@ -112,7 +160,7 @@ export function SwitchSettings({ entries, settings, busy, onChange, onSaveRules,
         await onSaveRules(next);
         setEditing(null);
       }}/>}
-    <section className={styles.panel}>
+    {!gameOnly && <section className={styles.panel}>
       <div className={styles.heading}>
         <div><h4>游戏内配置提示</h4><p>切换成功后，在游戏所在屏幕的右下角显示配置名称。</p></div>
         <label className={styles.toggle}><input type="checkbox" aria-label="显示游戏内配置提示"
@@ -130,7 +178,7 @@ export function SwitchSettings({ entries, settings, busy, onChange, onSaveRules,
         <strong translate="no">{entries.find(entry=>entry.id===settings.selected_profile)?.profile.name??'体感瞄准'}</strong>
       </div>
       <p className={styles.hint}>提示会自动消失，不抢焦点、不接收鼠标点击。连续切换会显示最新配置。支持窗口化和无边框全屏；独占全屏可能无法显示，可尝试改为无边框全屏。</p>
-    </section>
+    </section>}
   </div>;
 }
 

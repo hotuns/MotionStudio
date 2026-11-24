@@ -33,6 +33,7 @@ export const settingsCatalog: SettingTarget[] = [
     ['fast_multiplier','快速转动倍率'], ['start_dps','加速起点'], ['full_dps','达到最高倍率'], ['curve','加速度曲线'],
     ['natural_half','达到半程倍率的速度'], ['power_reference','参考转速'], ['power_exponent','幂指数'], ['sigmoid_mid','过渡中点'],
     ['sigmoid_width','过渡宽度'], ['jump_width','跳变过渡宽度'], ['points','自定义控制点'],
+    ['bezier_points','贝塞尔加速曲线','Bézier Bezier'],
   ]),
   ...group('motion','motion-smoothing','gyro.',[['smoothing_ms','平滑时间']]),
   ...group('motion','motion-smoothing','gyro.jsm_response.',[
@@ -50,11 +51,14 @@ export const settingsCatalog: SettingTarget[] = [
     ['smoothing_ms','直通平滑时间'], ['noise_gate','直通噪声抑制倍率'], ['use_custom_filters','直通应用原始角速度脚本','Rhai'],
   ]),
   ...group('motion','motion-calibration','gyro.',[
-    ['right_stick_curve.enabled','游戏摇杆响应','分段曲线 线性补偿'], ['right_stick_curve.points','游戏曲线点'],
-    ['jsm_response.right_undeadzone_inner','右摇杆内死区补偿'], ['jsm_response.right_undeadzone_outer','右摇杆外死区补偿'], ['jsm_response.right_unpower','右摇杆响应指数'],
     ['output','体感输出','DS4 DualSense PS5 传感器直通 ViGEm USB/IP IMU'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),
   ...group('sticks','stick-input','input.',[['deadzone_left','左摇杆输入死区'], ['deadzone_right','右摇杆输入死区']]),
+  ...group('sticks','stick-game-response','gyro.',[
+    ['right_stick_curve.linearize_stick','矫正实体摇杆输出'], ['right_stick_curve.enabled','游戏摇杆响应','分段曲线 线性补偿'],
+    ['right_stick_curve.points','游戏曲线点'], ['right_stick_curve.bezier_points','游戏贝塞尔曲线','Bézier Bezier'],
+    ['jsm_response.right_undeadzone_inner','右摇杆内死区补偿'], ['jsm_response.right_undeadzone_outer','右摇杆外死区补偿'], ['jsm_response.right_unpower','右摇杆响应指数'],
+  ]),
   ...group('sticks','stick-directions','input.',[['lstick_directions','左摇杆方向判定'], ['lstick_overlap_degrees','左摇杆斜向重叠角度'], ['rstick_directions','右摇杆方向判定'], ['rstick_overlap_degrees','右摇杆斜向重叠角度']]),
   ...group('sticks','stick-calibration','input.',[['lstick_center','左摇杆中心偏移'], ['rstick_center','右摇杆中心偏移'], ['lstick_radial','左摇杆圆周倍率'], ['rstick_radial','右摇杆圆周倍率']]),
   ...group('sticks','stick-zones','stick_zones.',[['left_outer','左摇杆外圈阈值'], ['right_outer','右摇杆外圈阈值'], ['hysteresis','区域切换回差']]),

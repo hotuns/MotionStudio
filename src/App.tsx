@@ -21,7 +21,10 @@ import {componentPlan,type InstallableComponent} from './component-setup';
 import {ControllerOverlaySettings} from './studio/ControllerOverlaySettings';
 import { SoftwareUpdate } from './studio/SoftwareUpdate';
 import { useStudioUpdate } from './studio/software-update';
-import { SwitchSettings } from './studio/SwitchSettings';
+import { ScopedSwitchSettings } from './studio/SwitchSettings';
+import { GameDestination } from './studio/GameGroups';
+import { allGamesValue, gameOf, importDestination, newGameValue, noGames } from './game-library';
+import type {GameEdit} from './types';
 import { Dialog } from './studio/Controls';
 import {ActionEditor} from './studio/ActionEditor';
 import {modifierOutputs} from './keyboard';
@@ -105,6 +108,10 @@ export default function App() {
   const [devicePath, setDevicePath] = useState('');
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState('');
+  const [targetGame,setTargetGame] = useState('');
+  const [newGameName,setNewGameName] = useState('');
+  const [libraryGame,setLibraryGame] = useState<string|null>(null);
+  const [tomlImport,setTomlImport] = useState<{content:string;name:string}|null>(null);
   const [template, setTemplate] = useState<Template>('blank');
   const [batch, setBatch] = useState<BatchScope | null>(null);
   const [batchProgress,setBatchProgress] = useState<BatchProgress|null>(null);
@@ -122,10 +129,11 @@ export default function App() {
   const [failedApplyId, setFailedApplyId] = useState<string | null>(null);
   const [importingJsm,setImportingJsm]=useState(false);
   const [libraryView, setLibraryView] = useState<'local' | 'community'>('local');
-  const [sharedImport, setSharedImport] = useState<{community?: CommunityProfile} | null>(null);
+  const [sharedImport, setSharedImport] = useState<{community?: CommunityProfile; gameId:string} | null>(null);
   const [gamepadPreference,setGamepadPreference]=useState(()=>localStorage.getItem('motion-studio-gamepad-ui')!=='off');
   const [windowFocused,setWindowFocused]=useState(document.hasFocus());
   const autoNavigation=useRef(false),gestureSerial=useRef(0),snapshotEpoch=useRef(0);
+  const workspaceEpoch=useRef(0);
   const previousInput = useRef(0);
   const padPreview=useRef<string[]>([]);
   const captureGeneration = useRef(0);
@@ -155,6 +163,11 @@ export default function App() {
     [workspace?.settings,draft?.profile.virtual_gamepad,components]);
   const studioUpdate = useStudioUpdate(native, workspace?.settings);
   const entries = workspace?.profiles ?? [];
+  const games = workspace?.settings.games ?? noGames;
+  const editingGameId = gameOf(games,draft?.id)?.id ?? '';
+  const browseId = libraryGame !== null && (libraryGame === '' || libraryGame === allGamesValue || games.some(game=>game.id === libraryGame)) ? libraryGame : editingGameId;
+  const libraryDestination = browseId === allGamesValue ? editingGameId : browseId;
+  useEffect(()=>setLibraryGame(null),[draft?.id]);
   const saved = entries.find(entry => entry.id === draft?.id);
   const savedRef = useRef(saved);
   savedRef.current = saved;
@@ -191,6 +204,7 @@ export default function App() {
 
   const notify = useCallback((text: string, error = false) => setNotice({ text, error }), []);
   const recordSave = useCallback((result:SaveResult) => {
+    workspaceEpoch.current++;
     setWorkspace(data => data && { ...data, profiles: data.profiles.map(entry => entry.id === result.entry.id ? result.entry : entry) });
     setFailedApplyId(current => result.warning ? result.entry.id : current === result.entry.id ? null : current);
     notify(result.warning ? '配置已保存，应用失败：' + result.warning : result.applied ? '配置已保存并应用' : '配置已保存', !!result.warning);
@@ -198,6 +212,7 @@ export default function App() {
   const refresh = useCallback(async (selectId?: string) => {
     const data = await invoke<Workspace>('workspace');
     if(data.settings.language)setLanguage(data.settings.language);
+    workspaceEpoch.current++;
     setWorkspace(data);
     setSnapshot(data.snapshot);
     if (selectId || !draftRef.current) {
@@ -324,8 +339,9 @@ export default function App() {
   useEffect(() => {
     if (!native || !runningProfile || !revision) return;
     let disposed = false;
+    const epoch = workspaceEpoch.current;
     void invoke<Workspace>('workspace').then(data => {
-      if (disposed) return;
+      if (disposed || epoch !== workspaceEpoch.current) return;
       const current = draftRef.current;
       const entry = data.profiles.find(item => item.id === current?.id);
       setWorkspace(data);
@@ -499,10 +515,10 @@ export default function App() {
     setDevicePath(path);
     if(status?.ui_navigation&&path&&path!==devicePath)void run(async()=>{await invoke('set_ui_navigation',{active:true,devicePath:path});setSnapshot(await invoke<Snapshot>('snapshot'));});
   }
-  function openJsmImport() {
+  function openJsmImport(initialGame = editingGameId) {
     if(busy||calibrating||status?.motion?.measuring)return;
     if(dirty){notify('请先保存或撤销当前配置的修改。',true);return;}
-    cancelCapture();setImportingJsm(true);
+    cancelCapture();setTargetGame(initialGame);setImportingJsm(true);
   }
   const selectProfile = (entry: Entry) => {
     if (entry.id === draft?.id || measuringRef.current) return;
@@ -524,11 +540,13 @@ export default function App() {
   async function applyProfile() {
     if(measuringRef.current)throw new Error('请先结束或取消转角测量，再应用配置');
     if (!draft || !canApply) return;
+    let alreadyApplied = false;
     if (dirty) {
       const result = await saveDraft();
-      if (result.applied || result.warning) return;
+      if (result.warning) return;
+      alreadyApplied = result.applied;
     }
-    await invoke('activate_profile', { id: draft.id });
+    await invoke('activate_profile', { id: draft.id, alreadyApplied });
     setFailedApplyId(null);
     await refresh();
     notify(active ? '已应用当前配置' : '已设为下次启用输出的配置');
@@ -540,7 +558,7 @@ export default function App() {
     if (epoch === snapshotEpoch.current) setSnapshot(current);
   }
 
-  async function startMapping(emit: boolean) {
+  async function startMapping(emit: boolean, remember = true) {
     if (!draft) return false;
     if (emit) {
       let current=components;
@@ -562,7 +580,9 @@ export default function App() {
       throw new Error('当前接口没有体感，请在「设备与输入」选择支持体感的接口，或关闭配置的体感。');
     }
     if (emit && dirty) await saveDraft();
-    await invoke('start_mapping', { id: draft.id, devicePath, emit });
+    const settings = await invoke<Settings>('start_mapping', { id: draft.id, devicePath, emit, remember });
+    workspaceEpoch.current++;
+    if (settings) setWorkspace(current=>current && {...current,settings});
     await syncEngineSnapshot();
     return true;
   }
@@ -591,7 +611,7 @@ export default function App() {
       try {
         await invoke('set_shortcut_capture', {active:true});
         if (generation !== captureGeneration.current) return;
-        if (target.kind === 'pad' && !active && !status?.ui_navigation && !(await startMapping(false))) return;
+        if (target.kind === 'pad' && !active && !status?.ui_navigation && !(await startMapping(false,false))) return;
         if (generation !== captureGeneration.current) return;
         leased = true;
         await bindingCapture(true);
@@ -624,13 +644,15 @@ export default function App() {
     });
   }
 
-  function openCreate(initial: Template = 'blank') {
+  function openCreate(initial: Template = 'blank', game = editingGameId || newGameValue) {
     if (!workspace || busy || calibrating || measuringRef.current) return;
     if (dirty) { notify('请先保存或撤销当前配置的修改。', true); return; }
     cancelCapture();
     setNotice(null);
     setTemplate(initial);
-    setNewName(status?.ui_navigation?'新游戏配置 '+(entries.length+1):'');
+    setTargetGame(game);
+    setNewGameName('');
+    setNewName(game === newGameValue ? t('默认配置') : status?.ui_navigation ? t('新游戏配置 '+(entries.length+1)) : '');
     setCreating(true);
   }
 
@@ -762,7 +784,25 @@ export default function App() {
   async function changeSettings(patch: Partial<Settings>) {
     if (!workspace) return;
     const settings = await invoke<Settings>('save_settings', { settings: { ...workspace.settings, ...patch } });
+    workspaceEpoch.current++;
     setWorkspace(current => current && { ...current, settings });
+  }
+
+  function editGame(edit: GameEdit) {
+    return run(async()=>{
+      const settings = await invoke<Settings>('edit_game_library',{edit});
+      workspaceEpoch.current++;
+      setWorkspace(current=>current && {...current,settings});
+      if (edit.kind === 'move') setLibraryGame(gameOf(settings.games ?? noGames,edit.profile_ids[0])?.id ?? '');
+    },undefined,true);
+  }
+
+  function duplicateProfile(source:Entry, name:string) {
+    return run(async()=>{
+      const changed = dirtyRef.current && draftRef.current?.id === source.id;
+      const copy = await invoke<Entry>('duplicate_profile',{id:source.id,name,draft:changed ? source.profile : null});
+      await refresh(dirtyRef.current ? undefined : copy.id);
+    },'配置已创建',true);
   }
 
   async function exportProfile(entry: Entry) {
@@ -779,17 +819,31 @@ export default function App() {
     void run(async () => {
       const file = await pickImportFile('toml');
       if (!file) return;
-      const entry = await invoke<Entry>('import_profile', { content: file.text });
-      await refresh(entry.id);
-      notify('已导入为一份新配置');
+      const preview = await invoke<{name:string;game_name:string|null}>('preview_profile_import',{content:file.text});
+      const suggestion = games.find(game=>preview.game_name?.toLowerCase() === game.name.toLowerCase());
+      setTargetGame(libraryDestination || suggestion?.id || '');
+      setNewGameName(preview.game_name ?? '');
+      setTomlImport({content:file.text,name:preview.name});
     });
   }
-  async function importSharedProfile(source: SharedSource) {
-    const entry = await invoke<Entry>('import_shared_profile', {source});
-    setWorkspace(current => current && {...current, profiles: [...current.profiles, entry]});
-    if (!dirtyRef.current && !measuringRef.current) setDraft(structuredClone(entry));
+  async function importSharedProfile(source: SharedSource, game:string, gameName:string) {
+    const entry = await invoke<Entry>('import_shared_profile', {source,...importDestination(game,gameName)});
+    await refresh(!dirtyRef.current && !measuringRef.current ? entry.id : undefined);
     setLibraryView('local');
     notify('已添加到本地配置');
+  }
+
+  async function importSharedGame(code: string, name: string) {
+    const id = await invoke<string>('import_shared_game', {code, name});
+    try {
+      await refresh();
+    } catch (error) {
+      notify(`整组配置已导入，刷新配置库失败：${String(error)}`, true);
+      return;
+    }
+    setLibraryView('local');
+    setLibraryGame(id);
+    notify('已添加整组配置');
   }
 
   async function exportDiagnostics() {
@@ -903,11 +957,11 @@ export default function App() {
       controllerNavigation={<GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||!!status?.motion?.measuring}
         canSave={canSave} canPlay={canObserve&&!locked&&!needsBindings}
         onSave={()=>{if(dirty&&!locked)void run(saveDraft);}} onPlay={()=>void run(()=>startMapping(true))} onDisable={disableGamepad}/>}
-      profiles={profileOptions}
+      profiles={profileOptions} games={games}
       profileId={draft?.id ?? ''} onSelectProfile={id => { const entry = entries.find(item => item.id === id); if (entry) selectProfile(entry); }}
-      onChooseCommunity={community => setSharedImport({community})}
-      onNewProfile={() => openCreate()} onOpenFolder={() => openLocation('profiles')} onHelp={() => setHelp(true)}
-      onImportJsm={openJsmImport} onGamepad={()=>status?.ui_navigation?disableGamepad():enableGamepad()}
+      onChooseCommunity={(community,gameId) => setSharedImport({community,gameId})}
+      onNewProfile={gameId => openCreate('blank',gameId === '' && !games.length ? newGameValue : gameId)} onOpenFolder={() => openLocation('profiles')} onHelp={() => setHelp(true)}
+      onImportJsm={()=>openJsmImport()} onGamepad={()=>status?.ui_navigation?disableGamepad():enableGamepad()}
       gamepadOn={!!status?.ui_navigation} gamepadAvailable={!!devicePath&&!!snapshot?.engine_ready}
       outputOn={!!status?.emitting} waiting={waiting} preparing={status?.state==='preparing_output'}
       outputDisabled={!snapshot?.engine_ready || (!draft && !status?.emitting && !waiting)}
@@ -951,7 +1005,7 @@ export default function App() {
             gamepadRecording={gamepadRecording} canRecordGamepad={!!snapshot?.engine_ready && !waiting && !status?.motion?.measuring && !status?.binding_capture}
             onRecordGamepad={(wholeStick,onGamepadInput,outerRing)=>beginCapture({kind:'pad',index:null,wholeStick,onGamepadInput,outerRing})}
             onUpdate={update} onEdit={openEditor} onBatch={openBatch} onTab={tab=>navigate('games',tab)}
-            onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={openJsmImport}
+            onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={()=>openJsmImport()}
             motion={<MotionSettings profile={profile} profileId={draft.id} update={update} split={splitTouchpad}
               missingImu={!!device&&(!device.gyro||!device.accelerometer)}
               deviceNoise={workspace.settings.motion_calibrations[devicePath]?.gyro_noise_dps}
@@ -966,7 +1020,7 @@ export default function App() {
         : <section className="app-card"><h2>创建你的第一份游戏配置</h2>
             <p className="studio-muted">选择合适的模板后，就可以按游戏动作配置手柄。</p>
             <div className="studio-actions"><button type="button" className="primary-btn" onClick={() => openCreate('shooter')}>新建游戏配置</button>
-            <button type="button" className="secondary-btn" onClick={openJsmImport}>导入文本配置</button>
+            <button type="button" className="secondary-btn" onClick={()=>openJsmImport()}>导入文本配置</button>
             <button type="button" className="secondary-btn" onClick={() => navigate('profiles')}>配置库</button></div>
           </section>)}
       {page === 'controllerStatus' && <Suspense fallback={<p className="studio-muted">正在载入设备状态…</p>}>
@@ -982,24 +1036,31 @@ export default function App() {
         onStop={stop} onScan={() => void run(() => invoke('engine_action', { action: 'scan' }))} onSettings={() => navigate('settings')} />
       </Suspense>}
       {page === 'profiles' && workspace && <ProfileLibrary entries={entries} selected={draft} activeId={active ? runningProfile : null}
+        games={games} browse={browseId} onBrowse={setLibraryGame} onEdit={editGame} onDuplicate={duplicateProfile}
+        onNewGame={()=>openCreate('blank',newGameValue)}
         blocked={locked} dirty={dirty} view={libraryView} onView={setLibraryView}
-        onChooseCommunity={community => setSharedImport({community})} onImportCode={() => setSharedImport({})}
+        onChooseCommunity={community => setSharedImport({community,gameId:libraryDestination})} onImportCode={() => setSharedImport({gameId:libraryDestination})}
         onContribute={() => openLocation('community')}
         onCopyCode={entry => void run(async()=>{
           if (hasUnboundActions(entry.profile)) throw new Error('请先给待绑定的动作设置手柄输入。');
-          await invoke('copy_profile_code', {profile: entry.profile});
+          await invoke('copy_profile_code', {profile: entry.profile,gameName:gameOf(games,entry.id)?.name ?? null});
         }, '配置码已复制')}
+        onCopyGame={game => void run(async () => {
+          const edited = dirty && draft && game.profile_ids.includes(draft.id) ? draft : null;
+          if (edited && hasUnboundActions(edited.profile)) throw new Error('请先给待绑定的动作设置手柄输入。');
+          await invoke('copy_game_code', {gameId: game.id, draft: edited});
+        }, '整组配置码已复制')}
         onSelect={selectProfile} onRename={name => update(profile => { profile.name = name; })}
-        onCreate={() => openCreate()} onImport={importTomlProfile}
-        onImportJsm={openJsmImport} onExport={entry => void run(() => exportProfile(entry))} onDelete={entry => { setNotice(null); setDeleting(entry); }}
+        onCreate={() => openCreate('blank',games.length ? libraryDestination : newGameValue)} onImport={importTomlProfile}
+        onImportJsm={()=>openJsmImport(libraryDestination)} onExport={entry => void run(() => exportProfile(entry))} onDelete={entry => { setNotice(null); setDeleting(entry); }}
         onRestore={entry => void run(async () => { await invoke('restore_backup', { id: entry.id }); await refresh(entry.id); }, '已恢复上一份有效配置')}
         onSwitching={() => navigate('switching')} onFolder={() => openLocation('profiles')} />}
-      {page === 'switching' && workspace && <SwitchSettings entries={entries} settings={workspace.settings} busy={busy}
+      {page === 'switching' && workspace && <ScopedSwitchSettings key={editingGameId} gameId={editingGameId} onEdit={editGame} entries={entries} settings={workspace.settings} busy={busy}
         onChange={patch => void run(() => changeSettings(patch))} status={status} onPadCapture={bindingCapture}
         onSaveRules={rules=>run(()=>changeSettings({shortcut_rules:rules}),undefined,true)}
         onPreparePad={async()=>{
           if(calibrating||status?.motion?.measuring)throw new Error('请先结束校准或转角测量');
-          if(!active&&!status?.ui_navigation&&!(await startMapping(false)))throw new Error('请先选择一个手柄接口');
+          if(!active&&!status?.ui_navigation&&!(await startMapping(false,false)))throw new Error('请先选择一个手柄接口');
           await bindingCapture(true);
           snapshotEpoch.current++;
           const current=await invoke<Snapshot>('snapshot');setSnapshot(current);return current.status;
@@ -1035,28 +1096,40 @@ export default function App() {
       onClose={closeComponentSetup} onStop={stop} onUsbip={()=>openLocation('usbip')}
       onSettings={()=>{closeComponentSetup();navigate('settings');}}/>}
 
-    {importingJsm&&<ImportJsm onClose={()=>setImportingJsm(false)} onImported={async entry=>{
+    {importingJsm&&<ImportJsm games={games} initialGame={targetGame} onClose={()=>setImportingJsm(false)} onImported={async entry=>{
       await refresh(entry.id);
       setImportingJsm(false);
       navigate('games');
       notify('已导入为新的游戏配置，请核验转换结果后启用输出');
     }}/>}
-    {sharedImport && <ProfileShareDialog community={sharedImport.community} onClose={() => setSharedImport(null)}
-      onImport={importSharedProfile}/>}
-    {creating && <Dialog title="新建配置" description="选择一个起点，为游戏建立独立配置。" onClose={() => setCreating(false)} error={dialogError}
+    {sharedImport && <ProfileShareDialog games={games} initialGame={sharedImport.gameId} community={sharedImport.community} onClose={() => setSharedImport(null)}
+      onImport={importSharedProfile} onImportGame={importSharedGame}/>}
+    {tomlImport && <Dialog title="导入 TOML 配置" onClose={()=>{if(!busy)setTomlImport(null);}} error={dialogError}
+      onSubmit={()=>void run(async()=>{
+        const entry = await invoke<Entry>('import_profile',{content:tomlImport.content,...importDestination(targetGame,newGameName)});
+        await refresh(entry.id);setTomlImport(null);
+      },'已导入为一份新配置')} actions={<>
+        <button type="button" className="secondary-btn" onClick={()=>setTomlImport(null)} disabled={busy}>取消</button>
+        <button type="submit" className="primary-btn" disabled={busy || (targetGame === newGameValue && !newGameName.trim())}>添加到本地</button>
+      </>}>
+      <strong translate="no">{tomlImport.name}</strong>
+      <GameDestination games={games} value={targetGame} onChange={setTargetGame} newName={newGameName} onNewName={setNewGameName} allowNew disabled={busy}/>
+    </Dialog>}
+    {creating && <Dialog title={targetGame === newGameValue ? '新建游戏' : '新建配置'} description={targetGame === newGameValue ? '为这个游戏创建第一份配置。' : '选择一个起点，为游戏建立独立配置。'} onClose={() => {if(!busy)setCreating(false);}} error={dialogError}
       onSubmit={() => void run(async () => {
-        const entry = await invoke<Entry>('create_profile', { name: newName.trim(), template });
+        const entry = await invoke<Entry>('create_profile', { name: newName.trim(), template, ...importDestination(targetGame,newGameName) });
         await refresh(entry.id);
         setCreating(false);
         navigate('games');
         if (template === 'shooter' || template === 'adventure') prepareBatch(batchScope(entry, ''));
       }, '配置已创建')}
       actions={<>
-        <button type="button" className="secondary-btn" onClick={() => setCreating(false)}>取消</button>
-        <button type="submit" className="primary-btn" disabled={busy || !newName.trim()}>创建配置</button>
+        <button type="button" className="secondary-btn" disabled={busy} onClick={() => setCreating(false)}>取消</button>
+        <button type="submit" className="primary-btn" disabled={busy || !newName.trim() || (targetGame === newGameValue && !newGameName.trim())}>创建配置</button>
       </>}>
-      <label className={dialogStyles.field}>游戏或配置名称
-        <input autoFocus required maxLength={100} value={newName} onChange={event => setNewName(event.target.value)} />
+      <GameDestination games={games} value={targetGame} onChange={setTargetGame} newName={newGameName} onNewName={setNewGameName} allowNew disabled={busy}/>
+      <label className={dialogStyles.field}>配置名称
+        <input autoFocus={targetGame !== newGameValue} required maxLength={100} value={newName} onChange={event => setNewName(event.target.value)} />
       </label>
       <fieldset className={dialogStyles.templates}>
         <legend>配置模板</legend>

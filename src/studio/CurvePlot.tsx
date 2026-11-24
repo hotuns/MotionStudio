@@ -8,10 +8,11 @@ export const plotNumber = (value: number) => String(Number(value.toPrecision(5))
 type Plot = ReturnType<typeof useCurveHandles>;
 
 export function CurvePlot({plot, title, xLabel, yLabel, formatX=plotNumber, formatY=plotNumber,
-  label, valueText, fixed, hint, legend, children, parameters=false}: {
+  label, valueText, fixed, showPoint, tangent, hint, legend, children, parameters=false}: {
   plot: Plot; title: string; xLabel: string; yLabel: string;
   formatX?: (value: number) => string; formatY?: (value: number) => string;
   label: (index: number) => string; valueText: (index: number) => string;
+  showPoint?: (index: number) => boolean; tangent?: (index: number) => boolean;
   fixed?: (index: number) => boolean; hint: string; legend?: ReactNode; children: ReactNode; parameters?: boolean;
 }) {
   useLanguage();
@@ -31,8 +32,8 @@ export function CurvePlot({plot, title, xLabel, yLabel, formatX=plotNumber, form
           <path className={styles.curveGrid} d="M25 0V100M50 0V100M75 0V100M0 25H100M0 50H100M0 75H100"/>
           {children}
         </svg>
-        {visible.map((p,i)=><button key={i} type="button" className={styles.stickPlotPoint}
-          style={{left:left(p)+'%', top:top(p)+'%'}} data-curve-point={i} data-fixed={fixed?.(i)}
+        {visible.map((p,i)=>(!showPoint || showPoint(i)) && <button key={i} type="button" className={styles.stickPlotPoint}
+          style={{left:left(p)+'%', top:top(p)+'%'}} data-curve-point={i} data-fixed={fixed?.(i)} data-tangent={tangent?.(i) || undefined}
           aria-label={label(i)} title={label(i)} aria-pressed={i===selected}
           aria-keyshortcuts={parameters?'ArrowUp ArrowDown ArrowLeft ArrowRight':'ArrowUp ArrowDown ArrowLeft ArrowRight Delete'}
           onClick={e=>{if (e.detail===0) setSelection(i);}} onFocus={()=>setSelection(i)}/>)}

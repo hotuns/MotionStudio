@@ -14,8 +14,9 @@ export type PadTracePoint = {sequence:number;time_ms:number;axes:[number,number,
 export type OutputPreviewStatus = {generation:number;mouse:MouseTracePoint[];key_mouse?:KeyMousePreview;pad:VirtualPadPreview|null;pad_trace?:PadTracePoint[];pad_time_ms?:number;sample_ms?:number};
 export type GamepadTarget = 'none'|'xbox_360'|'dualshock_4'|'dualsense';
 export type AimOutput='mouse'|'right_stick'|'both';
+export type CurveModel = 'points' | 'bezier';
 export type ResponsePoint = [x:number, y:number];
-export type MotionBinding={name:string;input:string;output:string;range:number;threshold:number;mode:'hold'|'toggle'|'turbo';turbo_ms:number;curve:ResponsePoint[]};
+export type MotionBinding={name:string;input:string;output:string;range:number;threshold:number;mode:'hold'|'toggle'|'turbo';turbo_ms:number;curve:ResponsePoint[];curve_model?:CurveModel;curve_bezier?:ResponsePoint[]};
 export type FilterStage='raw_gyro'|'before_builtin'|'after_builtin';
 export type CustomFilter={api_version:number;id:string;name:string;enabled:boolean;requires_accel?:boolean;stage:FilterStage;source:string;params:Record<string,number>};
 export type ImuFilter={smoothing_ms?:number;noise_gate?:number;use_custom_filters?:boolean};
@@ -38,7 +39,7 @@ export type MotionConfig={
 export type StickResponsePoint = [travel:number, speed:number, exponent?:number];
 export type Gyro = {
   enabled:boolean;
-  right_stick_curve?:{enabled?:boolean;points?:StickResponsePoint[]};
+  right_stick_curve?:{enabled?:boolean;linearize_stick?:boolean;model?:'points'|'bezier';points?:StickResponsePoint[];bezier_points?:ResponsePoint[]};
   jsm_response?:{
     auto_calibrate_gyro?:boolean; mouse_x_axes?:number|null; mouse_y_axes?:number|null;
     smooth_time_ms?:number; smooth_threshold_dps?:number; decay_smoothing?:boolean; one_euro?:boolean;
@@ -58,7 +59,7 @@ export type Gyro = {
   ds4_imu_filter?:ImuFilter;
   smoothing_ms:number;
   noise_threshold:number;
-  acceleration:{fast_multiplier:number;start_dps:number;full_dps:number;curve:'linear'|'natural'|'power'|'quadratic'|'sigmoid'|'jump'|'custom';natural_half:number;power_reference:number;power_exponent:number;sigmoid_mid:number;sigmoid_width:number;jump_width:number;points:ResponsePoint[]};
+  acceleration:{fast_multiplier:number;start_dps:number;full_dps:number;curve:'linear'|'natural'|'power'|'quadratic'|'sigmoid'|'jump'|'custom'|'bezier';natural_half:number;power_reference:number;power_exponent:number;sigmoid_mid:number;sigmoid_width:number;jump_width:number;points:ResponsePoint[];bezier_points?:ResponsePoint[]};
   motion:MotionConfig;
 };
 export type StickDirections = 'axis_threshold'|'eight_way';
@@ -71,16 +72,25 @@ export type JsmFile = {name:string;text:string};
 export type TriggerStageMode = 'no_full'|'no_skip'|'no_skip_exclusive'|'may_skip'|'must_skip'|'may_skip_r'|'must_skip_r';
 export type TriggerStagesConfig = {left_mode:TriggerStageMode;right_mode:TriggerStageMode;soft_threshold:number;skip_delay_ms:number};
 export type GamepadBinding = TriggerSettings & {input:string;output:string;threshold?:number};
-export type Profile = {trigger_stages?:TriggerStagesConfig;feedback?:FeedbackConfig;touchpad?:TouchpadConfig;input?:ControllerInputConfig;schema_version:number;name:string;virtual_gamepad:GamepadTarget;gamepad_bindings?:GamepadBinding[];stick_deadzone:number;gyro:Gyro;stick_mouse:{enabled:boolean;stick:string;speed:number;deadzone:number;exponent:number;response_points?:ResponsePoint[]|null};actions:Action[];stick_rebound_ms?:number|null;stick_zones?:{left_outer:number;right_outer:number;hysteresis:number};layer_reset_input?:string|null;layers?:ProfileLayer[]};
+export type Profile = {trigger_stages?:TriggerStagesConfig;feedback?:FeedbackConfig;touchpad?:TouchpadConfig;input?:ControllerInputConfig;schema_version:number;name:string;virtual_gamepad:GamepadTarget;gamepad_bindings?:GamepadBinding[];stick_deadzone:number;gyro:Gyro;stick_mouse:{enabled:boolean;stick:string;speed:number;deadzone:number;exponent:number;response_points?:ResponsePoint[]|null;response_model?:CurveModel;response_bezier?:ResponsePoint[]};actions:Action[];stick_rebound_ms?:number|null;stick_zones?:{left_outer:number;right_outer:number;hysteresis:number};layer_reset_input?:string|null;layers?:ProfileLayer[]};
 export type ProfileLayer={id:string;name:string;input:string;activation_mode?:'hold'|'toggle';exit_input?:string|null;activation_threshold?:number;activation_hysteresis?:number;settings:Record<string,unknown>;actions:Action[];disabled_inputs:string[]};
 export type Entry = {id:string;profile:Profile};
 export type Target = {kind:'none'|'restore'}|{kind:'profile';profile_id:string};
 export type Shortcut={key:string;ctrl:boolean;alt:boolean;shift:boolean};
 export type ShortcutRule={trigger:{kind:'keyboard';key:Shortcut}|{kind:'gamepad';input:string};target:string;return_on_repeat?:boolean};
+export type GameSwitching = {cursor_enabled:boolean; cursor_debounce_ms:number; cursor_shown:Target; cursor_hidden:Target; shortcut_rules:ShortcutRule[]};
+export type LibraryGame = {id:string; name:string; profile_ids:string[]; default_profile:string|null; last_profile:string|null; use_game_rules:boolean; switching:GameSwitching|null};
+export type GameEdit =
+  | {kind:'rename'; id:string; name:string}
+  | {kind:'move'; profile_ids:string[]; game_id?:string; new_game_name?:string}
+  | {kind:'set_default'; id:string; profile_id:string}
+  | {kind:'enable_rules'; id:string; enabled:boolean}
+  | {kind:'set_rules'; id:string; switching:GameSwitching}
+  | {kind:'ungroup'; id:string};
 export type IoRates = {polling_hz: number; output_hz: number};
 export type ControllerOverlayConfig={enabled:boolean;obs_enabled?:boolean;content?:'controller'|'key_mouse'|'both';width:number;opacity:number;position:'top_left'|'top_right'|'bottom_left'|'bottom_right';monitor:string|null;follow_motion:boolean};
 export type UpdateSource = 'sealos' | 'github';
-export type Settings = {controller_overlay?:ControllerOverlayConfig;mouse_display_sync?:boolean;io_rates?:IoRates;language?:'zh-CN'|'en';update_source?:UpdateSource|null;auto_hide:boolean;overlay_enabled:boolean;overlay_duration_ms:number;overlay_position:'top_left'|'top_right'|'bottom_left'|'bottom_right';output_backend:OutputBackend;gamepad_backend?:GamepadBackend;version:number;selected_profile:string;device_path:string;cursor_enabled:boolean;cursor_debounce_ms?:number;cursor_shown:Target;cursor_hidden:Target;shortcut_profile:string|null;shortcut_key:Shortcut|null;shortcut_pad?:string|null;shortcut_rules?:ShortcutRule[]|null;calibrations:Record<string,number[]>;motion_calibrations:Record<string,SensorCalibration>};
+export type Settings = {games?:LibraryGame[];controller_overlay?:ControllerOverlayConfig;mouse_display_sync?:boolean;io_rates?:IoRates;language?:'zh-CN'|'en';update_source?:UpdateSource|null;auto_hide:boolean;overlay_enabled:boolean;overlay_duration_ms:number;overlay_position:'top_left'|'top_right'|'bottom_left'|'bottom_right';output_backend:OutputBackend;gamepad_backend?:GamepadBackend;version:number;selected_profile:string;device_path:string;cursor_enabled:boolean;cursor_debounce_ms?:number;cursor_shown:Target;cursor_hidden:Target;shortcut_profile:string|null;shortcut_key:Shortcut|null;shortcut_pad?:string|null;shortcut_rules?:ShortcutRule[]|null;calibrations:Record<string,number[]>;motion_calibrations:Record<string,SensorCalibration>};
 export type Device = {touchpads?:number;rumble?:boolean;lightbar?:boolean;id:number;name:string;vendor:number;product:number;path:string;origin:'physical'|'virtual'|'unknown';gyro:boolean;gamepad:boolean;accelerometer:boolean;buttons:string[];open_error?:string};
 export type NavCommand='up'|'down'|'left'|'right'|'confirm'|'back'|'edit'|'save'|'sidebar'|'menu'|'previous_zone'|'next_zone';
 export type MappingStatus={name:string;input:string;output:string;trigger:NonNullable<TriggerSettings['trigger']>;active:boolean;latched:boolean;reason:string};

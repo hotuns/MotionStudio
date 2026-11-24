@@ -8,6 +8,8 @@ type Options<P> = {
   range: PlotRange;
   move: (points: P[], index: number, x: number, y: number) => P[];
   insert?: (points: P[], x: number, y: number) => Picked<P>;
+  onEmptyPress?: (x: number, y: number) => void;
+  removePoint?: (points: P[], index: number) => Picked<P>;
   fixed?: (index: number, points: P[]) => boolean;
   removable?: (index: number, points: P[]) => boolean;
   onChange: (points: P[]) => void;
@@ -70,8 +72,9 @@ export function useCurveHandles<P extends CurveCoordinate>(options: Options<P>) 
 
   function remove(index: number) {
     if (!removable?.(index, points)) return;
-    onChange(points.filter((_, i) => i !== index));
-    selectAndFocus(Math.min(index, points.length-2));
+    const next = options.removePoint?.(points,index) ?? {points:points.filter((_,i)=>i!==index), index:Math.min(index,points.length-2)};
+    onChange(next.points);
+    selectAndFocus(next.index);
   }
   function start(event: PlotEvent) {
     if (gesture.current || !event.isPrimary || event.button !== 0 || event.currentTarget.closest('fieldset:disabled')) return;
@@ -81,9 +84,15 @@ export function useCurveHandles<P extends CurveCoordinate>(options: Options<P>) 
     if (hit) {
       const box = event.currentTarget.getBoundingClientRect();
       const distance = (p: P) => ((p[0]-start[0])*box.width/range[0])**2 + ((p[1]-start[1])*box.height/range[1])**2;
-      const index = points.reduce((best, p, i) => distance(p)<distance(points[best]) ? i : best, Number(hit.dataset.curvePoint));
+      const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('[data-curve-point]');
+      let index = Number(hit.dataset.curvePoint);
+      for (const button of Array.from(buttons)) {
+        const i = Number(button.dataset.curvePoint);
+        if (distance(points[i])<distance(points[index])) index=i;
+      }
       picked = {points, index};
-    } else picked = insert?.(points, ...start);
+    } else if (insert) picked = insert(points, ...start);
+    else if (options.onEmptyPress) { event.preventDefault(); options.onEmptyPress(...start); return; }
     if (!picked || picked.index < 0) return;
     event.preventDefault();
     selectAndFocus(picked.index);

@@ -470,6 +470,8 @@ pub struct GyroAcceleration {
     pub sigmoid_width: f32,
     pub jump_width: f32,
     pub points: Vec<[f32; 2]>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bezier_points: Vec<[f32; 2]>,
 }
 
 impl Default for GyroAcceleration {
@@ -487,6 +489,7 @@ impl Default for GyroAcceleration {
             sigmoid_width: jsm.sigmoid_width,
             jump_width: jsm.jump_tau,
             points: vec![[0.0, 1.0], [180.0, 2.0]],
+            bezier_points: Vec::new(),
         }
     }
 }
@@ -510,6 +513,9 @@ impl GyroAcceleration {
         ] {
             crate::motion_config::range(name, value, min, max)?;
         }
+        if self.curve == crate::motion_config::Curve::Bezier || !self.bezier_points.is_empty() {
+            crate::bezier::Domain::Acceleration.validate(&self.bezier_points)?;
+        }
         crate::motion_config::points("体感加速曲线", &self.points, 4000., 10.)
     }
 }
@@ -524,10 +530,17 @@ pub struct StickMouse {
     pub exponent: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_points: Option<Vec<[f32; 2]>>,
+    #[serde(skip_serializing_if = "crate::bezier::CurveModel::is_points")]
+    pub response_model: crate::bezier::CurveModel,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub response_bezier: Vec<[f32; 2]>,
 }
 impl StickMouse {
     /// Point table supplied to FlexInput's radial vector response node.
     pub fn response_table(&self) -> Vec<[f32; 2]> {
+        if self.response_model == crate::bezier::CurveModel::Bezier {
+            return crate::bezier::table(&self.response_bezier);
+        }
         self.response_points.clone().unwrap_or_else(|| {
             (0..=128)
                 .map(|i| {
@@ -547,6 +560,8 @@ impl Default for StickMouse {
             deadzone: 0.15,
             exponent: 1.6,
             response_points: None,
+            response_model: Default::default(),
+            response_bezier: Vec::new(),
         }
     }
 }
@@ -799,11 +814,13 @@ impl Profile {
             bail!("摇杆鼠标参数无效");
         }
         if let Some(points) = &s.response_points {
+            // Linear knots are retained when a Bézier response is active.
             crate::motion_config::points("摇杆鼠标响应曲线", points, 1., 1.)?;
             if points.first() != Some(&[0., 0.]) || points.last() != Some(&[1., 1.]) {
                 bail!("摇杆鼠标响应的起点和终点必须分别是 (0%, 0%) 和 (100%, 100%)。");
             }
         }
+        s.response_model.validate(crate::bezier::Domain::StickMouse, &s.response_bezier)?;
         if g.activation != "always" && input_pin(&g.activation).is_none() {
             bail!("Unknown gyro activation: {}", g.activation);
         }

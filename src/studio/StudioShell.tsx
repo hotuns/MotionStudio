@@ -5,6 +5,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { version } from '../../package.json';
 import { StudioIcon, type StudioIconName } from './StudioIcon';
 import {CurrentProfilePicker} from './CurrentProfilePicker';
+import type {LibraryGame} from '../types';
 import type {CommunityProfile} from '../profile-sharing';
 import {gameTabs, type GameTab} from './game-tabs';
 import styles from './StudioShell.module.css';
@@ -34,9 +35,10 @@ type Props = {
   controllerNavigation: ReactNode;
   profileId: string;
   profiles: { id: string; name: string }[];
+  games: LibraryGame[];
   onSelectProfile: (id: string) => void;
-  onChooseCommunity: (profile: CommunityProfile) => void;
-  onNewProfile: () => void;
+  onChooseCommunity: (profile: CommunityProfile, gameId:string) => void;
+  onNewProfile: (gameId?:string) => void;
   onImportJsm: () => void;
   onGamepad: () => void;
   gamepadOn: boolean;
@@ -173,7 +175,7 @@ export function StudioShell(props: Props) {
             <h1 className={overview ? styles.srOnly : styles.pageTitle}>{heading.label}</h1>
             <div className={styles.profileSelect} data-profile-picker>
               <StudioIcon name="profiles" size={18} /><span>当前配置</span>
-              <CurrentProfilePicker value={props.profileId} profiles={props.profiles} disabled={blocked}
+              <CurrentProfilePicker value={props.profileId} profiles={props.profiles} games={props.games} disabled={blocked}
                 onSelect={props.onSelectProfile} onChooseCommunity={props.onChooseCommunity} onCreate={props.onNewProfile}/>
               {props.dirty && <span className={styles.dirtyDot} title="有未保存的修改" />}
             </div>

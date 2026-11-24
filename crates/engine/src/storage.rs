@@ -10,6 +10,8 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
+mod game_import;
+pub use game_import::game_import_profile_ids;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProfileEntry {
@@ -29,6 +31,8 @@ pub enum SwitchTarget {
 pub struct Settings {
     pub version: u32,
     pub selected_profile: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub games: Vec<crate::game_library::Game>,
     pub device_path: String,
     pub output_backend: crate::output::OutputBackend,
     pub gamepad_backend: crate::output::GamepadBackend,
@@ -60,6 +64,7 @@ impl Default for Settings {
         Self {
             version: 1,
             selected_profile: "gyro".into(),
+            games: Vec::new(),
             device_path: String::new(),
             output_backend: Default::default(),
             gamepad_backend: Default::default(),
@@ -207,9 +212,8 @@ impl Store {
         validate_profile_id(id)?;
         Ok(self.root.join("profiles").join(format!("{id}.toml")))
     }
-    pub fn list(&self) -> Result<(Vec<ProfileEntry>, Vec<String>)> {
-        let mut entries = vec![];
-        let mut warnings = vec![];
+    pub fn profile_ids(&self) -> Result<Vec<String>> {
+        let mut ids = vec![];
         for item in std::fs::read_dir(self.root.join("profiles"))? {
             let path = item?.path();
             if path.extension().and_then(|s| s.to_str()) != Some("toml") {
@@ -219,13 +223,28 @@ impl Store {
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .context("Invalid profile filename")?;
-            match self.load(id) {
+            ids.push(id.to_owned());
+        }
+        // A locked file can survive an interrupted rollback until the next startup.
+        if let Ok(Some(pending)) = self.pending_game_import() {
+            ids.retain(|id| !pending.contains(id));
+        }
+        Ok(ids)
+    }
+    pub fn load_profiles(&self, ids: Vec<String>) -> (Vec<ProfileEntry>, Vec<String>) {
+        let mut entries = vec![];
+        let mut warnings = vec![];
+        for id in ids {
+            match self.load(&id) {
                 Ok(entry) => entries.push(entry),
                 Err(e) => warnings.push(format!("配置 {id} 未加载：{e:#}。原文件已保留。")),
             }
         }
         entries.sort_by(|a, b| a.profile.name.cmp(&b.profile.name));
-        Ok((entries, warnings))
+        (entries, warnings)
+    }
+    pub fn list(&self) -> Result<(Vec<ProfileEntry>, Vec<String>)> {
+        Ok(self.load_profiles(self.profile_ids()?))
     }
     pub fn load(&self, id: &str) -> Result<ProfileEntry> {
         let path = self.profile_path(id)?;
@@ -277,30 +296,63 @@ impl Store {
             return Ok(Settings::default());
         }
         let result = serde_json::from_str::<Settings>(&read_small(&path)?);
-        let settings = match result {
+        let mut settings = match result {
             Ok(s) => s,
             Err(error) => {
                 bail!("设置文件损坏，原文件已保留。请在运行与恢复中恢复设置备份：{error}")
             }
         };
         settings.validate()?;
+        self.reconcile_game_files(&mut settings)?;
         Ok(settings)
     }
+    // A user can remove a TOML on disk, or restore settings from before a
+    // deletion. Keep membership for existing files even if they need repair.
+    fn reconcile_game_files(&self, settings: &mut Settings) -> Result<bool> {
+        let mut missing = Vec::new();
+        for game in &settings.games {
+            for id in &game.profile_ids {
+                if matches!(self.profile_path(id)?.try_exists(), Ok(false)) {
+                    missing.push(id.clone());
+                }
+            }
+        }
+        for id in &missing { settings.forget_profile(id); }
+        if !missing.is_empty() && settings.selected_profile.is_empty() {
+            settings.selected_profile = self.list()?.0.first().map(|entry| entry.id.clone()).unwrap_or_default();
+        }
+        Ok(!missing.is_empty())
+    }
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
+        let bytes = Self::settings_bytes(settings)?;
+        self.backup_settings()?;
+        atomic_write(&self.root.join("settings.json"), &bytes)
+    }
+    fn settings_bytes(settings: &Settings) -> Result<Vec<u8>> {
         settings.validate()?;
+        let bytes = serde_json::to_vec_pretty(settings)?;
+        if bytes.len() > MAX_PROFILE_BYTES { bail!("File exceeds 512 KB"); }
+        Ok(bytes)
+    }
+    fn backup_settings(&self) -> Result<()> {
         let path = self.root.join("settings.json");
         if let Ok(old) = read_small(&path) {
             if serde_json::from_str::<Settings>(&old).is_ok() {
                 atomic_write(&self.root.join("settings.json.bak"), old.as_bytes())?;
             }
         }
-        atomic_write(&path, &serde_json::to_vec_pretty(settings)?)
+        Ok(())
     }
     pub fn restore_settings(&self) -> Result<Settings> {
         let text = read_small(&self.root.join("settings.json.bak"))?;
-        let settings: Settings = serde_json::from_str(&text)?;
+        let mut settings: Settings = serde_json::from_str(&text)?;
         settings.validate()?;
-        atomic_write(&self.root.join("settings.json"), text.as_bytes())?;
+        let bytes = if self.reconcile_game_files(&mut settings)? {
+            serde_json::to_vec_pretty(&settings)?
+        } else {
+            text.into_bytes()
+        };
+        atomic_write(&self.root.join("settings.json"), &bytes)?;
         Ok(settings)
     }
 }
@@ -336,6 +388,7 @@ impl Settings {
             bail!("Unsupported settings version");
         }
         self.io_rates.validate()?;
+        self.validate_games()?;
         self.controller_overlay.validate()?;
         if !(1000..=8000).contains(&self.overlay_duration_ms) {
             bail!("配置提示显示时长应在 1 到 8 秒之间");
@@ -428,31 +481,28 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
         file.write_all(data)?;
         file.sync_all()?;
         drop(file);
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            use windows_sys::Win32::Storage::FileSystem::{
-                MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-            };
-            let from: Vec<u16> = temp.as_os_str().encode_wide().chain(Some(0)).collect();
-            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-            if unsafe {
-                MoveFileExW(
-                    from.as_ptr(),
-                    to.as_ptr(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-                )
-            } == 0
-            {
-                return Err(std::io::Error::last_os_error().into());
-            }
-        }
-        #[cfg(not(windows))]
-        std::fs::rename(&temp, path)?;
-        Ok(())
+        atomic_replace(&temp, path)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(temp);
     }
     result
+}
+
+fn atomic_replace(from: &Path, to: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+        let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) } == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+    }
+    #[cfg(not(windows))]
+    std::fs::rename(from, to)?;
+    Ok(())
 }
