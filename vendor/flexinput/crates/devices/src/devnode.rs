@@ -67,7 +67,8 @@ pub(crate) fn container_of_endpoint(endpoint_id: &str) -> Option<ContainerId> {
     container_of_instance(&format!(r"SWD\MMDEVAPI\{endpoint_id}"))
 }
 
-fn container_of_instance(instance_id: &str) -> Option<ContainerId> {
+/// The Windows device container of a present device instance.
+pub fn container_of_instance(instance_id: &str) -> Option<ContainerId> {
     let id = to_wide(instance_id);
     let mut inst = 0u32;
     // SAFETY: `id` is NUL-terminated.

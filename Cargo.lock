@@ -2230,7 +2230,7 @@ dependencies = [
 
 [[package]]
 name = "motion-core"
-version = "0.19.5"
+version = "0.19.6"
 dependencies = [
  "anyhow",
  "cc",
@@ -2255,7 +2255,7 @@ dependencies = [
 
 [[package]]
 name = "motion-engine"
-version = "0.19.5"
+version = "0.19.6"
 dependencies = [
  "anyhow",
  "motion-core",
@@ -2277,7 +2277,7 @@ dependencies = [
 
 [[package]]
 name = "motion-studio"
-version = "0.19.5"
+version = "0.19.6"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

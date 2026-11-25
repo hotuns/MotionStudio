@@ -1,8 +1,10 @@
 //! Read-only device-tree selection. Reuse FlexInput's CfgMgr32 helpers; do not
 //! infer physical identity from a controller's name or VID/PID.
 use super::policy::{contains, push_unique, valid_physical_id, virtual_id};
-use anyhow::{bail, ensure, Result};
+use crate::sdl::is_gameinput_path;
+use anyhow::{bail, ensure, Context, Result};
 use flexinput_devices::devnode;
+use uuid::Uuid;
 use windows_sys::{
     core::GUID,
     Win32::Devices::Properties::{DEVPKEY_Device_CompatibleIds, DEVPKEY_Device_HardwareIds},
@@ -18,6 +20,10 @@ pub(super) struct Node {
     pub known: bool,
 }
 
+fn has_xinput_tag(id: &str) -> bool {
+    id.to_ascii_uppercase().contains("&IG_")
+}
+
 fn hid_roles(id: &str, hardware: &[String], compatible: &[String]) -> (bool, bool, bool) {
     // HID usage and system-role IDs commonly live in HardwareIds; an empty
     // CompatibleIds list is normal for a physical HID collection.
@@ -28,15 +34,14 @@ fn hid_roles(id: &str, hardware: &[String], compatible: &[String]) -> (bool, boo
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_uppercase();
-    let gaming = [
+    let gaming_usage = [
         "HID_DEVICE_SYSTEM_GAME",
         "HID_DEVICE_SYSTEM_JOYSTICK",
         "HID_DEVICE_UP:0001_U:0004",
         "HID_DEVICE_UP:0001_U:0005",
     ]
     .iter()
-    .any(|role| identifiers.contains(role))
-        || id.to_ascii_uppercase().contains("&IG_");
+    .any(|role| identifiers.contains(role));
     let other_input = [
         "HID_DEVICE_SYSTEM_KEYBOARD",
         "HID_DEVICE_SYSTEM_MOUSE",
@@ -45,6 +50,7 @@ fn hid_roles(id: &str, hardware: &[String], compatible: &[String]) -> (bool, boo
     ]
     .iter()
     .any(|role| identifiers.contains(role));
+    let gaming = gaming_usage || (!other_input && has_xinput_tag(id));
     let known = gaming || other_input || identifiers.contains("HID_DEVICE_UP:");
     (gaming, other_input, known)
 }
@@ -75,6 +81,17 @@ impl Node {
                 up.starts_with("USB\\VID_") && !up.contains("&MI_") && !up.contains("&IG_")
             })
             .map(String::as_str)
+    }
+    fn usb_family(&self) -> Option<&str> {
+        self.family()
+            .filter(|id| id.to_ascii_uppercase().starts_with(r"USB\VID_"))
+    }
+    fn belongs_to_usb(&self, receiver: &str) -> bool {
+        self.usb_family()
+            .is_some_and(|id| id.eq_ignore_ascii_case(receiver))
+    }
+    fn is_xinput_game(&self) -> bool {
+        self.xinput || (self.gaming && has_xinput_tag(&self.id))
     }
     fn is_below(&self, id: &str) -> bool {
         self.id.eq_ignore_ascii_case(id) || contains(&self.parents, id)
@@ -128,7 +145,23 @@ pub(super) fn inventory() -> Vec<Node> {
     result
 }
 
-pub(super) fn selected(path: &str) -> Result<Option<Vec<String>>> {
+const GAMEINPUT_UNRESOLVED: &str =
+    "无法确认此 GameInput 接口对应的 Windows 实体手柄。请改选 HID/接管接口，或停止后关闭自动隐藏";
+const GAMEINPUT_AMBIGUOUS: &str =
+    "此 GameInput 接口无法唯一定位到一个实体手柄或 USB 接收器。请改选 HID/接管接口，或手动管理隐藏";
+
+pub(super) fn selected(path: &str, gameinput_container: Option<&str>) -> Result<Option<Vec<String>>> {
+    if is_gameinput_path(path) {
+        // Skip the nil GUID and Windows' system/no-container sentinel.
+        let container = gameinput_container
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .filter(|id| !id.is_nil() && id.as_u128() != 0x00000000_0000_0000_ffff_ffffffffffff)
+            .context(GAMEINPUT_UNRESOLVED)?
+            .to_bytes_le();
+        return plan_gameinput(&inventory(), |id| {
+            devnode::container_of_instance(id) == Some(container)
+        });
+    }
     ensure!(
         path.len() <= 2048 && !path.contains('\0') && path.starts_with(r"\\?\"),
         "所选接口没有可定位的 Windows 设备路径；请选择 HID/接管接口，或停止后关闭自动隐藏"
@@ -137,6 +170,57 @@ pub(super) fn selected(path: &str) -> Result<Option<Vec<String>>> {
         return Ok(None);
     };
     plan(&id, &inventory())
+}
+
+fn plan_gameinput(all: &[Node], in_container: impl Fn(&str) -> bool) -> Result<Option<Vec<String>>> {
+    let candidates: Vec<_> = all
+        .iter()
+        .filter(|node| {
+            node.gaming
+                && (in_container(&node.id) || node.usb_family().is_some_and(&in_container))
+        })
+        .collect();
+    let first = candidates.first().context(GAMEINPUT_UNRESOLVED)?;
+    ensure!(
+        candidates.iter().all(|node| !node.is_virtual()),
+        "虚拟手柄不能作为自动隐藏目标"
+    );
+    if let Some(receiver) = first.usb_family() {
+        ensure!(
+            candidates.iter().all(|node| node.belongs_to_usb(receiver)),
+            GAMEINPUT_AMBIGUOUS
+        );
+        if all
+            .iter()
+            .any(|node| node.is_xinput_game() && node.belongs_to_usb(receiver))
+        {
+            return Ok(Some(plan_usb_receiver(receiver, all)?));
+        }
+    }
+    let [target] = candidates.as_slice() else {
+        bail!(GAMEINPUT_AMBIGUOUS);
+    };
+    let targets = plan(&target.id, all)?;
+    ensure!(
+        targets.iter().flatten().all(|id| in_container(id)),
+        GAMEINPUT_AMBIGUOUS
+    );
+    Ok(targets)
+}
+
+fn plan_usb_receiver(receiver: &str, all: &[Node]) -> Result<Vec<String>> {
+    ensure!(valid_physical_id(receiver), "实体手柄关联不明确，未自动隐藏");
+    let mut targets = vec![receiver.to_owned()];
+    // HidHide checks each device instance ID. Cover the USB receiver and all
+    // HID/XUSB nodes that belong to that same physical USB device.
+    for node in all.iter().filter(|node| node.belongs_to_usb(receiver)) {
+        ensure!(
+            !node.is_virtual() && valid_physical_id(&node.id),
+            "实体手柄关联不明确，未自动隐藏"
+        );
+        push_unique(&mut targets, node.id.clone());
+    }
+    Ok(targets)
 }
 
 fn plan(id: &str, all: &[Node]) -> Result<Option<Vec<String>>> {
@@ -152,6 +236,9 @@ fn plan(id: &str, all: &[Node]) -> Result<Option<Vec<String>>> {
         !selected.other_input && selected.known,
         "该接口不是可确认的实体手柄接口，不能自动隐藏键盘或鼠标"
     );
+    if let Some(receiver) = selected.usb_family().filter(|_| selected.is_xinput_game()) {
+        return Ok(Some(plan_usb_receiver(receiver, all)?));
+    }
     let family: Vec<_> = all
         .iter()
         .filter(|n| {
@@ -182,10 +269,7 @@ fn plan(id: &str, all: &[Node]) -> Result<Option<Vec<String>>> {
     for node in family.iter().filter(|n| n.gaming || n.xinput) {
         push_unique(&mut paths, node.id.clone());
     }
-    if let Some(base) = selected
-        .family()
-        .filter(|b| b.to_ascii_uppercase().starts_with("USB\\VID_"))
-    {
+    if let Some(base) = selected.usb_family() {
         if let Some(xusb) = xinput.first() {
             // XInput bypasses the HID child and opens its XUSB interface. On a
             // composite pad that interface is its own USB function (e.g. MI_00),
@@ -265,6 +349,107 @@ mod tests {
         }
     }
     #[test]
+    fn gameinput_selects_the_usb_receiver_by_its_container_or_its_game_node() {
+        let base = r"USB\VID_4131&PID_3519\ONE";
+        let xusb = r"USB\VID_4131&PID_3519&MI_00\XUSB";
+        let hid = r"HID\VID_4131&PID_3519&IG_00\GAME";
+        let keyboard = r"HID\VID_4131&PID_3519&MI_01\KEYBOARD";
+        let all = [
+            node(hid, &[xusb, base], true, false, false),
+            node(xusb, &[base], true, true, false),
+            node(keyboard, &[base], false, false, true),
+            node(r"USB\VID_4131&PID_3519\TWO", &[], true, true, false),
+            node(
+                r"USB\VID_4131&PID_3519\VIRTUAL",
+                &[r"ROOT\VIGEMBUS\0"],
+                true,
+                true,
+                false,
+            ),
+        ];
+        for member in [base, xusb, hid] {
+            let result = plan_gameinput(&all, |id| id == member);
+            assert_eq!(result.unwrap().unwrap(), [base, hid, xusb, keyboard]);
+        }
+    }
+    #[test]
+    fn xinput_usb_selection_covers_all_functions_of_the_composite_receiver() {
+        let base = r"USB\VID_4131&PID_3519\RECEIVER";
+        let xusb = r"USB\VID_4131&PID_3519&MI_00\XUSB";
+        let hid_function = r"USB\VID_4131&PID_3519&MI_01\HID";
+        let hid = r"HID\VID_4131&PID_3519&MI_01\GAME";
+        let peripherals = r"USB\VID_4131&PID_3519&MI_02\PERIPHERALS";
+        let keyboard = r"HID\VID_4131&PID_3519&MI_02&COL01\KEYBOARD";
+        let mouse = r"HID\VID_4131&PID_3519&MI_02&COL02\MOUSE";
+        let gyro = r"HID\VID_4131&PID_3519&MI_03\GYRO";
+        let second_xusb = r"USB\VID_4131&PID_3519&MI_04\SECOND_XUSB";
+        let all = [
+            node(hid, &[hid_function, base], true, false, false),
+            node(xusb, &[base], true, true, false),
+            node(keyboard, &[peripherals, base], false, false, true),
+            node(mouse, &[peripherals, base], false, false, true),
+            node(gyro, &[base], false, false, false),
+            node(second_xusb, &[base], true, true, false),
+        ];
+        let targets = [base, hid, xusb, keyboard, mouse, gyro, second_xusb];
+        assert_eq!(plan_gameinput(&all, |id| id == xusb).unwrap().unwrap(), targets);
+        assert_eq!(plan(xusb, &all).unwrap().unwrap(), targets);
+    }
+    #[test]
+    fn gameinput_refuses_virtual_devices_and_multiple_physical_receivers() {
+        let xusb = r"USB\VID_4131&PID_3519\ONE";
+        let hid = r"HID\VID_4131&PID_3519&IG_00\GAME";
+        let virtual_pad = r"USB\VID_4131&PID_3519\VIRTUAL";
+        let all = [
+            node(xusb, &[], true, true, false),
+            node(hid, &[xusb], true, false, false),
+            node(r"USB\VID_4131&PID_3519\TWO", &[], true, true, false),
+            node(virtual_pad, &[r"ROOT\VIGEMBUS\0"], true, true, false),
+        ];
+        let error = |ids: &[&str]| {
+            plan_gameinput(&all, |id| ids.contains(&id))
+                .unwrap_err()
+                .to_string()
+        };
+        assert_eq!(error(&[]), GAMEINPUT_UNRESOLVED);
+        assert_eq!(error(&[virtual_pad]), "虚拟手柄不能作为自动隐藏目标");
+        assert_eq!(error(&[hid, &all[2].id]), GAMEINPUT_AMBIGUOUS);
+        assert_eq!(
+            plan_gameinput(&all, |id| id == hid).unwrap().unwrap(),
+            [xusb, hid]
+        );
+    }
+    #[test]
+    fn gameinput_preserves_exact_hid_hiding_for_an_ordinary_usb_gamepad() {
+        let base = r"USB\VID_1234&PID_5678\PAD";
+        let gamepad = r"HID\VID_1234&PID_5678&MI_00\GAME";
+        let keyboard = r"HID\VID_1234&PID_5678&MI_01\KEYBOARD";
+        let all = [
+            node(gamepad, &[base], true, false, false),
+            node(keyboard, &[base], false, false, true),
+        ];
+        assert_eq!(
+            plan_gameinput(&all, |id| id == gamepad).unwrap().unwrap(),
+            [gamepad]
+        );
+    }
+    #[test]
+    fn opaque_gameinput_paths_require_a_real_container() {
+        let path = "0123456789ABCDEF".repeat(4);
+        for container in [
+            None,
+            Some("unavailable"),
+            Some("00000000-0000-0000-0000-000000000000"),
+            Some("{00000000-0000-0000-FFFF-FFFFFFFFFFFF}"),
+        ] {
+            assert_eq!(
+                selected(&path, container).unwrap_err().to_string(),
+                GAMEINPUT_UNRESOLVED
+            );
+        }
+        assert!(selected("XInput#0", None).is_err());
+    }
+    #[test]
     fn hid_roles_are_read_from_hardware_ids_even_when_compatible_ids_are_empty() {
         for (property, expected) in [
             ("HID_DEVICE_UP:FFA0_U:0001", (false, false, true)),
@@ -277,6 +462,18 @@ mod tests {
             assert_eq!(hid_roles("HID\\PAD", &[], &[property.into()]), expected);
         }
         assert_eq!(hid_roles("HID\\UNKNOWN", &[], &[]), (false, false, false));
+        assert_eq!(
+            hid_roles(r"HID\VID_4131&PID_3519&IG_00\GAME", &[], &[]),
+            (true, false, true)
+        );
+        assert_eq!(
+            hid_roles(
+                r"HID\VID_4131&PID_3519&IG_00&COL02\KEYBOARD",
+                &["HID_DEVICE_SYSTEM_KEYBOARD".into()],
+                &[]
+            ),
+            (false, true, true)
+        );
     }
     #[test]
     fn composite_xusb_function_is_hidden_without_its_keyboard_mouse_siblings() {

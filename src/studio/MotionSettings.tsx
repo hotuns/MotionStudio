@@ -5,7 +5,7 @@ import {applyJsmResponse,isJsmResponse,nativeSmoothing,usesJsmAim} from '../moti
 import type {ImuFilter, FilterStatus, Gyro, Profile} from '../types';
 import {useLanguage} from '../i18n';
 import styles from './MotionControls.module.css';
-import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice} from './AdvancedMotion';
+import {MotionBehavior, AccelerationSettings, StabilitySettings, MotionChoice, MotionOutputChoice, MotionOutputSettings} from './AdvancedMotion';
 import {CustomFilters} from './CustomFilters';
 import type {GyroBindingField, GyroBindingRecording} from '../pad-capture';
 import {GyroBindingInput} from './GyroBindingInput';
@@ -14,11 +14,7 @@ import {SettingField, SettingLabel, SettingSection, settingStyles} from './Setti
 type Update=(update:(profile:Profile)=>void)=>void;
 const smoothingPresets=[['线性',0],['均衡',16],['更稳',32]] as const;
 
-export const MotionSettings = memo(function MotionSettings({profile,profileId,update,split,missingImu,recording,canRecord,onRecord,
-  bindingLocked,onCancelRecording,onOpenDevice,onPreviewOutput,filtersRunning,filterStatuses,onMotionAction,deviceNoise}: {
-  profile:Profile;
-  profileId:string;
-  update:Update;
+export type MotionSettingsInputs = {
   split:boolean;
   missingImu:boolean;
   deviceNoise?:number;
@@ -32,6 +28,12 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
   filtersRunning:boolean;
   filterStatuses?:FilterStatus[];
   onMotionAction:(action:string)=>void;
+};
+
+export const MotionSettings = memo(function MotionSettings({profile,profileId,update,split,missingImu,recording,canRecord,onRecord,
+  bindingLocked,onCancelRecording,onOpenDevice,onPreviewOutput,filtersRunning,filterStatuses,onMotionAction,deviceNoise,vigemGamepad,
+  canMeasure,onOpenCalibration}: MotionSettingsInputs & {
+  profile:Profile; profileId:string; update:Update; vigemGamepad:boolean; canMeasure:boolean; onOpenCalibration:()=>void;
 }) {
   useLanguage();
   const gyro=profile.gyro;
@@ -50,13 +52,21 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
     :gyro.motion.smoothing==='ema'&&gyro.smoothing_ms===ms);
 
   return <div className={settingStyles.page}>
-    <SettingSection id="motion-main" title={passthrough?sensorOutputLabel(output):'体感瞄准'} defaultOpen
-      summary={gyro.enabled?(passthrough?'已启用':<>{gyro.sensitivity}×</>):'关闭'}>
-      <Toggle label="启用体感" value={gyro.enabled} onChange={value=>setGyro('enabled',value)}
-        help={passthrough?'按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。':undefined}/>
-      {gyro.enabled&&<>
+    <section className={styles.gyroHeader} data-enabled={gyro.enabled} data-setting-section="motion-main" aria-label="体感设置">
+      <div className={styles.gyroMaster}>
+        <Toggle label="启用体感" value={gyro.enabled} disabled={bindingLocked} onChange={value=>setGyro('enabled',value)}
+          help={passthrough?'按所选开启方式，将设备校准后的传感器数据发送给虚拟手柄。':undefined}/>
+      </div>
+      <MotionOutputChoice profile={profile} update={update} vigemGamepad={vigemGamepad} disabled={bindingLocked}/>
+      <button type="button" className="secondary-btn" onClick={passthrough?onOpenDevice:onPreviewOutput}>
+        {passthrough?'打开设备校准':'查看输出预览'}
+      </button>
+    </section>
+    {gyro.enabled&&<>
+      <SettingSection id="motion-activation" title="开启和暂停" defaultOpen
+        summary={activation==='always'?'始终开启':activation==='hold'?'按住开启':'按一下切换开关'}>
         <SettingField label="开启和暂停" path={['gyro.activation','gyro.activation_mode','gyro.pause_input']} disabled={bindingLocked}>
-          <div className={settingStyles.row}><SettingLabel label="开启方式"/>
+          <SettingField label="开启方式" inheritance={false}><div className={settingStyles.row}><SettingLabel label="开启方式"/>
             <div className={styles.activationModes} role="group" aria-label="开启方式">
               {([['always','始终开启'],['hold','按住开启'],['toggle','按一下切换开关']] as const).map(([mode,label])=>
                 <button key={mode} type="button" className="secondary-btn" aria-pressed={mode===activation} disabled={bindingLocked}
@@ -69,40 +79,47 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
                     });
                   }}>{label}</button>)}
             </div>
+          </div></SettingField>
+          <div className={settingStyles.fieldGrid}>
+            {activation!=='always'&&<GyroBindingInput field="activation" value={gyro.activation} blocked={gyro.pause_input}
+              split={split} available={canRecord} locked={bindingLocked} recording={recording?.gyroField==='activation'?recording:undefined}
+              onChange={value=>setGyro('activation',value)} onRecord={()=>onRecord('activation')} onCancel={onCancelRecording}/>}
+            <GyroBindingInput field="pause_input" value={gyro.pause_input} blocked={gyro.activation}
+              split={split} available={canRecord} locked={bindingLocked} recording={recording?.gyroField==='pause_input'?recording:undefined}
+              onChange={value=>setGyro('pause_input',value||null)} onRecord={()=>onRecord('pause_input')} onCancel={onCancelRecording}/>
           </div>
-        {activation!=='always'&&<GyroBindingInput field="activation" value={gyro.activation} blocked={gyro.pause_input}
-          split={split} available={canRecord} locked={bindingLocked} recording={recording?.gyroField==='activation'?recording:undefined}
-          onChange={value=>setGyro('activation',value)} onRecord={()=>onRecord('activation')} onCancel={onCancelRecording}/>}
-        <GyroBindingInput field="pause_input" value={gyro.pause_input} blocked={gyro.activation}
-          split={split} available={canRecord} locked={bindingLocked} recording={recording?.gyroField==='pause_input'?recording:undefined}
-          onChange={value=>setGyro('pause_input',value||null)} onRecord={()=>onRecord('pause_input')} onCancel={onCancelRecording}/>
         </SettingField>
         {(activation!=='always'||gyro.pause_input)&&<Range label="扳机与摇杆阈值" value={gyro.activation_threshold}
           min={0} max={0.95} step={0.05} onChange={value=>setGyro('activation_threshold',value)}/>}
-        {!passthrough&&<><Range label="体感灵敏度" value={gyro.sensitivity} min={0.1} max={10} step={0.1} unit="×"
-          onChange={value=>setGyro('sensitivity',value)} help="转得太慢就调高，容易转过头就调低。"/>
-        <Range label="垂直灵敏度比例" value={gyro.vertical_ratio} min={0.1} max={2} step={0.05} unit="×"
-          onChange={value=>setGyro('vertical_ratio',value)}/>
-        <div className={settingStyles.row}><span>防抖预设</span><div className={styles.activationModes} role="group" aria-label="防抖预设">
+      </SettingSection>
+      {!passthrough&&<SettingSection id="motion-sensitivity" title="灵敏度与防抖" defaultOpen summary={<>{gyro.sensitivity}×</>}>
+        <div className={settingStyles.fieldGrid}>
+          <Range label="体感灵敏度" value={gyro.sensitivity} min={0.1} max={10} step={0.1} unit="×"
+            onChange={value=>setGyro('sensitivity',value)} help="转得太慢就调高，容易转过头就调低。"/>
+          <Range label="垂直灵敏度比例" value={gyro.vertical_ratio} min={0.1} max={2} step={0.05} unit="×"
+            onChange={value=>setGyro('vertical_ratio',value)}/>
+        </div>
+        <SettingField label="防抖预设"><div className={settingStyles.row}><SettingLabel label="防抖预设" help="线性预设使用固定灵敏度，并关闭平滑、低速抑制、吸附和刹车。"/><div className={styles.activationModes} role="group" aria-label="防抖预设">
           {smoothingPresets.map(([label,ms])=><button key={ms} type="button" className="secondary-btn" aria-pressed={preset?.[1]===ms}
             onClick={()=>update(draft=>{
               if(ms===0)applyJsmResponse(draft.gyro);
               else if(jsm)draft.gyro.jsm_response={...draft.gyro.jsm_response,smooth_time_ms:ms,smooth_threshold_dps:60,decay_smoothing:false,one_euro:false};
               else {draft.gyro.motion.smoothing='ema';draft.gyro.smoothing_ms=ms;}
             })}>{label}</button>)}
-        </div></div>
-        <p className={styles.hint}>线性预设使用固定灵敏度，并关闭平滑、低速抑制、吸附和刹车。</p>
+        </div></div></SettingField>
         {jsm&&gyro.motion.edge.mode!=='off'&&
           <p className={settingStyles.notice}>此配置的边缘转向设置仅在旧版角速度瞄准中生效。</p>}
-        </>}
-      </>}
-      {passthrough?<>
-        <p className={styles.hint}>使用同时支持陀螺仪和加速度计的实体手柄。设备静止校准和安装方向可在「设备与输入」调整。</p>
-        {missingImu&&<p className={settingStyles.notice}>传感器直通需要同时支持陀螺仪和加速度计的手柄接口</p>}
-        <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
-        <div className="studio-actions"><button type="button" className="secondary-btn" onClick={onOpenDevice}>打开设备校准</button></div>
-      </>:<div className="studio-actions"><button type="button" className="secondary-btn" onClick={onPreviewOutput}>查看输出预览</button></div>}
-    </SettingSection>
+      </SettingSection>}
+    </>}
+    {passthrough&&<SettingSection id="motion-sensor" title={sensorOutputLabel(output)} defaultOpen>
+      <p className={styles.hint}>{output==='dualsense_imu'
+        ?'通过 USB/IP 向虚拟 DualSense 发送校准后的陀螺仪和加速度计数据。可在支持 DualSense 体感的游戏或 Steam 输入中设置瞄准。'
+        :'向虚拟 DualShock 4 发送经设备校准的陀螺仪和加速度计数据。请在支持读取 DS4 传感器的游戏或 Steam 输入中设置体感。'}</p>
+      {missingImu&&<p className={settingStyles.notice}>传感器直通需要同时支持陀螺仪和加速度计的手柄接口</p>}
+      <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
+    </SettingSection>}
+    <MotionOutputSettings profile={profile} update={update} tab="motion" vigemGamepad={vigemGamepad}
+      canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>
     {gyro.enabled&&<>
       {!passthrough&&<>
         <StabilitySettings profile={profile} update={update} onOpenDevice={onOpenDevice} deviceNoise={deviceNoise}/>
@@ -114,12 +131,14 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
         summary={!passthrough&&<>{gyro.motion.custom_filters?.length??0} 个滤波器</>}>
         {passthrough?<>
           <p className={styles.hint}>发送给虚拟手柄前可处理三轴角速度。加速度计数据沿用设备校准。</p>
-          <Range label="直通平滑时间" value={sensorFilter?.smoothing_ms??0} min={0} max={120} step={1} unit=" ms"
+          <div className={settingStyles.fieldGrid}>
+            <Range label="直通平滑时间" value={sensorFilter?.smoothing_ms??0} min={0} max={120} step={1} unit=" ms"
             onChange={smoothing_ms=>setSensorFilter({smoothing_ms})}
             help="平滑值越大，角速度越平稳，快速转动的响应也会变慢。0 关闭平滑。"/>
-          <Range label="直通噪声抑制倍率" value={sensorFilter?.noise_gate??0} min={0} max={5} step={0.1} unit="×"
+            <Range label="直通噪声抑制倍率" value={sensorFilter?.noise_gate??0} min={0} max={5} step={0.1} unit="×"
             onChange={noise_gate=>setSensorFilter({noise_gate})}
             help="按设备静止校准得到的噪声底抑制小幅波动。0 关闭噪声抑制。"/>
+          </div>
           <Toggle label="直通应用原始角速度脚本" value={sensorFilter?.use_custom_filters??false}
             onChange={use_custom_filters=>setSensorFilter({use_custom_filters})}
             help="在直通时应用下方已启用的 Rhai 脚本。"/>

@@ -1,4 +1,4 @@
-import {Fragment,useState} from 'react';
+import {useId,useState} from 'react';
 import {Dialog, Range, Toggle} from './Controls';
 import {inputConfig, inputDeadzone, setInputDeadzone} from '../controller-input';
 import type {ControllerInputConfig, Profile, StickDirections} from '../types';
@@ -12,11 +12,13 @@ type Props = {profile: Profile; update: (change: (profile: Profile) => void) => 
 export function StickInputSettings({profile,update}:Props) {
   return <SettingSection id="stick-input" title="基础输入与防回弹"
     summary={<>左 {Math.round(inputDeadzone(profile,'left')*100)}% · 右 {Math.round(inputDeadzone(profile,'right')*100)}%</>}>
-    {(['left','right'] as const).map(side=><Range key={side}
-      label={side==='left'?'左摇杆输入死区':'右摇杆输入死区'}
-      settingPath={['input.'+(side==='left'?'deadzone_left':'deadzone_right'),...(profile.stick_mouse.stick===side?['stick_mouse.deadzone']:[])]}
-      value={inputDeadzone(profile,side)*100} min={0} max={94} step={1} unit="%"
-      onChange={v=>update(p=>setInputDeadzone(p,side,v/100))}/>)}
+    <div className={settingStyles.fieldGrid}>
+      {(['left','right'] as const).map(side=><Range key={side}
+        label={side==='left'?'左摇杆输入死区':'右摇杆输入死区'}
+        settingPath={['input.'+(side==='left'?'deadzone_left':'deadzone_right'),...(profile.stick_mouse.stick===side?['stick_mouse.deadzone']:[])]}
+        value={inputDeadzone(profile,side)*100} min={0} max={94} step={1} unit="%"
+        onChange={v=>update(p=>setInputDeadzone(p,side,v/100))}/>)}
+    </div>
     <p className={styles.hint}>摇杆鼠标、快速转向、方向映射和虚拟摇杆共用这里的输入死区。</p>
     <Toggle label="启用摇杆防回弹" settingPath="stick_rebound_ms" value={profile.stick_rebound_ms!=null}
       onChange={enabled=>update(p=>{p.stick_rebound_ms=enabled?40:null;})}/>
@@ -28,28 +30,34 @@ export function StickInputSettings({profile,update}:Props) {
 
 export function StickDirectionSettings({profile,update}:Props) {
   const c=inputConfig(profile);
+  const directionId=useId();
   const defaultOverlap=Number((90-2*Math.atan(native.stick_direction_ratio)*180/Math.PI).toFixed(2));
   return <SettingSection id="stick-directions" title="摇杆方向映射" summary="按轴阈值或八向重叠">
-    {(['lstick_directions','rstick_directions'] as const).map((key,index)=>{
-      const overlapKey=index===0?'lstick_overlap_degrees':'rstick_overlap_degrees';
-      const degrees=c[overlapKey]??defaultOverlap;
-      return <Fragment key={key}>
-      <SettingField label={index===0?'左摇杆方向判定':'右摇杆方向判定'} path={'input.'+key}>
-        <div className={settingStyles.row}><SettingLabel label={index===0?'左摇杆方向判定':'右摇杆方向判定'}/>
-          <select aria-label={index===0?'左摇杆方向判定':'右摇杆方向判定'} value={c[key]??'axis_threshold'} onChange={event=>update(p=>{p.input={...inputConfig(p),[key]:event.target.value as StickDirections};})}>
-            <option value="eight_way">八向重叠（适合 WASD）</option><option value="axis_threshold">按轴阈值</option>
-          </select>
-        </div>
-      </SettingField>
-      {c[key]==='eight_way'&&<>
-        <Range label={index===0?'左摇杆斜向重叠角度':'右摇杆斜向重叠角度'} settingPath={'input.'+overlapKey}
-          value={degrees} min={0} max={90} step={0.01} unit="°"
-          onChange={value=>update(p=>{p.input={...inputConfig(p),[overlapKey]:value};})}/>
-        <StickOverlapPreview degrees={degrees} label={index===0?'左摇杆方向区域预览':'右摇杆方向区域预览'}
-          onReset={()=>update(p=>{p.input={...inputConfig(p),[overlapKey]:null};})}/>
-      </>}
-      </Fragment>;
-    })}
+    <div className={settingStyles.fieldGrid}>
+      {(['lstick_directions','rstick_directions'] as const).map((key,index)=>{
+        const overlapKey=index===0?'lstick_overlap_degrees':'rstick_overlap_degrees';
+        const degrees=c[overlapKey]??defaultOverlap;
+        const label=index===0?'左摇杆方向判定':'右摇杆方向判定';
+        const id=directionId+'-'+key;
+        return <div key={key}>
+          <SettingField label={label} path={'input.'+key}>
+            <div className={settingStyles.row}>
+              <SettingLabel label={label} htmlFor={id}/>
+              <select id={id} aria-label={label} value={c[key]??'axis_threshold'} onChange={event=>update(p=>{p.input={...inputConfig(p),[key]:event.target.value as StickDirections};})}>
+                <option value="eight_way">八向重叠（适合 WASD）</option><option value="axis_threshold">按轴阈值</option>
+              </select>
+            </div>
+          </SettingField>
+          {c[key]==='eight_way'&&<>
+            <Range label={index===0?'左摇杆斜向重叠角度':'右摇杆斜向重叠角度'} settingPath={'input.'+overlapKey}
+              value={degrees} min={0} max={90} step={0.01} unit="°"
+              onChange={value=>update(p=>{p.input={...inputConfig(p),[overlapKey]:value};})}/>
+            <StickOverlapPreview degrees={degrees} label={index===0?'左摇杆方向区域预览':'右摇杆方向区域预览'}
+              onReset={()=>update(p=>{p.input={...inputConfig(p),[overlapKey]:null};})}/>
+          </>}
+        </div>;
+      })}
+    </div>
     <p className={styles.hint}>八向重叠：斜推同时触发相邻两键，例如 W+D；映射阈值按摇杆整体推离中心的幅度判断。按轴阈值：水平和垂直方向分别达到阈值才触发。</p>
     {(c.lstick_directions==='eight_way'||c.rstick_directions==='eight_way')&&<p className={styles.hint}>重叠角度越大，同时触发相邻两方向的范围越宽。0° 只触发单方向，90° 时除正方向外均触发相邻两方向。默认约 36.87°。</p>}
   </SettingSection>;
@@ -61,18 +69,20 @@ export function StickCalibrationSettings({profile,update}:Props) {
   const [error,setError]=useState<string|null>(null);
   return <SettingSection id="stick-calibration" title="中心与圆周校准" summary="偏移补偿与方向倍率">
     <p className={styles.hint}>中心偏移使用右为正、上为正的坐标。补偿随当前配置保存。</p>
-    {(['lstick_center','rstick_center'] as const).map((key,side)=>
-      <SettingField key={key} label={side===0?'左摇杆中心偏移':'右摇杆中心偏移'} path={'input.'+key}>
-        {[0,1].map(axis=><Range key={axis} settingPath={[]} slider={false}
-          label={side===0?(axis===0?'左摇杆中心水平偏移':'左摇杆中心垂直偏移'):(axis===0?'右摇杆中心水平偏移':'右摇杆中心垂直偏移')}
-          value={c[key][axis]} min={-1} max={1} step={0.001} onChange={value=>update(p=>{
-            const input=inputConfig(p),center=[...input[key]];center[axis]=value;p.input={...input,[key]:center};
-          })}/>)}
+    <div className={settingStyles.fieldGrid}>
+      {(['lstick_center','rstick_center'] as const).map((key,side)=>
+        <SettingField key={key} label={side===0?'左摇杆中心偏移':'右摇杆中心偏移'} path={'input.'+key}>
+          {[0,1].map(axis=><Range key={axis} settingPath={[]} slider={false}
+            label={side===0?(axis===0?'左摇杆中心水平偏移':'左摇杆中心垂直偏移'):(axis===0?'右摇杆中心水平偏移':'右摇杆中心垂直偏移')}
+            value={c[key][axis]} min={-1} max={1} step={0.001} onChange={value=>update(p=>{
+              const input=inputConfig(p),center=[...input[key]];center[axis]=value;p.input={...input,[key]:center};
+            })}/>)}
+        </SettingField>)}
+      {(['lstick_radial','rstick_radial'] as const).map((key,index)=><SettingField key={key}
+        label={index===0?'左摇杆圆周倍率':'右摇杆圆周倍率'} path={'input.'+key}>
+        <SettingLabel label={index===0?'左摇杆圆周倍率':'右摇杆圆周倍率'}/><p className={styles.hint}>{c[key].every(v=>v===1)?'无修正':'已自定义'}</p>
       </SettingField>)}
-    {(['lstick_radial','rstick_radial'] as const).map((key,index)=><SettingField key={key}
-      label={index===0?'左摇杆圆周倍率':'右摇杆圆周倍率'} path={'input.'+key}>
-      <SettingLabel label={index===0?'左摇杆圆周倍率':'右摇杆圆周倍率'}/><p className={styles.hint}>{c[key].every(v=>v===1)?'无修正':'已自定义'}</p>
-    </SettingField>)}
+    </div>
     <button type="button" className="secondary-btn" onClick={()=>{
       setError(null);setRadial({left:JSON.stringify(c.lstick_radial),right:JSON.stringify(c.rstick_radial)});
     }}>编辑摇杆圆周校准</button>
@@ -102,14 +112,14 @@ export function TriggerInputSettings({profile, update}: Props) {
 
   return <><SettingSection id="trigger-input" title="扳机行程" summary="最小与最大输入">
     <p className={styles.hint}>按当前配置修正左右扳机的最小和最大输入。全拉按修正后的最大行程识别。</p>
-    <div className={styles.grid}>
-      {number('ltrig_min','左扳机最小原始值')}{number('ltrig_max','左扳机最大原始值')}
-      {number('rtrig_min','右扳机最小原始值')}{number('rtrig_max','右扳机最大原始值')}
+    <div className={settingStyles.fieldGrid}>
+      {number('ltrig_min','左扳机最小原始值')}{number('rtrig_min','右扳机最小原始值')}
+      {number('ltrig_max','左扳机最大原始值')}{number('rtrig_max','右扳机最大原始值')}
     </div>
     </SettingSection>
     <SettingSection id="trigger-digital" title="数字扳机" summary={c.digital_triggers?'已启用':'关闭'}>
       <Toggle label="使用数字扳机" value={c.digital_triggers} onChange={v=>set('digital_triggers',v)}/>
-      {c.digital_triggers&&<div className={styles.grid}>
+      {c.digital_triggers&&<div className={settingStyles.fieldGrid}>
         {number('ltrig_digital_threshold','左扳机数字阈值')}{number('rtrig_digital_threshold','右扳机数字阈值')}
         {number('trig_hysteresis','扳机数字回差',0,0.5)}
         {number('trig_debounce_ms','扳机松开防抖时间',native.trigger_debounce_ms,5000,1)}

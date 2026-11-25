@@ -9,7 +9,6 @@ import { GameProfilesPage } from './studio/GameProfilesPage';
 import { BatchBindings, addedDraftActions, emptyBatchProgress, type BatchProgress, type BatchScope, type BindingWindowState } from './studio/BatchBindings';
 import type { Capture, CaptureKind } from './studio/ActionMappings';
 import type { GameTab } from './studio/game-tabs';
-import { MotionSettings } from './studio/MotionSettings';
 import { DeviceCalibration } from './studio/DeviceCalibration';
 import { ProfileLibrary } from './studio/ProfileLibrary';
 import { ProfileShareDialog } from './studio/ProfileShareDialog';
@@ -17,14 +16,14 @@ import type { CommunityProfile, SharedSource } from './profile-sharing';
 import { SystemPage, type ComponentAction } from './studio/SystemPage';
 import {ComponentSetup,ComponentSetupNotice} from './studio/ComponentSetup';
 import {useComponentStatus} from './studio/component-status';
-import {componentPlan,type InstallableComponent} from './component-setup';
+import {componentNames,componentPlan,installedAppNames,type ComponentResult,type InstallableComponent} from './component-setup';
 import {ControllerOverlaySettings} from './studio/ControllerOverlaySettings';
 import { SoftwareUpdate } from './studio/SoftwareUpdate';
 import { useStudioUpdate } from './studio/software-update';
 import { ScopedSwitchSettings } from './studio/SwitchSettings';
 import { GameDestination } from './studio/GameGroups';
 import { allGamesValue, gameOf, importDestination, newGameValue, noGames } from './game-library';
-import type {GameEdit} from './types';
+import type {ComponentKind,ComponentRemoval,GameEdit} from './types';
 import { Dialog } from './studio/Controls';
 import {ActionEditor} from './studio/ActionEditor';
 import {modifierOutputs} from './keyboard';
@@ -56,6 +55,7 @@ const templates = [
 type Template = (typeof templates)[number][0];
 type Editor = { index: number | null; action: Action };
 type SaveResult = { entry: Entry; applied: boolean; warning: string | null };
+type DriverResult = {cancelled:boolean; rebootRequired:boolean};
 type PadCaptureSession = {kind:'pad'; index:null; deviceId:number; restartCount:number};
 type GyroCapture = PadCaptureSession & GyroBindingRecording & {split:boolean};
 type GamepadCapture = PadCaptureSession & GamepadBindingRecording & {onGamepadInput:(input:string)=>void} & Partial<Pick<PadPickerRequest,'controlId'|'allowedInputs'>>;
@@ -119,9 +119,11 @@ export default function App() {
   const [editor, setEditor] = useState<Editor | null>(null);
   const [capture, setCapture] = useState<ActiveCapture | null>(null);
   const [componentSetupOpen,setComponentSetupOpen]=useState(false);
-  const [componentRebootRequired,setComponentRebootRequired]=useState(false);
+  const [componentRestarts,setComponentRestarts]=useState<ComponentKind[]>([]);
   const [installingComponent,setInstallingComponent]=useState<InstallableComponent|null>(null);
-  const [componentResult,setComponentResult]=useState<{message:string;error:boolean}|null>(null);
+  const [repairingHidHide,setRepairingHidHide]=useState(false);
+  const [uninstallingComponent,setUninstallingComponent]=useState<ComponentKind|null>(null);
+  const [componentResult,setComponentResult]=useState<ComponentResult|null>(null);
   const componentPrompted=useRef(localStorage.getItem('motion-studio-component-guide-v1')==='seen');
   const [deleting, setDeleting] = useState<Entry | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState<Entry | null>(null);
@@ -159,8 +161,18 @@ export default function App() {
 
   const native = '__TAURI_INTERNALS__' in window;
   const {components,checking:checkingComponents,error:componentError,refresh:refreshComponents}=useComponentStatus(native,page==='settings');
-  const setupPlan=useMemo(()=>componentPlan(workspace?.settings??{output_backend:'hid_maestro',auto_hide:true},draft?.profile.virtual_gamepad,components),
-    [workspace?.settings,draft?.profile.virtual_gamepad,components]);
+  const setupPlan=useMemo(()=>componentPlan(workspace?.settings??{output_backend:'hid_maestro',auto_hide:true},draft?.profile.virtual_gamepad,components,componentRestarts),
+    [workspace?.settings,draft?.profile.virtual_gamepad,components,componentRestarts]);
+  const componentRebootRequired=setupPlan.items.some(item=>item.status==='restart_required');
+  useEffect(()=>{
+    const kind=componentResult?.awaitingWindows;
+    if(!kind || !components)return;
+    if(components[kind]?.status==='restart_required') {
+      setComponentResult({message:`请重启 Windows 以完成 ${componentNames[kind]} 的卸载。`,error:false});
+    } else if(components[kind]?.status==='missing' && !components.uninstallMethods?.[kind]) {
+      setComponentResult({message:`已卸载 ${componentNames[kind]}`,error:false});
+    }
+  },[componentResult,components]);
   const studioUpdate = useStudioUpdate(native, workspace?.settings);
   const entries = workspace?.profiles ?? [];
   const games = workspace?.settings.games ?? noGames;
@@ -563,7 +575,7 @@ export default function App() {
     if (emit) {
       let current=components;
       if(!current||setupPlan.issues.length)current=await refreshComponents().catch(()=>null);
-      if(componentRebootRequired||componentPlan(workspace!.settings,draft.profile.virtual_gamepad,current).blocking.length) {
+      if(componentPlan(workspace!.settings,draft.profile.virtual_gamepad,current,componentRestarts).blocking.length) {
         setComponentSetupOpen(true);
         return false;
       }
@@ -859,20 +871,24 @@ export default function App() {
   function installComponent(kind:InstallableComponent) {
     installComponents([kind]);
   }
+  function requireComponentRestart(kind:ComponentKind) {
+    setComponentRestarts(current=>current.includes(kind)?current:[...current,kind]);
+  }
   function installComponents(kinds:InstallableComponent[]) {
     if(active||checkingComponents||!kinds.length)return;
     void run(async()=>{
       setComponentResult(null);
-      let needsRestart=componentRebootRequired;
+      let needsRestart=kinds.some(kind=>componentRestarts.includes(kind));
       try {
         for(const kind of kinds) {
+          if(componentRestarts.includes(kind))continue;
           // Recheck each item: a previous installer or another app may have
           // completed it already. Never install based on a stale missing state.
           const before=await refreshComponents();
           if(before[kind]?.status!=='missing')continue;
           setInstallingComponent(kind);
-          const result=await invoke<{cancelled:boolean;rebootRequired:boolean}>('install_component',{kind});
-          if(result.rebootRequired){needsRestart=true;setComponentRebootRequired(true);}
+          const result=await invoke<DriverResult>('install_component',{kind});
+          if(result.rebootRequired){needsRestart=true;requireComponentRestart(kind);}
           const after=await refreshComponents();
           if(result.cancelled){setComponentResult({message:'已取消安装',error:false});notify('已取消安装');return;}
           if(after[kind]?.status==='missing'&&!result.rebootRequired)throw new Error('安装已结束，但尚未检测到组件。请重新检测，或查看数据目录中的安装日志。');
@@ -883,6 +899,66 @@ export default function App() {
         await refreshComponents().catch(()=>{});
         setComponentResult({message:String(error),error:true});throw error;
       } finally {setInstallingComponent(null);}
+    });
+  }
+
+  function repairHidHide() {
+    if (active || status?.visibility?.requested || checkingComponents || componentRestarts.includes('hidhide')) return;
+    void run(async () => {
+      setRepairingHidHide(true);
+      setComponentResult(null);
+      try {
+        const result = await invoke<{message: string; rebootRequired: boolean}>('repair_hidhide');
+        if (result.rebootRequired) requireComponentRestart('hidhide');
+        setComponentResult({message: result.message, error: false});
+      } catch (error) {
+        setComponentResult({message: String(error), error: true});
+      } finally {
+        await Promise.allSettled([refreshComponents(), syncEngineSnapshot()]);
+        setRepairingHidHide(false);
+      }
+    });
+  }
+
+  function uninstallComponent({kind,method}:ComponentRemoval) {
+    if(active||checkingComponents||componentRestarts.includes(kind))return;
+    void run(async()=>{
+      setUninstallingComponent(kind);
+      setComponentResult(null);
+      try {
+        const result=await invoke<DriverResult>('uninstall_component',{kind,method});
+        // Opening Windows Settings does not tell us if a removal was completed.
+        let message: string;
+        if(result.cancelled) {
+          message=`已取消卸载 ${componentNames[kind]}`;
+        } else {
+          // An explicitly removed prerequisite should not reopen first-use setup.
+          closeComponentSetup();
+          if(method==='windows') {
+            message=`在 Windows「已安装的应用」中找到 ${installedAppNames[kind]} 并卸载。返回此页会重新检测。`;
+          } else {
+            const current=result.rebootRequired?null:await refreshComponents();
+            const status=current?.[kind]?.status;
+            if(result.rebootRequired||status==='restart_required') {
+              requireComponentRestart(kind);
+              message=`请重启 Windows 以完成 ${componentNames[kind]} 的卸载。`;
+            } else if(!status||status==='unknown') {
+              throw new Error('卸载程序已结束，但未能确认组件状态。请重新检测。');
+            } else if(status!=='missing'||current?.uninstallMethods?.[kind]) {
+              throw new Error(`卸载程序已结束，但仍检测到 ${componentNames[kind]}。请重启 Windows 后重新检测。`);
+            } else {
+              message=`已卸载 ${componentNames[kind]}`;
+            }
+          }
+        }
+        if(result.cancelled||result.rebootRequired)await refreshComponents().catch(()=>{});
+        setComponentResult({message,error:false,awaitingWindows:method==='windows'&&!result.cancelled?kind:undefined});
+      } catch(error) {
+        await refreshComponents().catch(()=>{});
+        setComponentResult({message:String(error),error:true});
+      } finally {
+        setUninstallingComponent(null);
+      }
     });
   }
 
@@ -1006,16 +1082,16 @@ export default function App() {
             onRecordGamepad={(wholeStick,onGamepadInput,outerRing)=>beginCapture({kind:'pad',index:null,wholeStick,onGamepadInput,outerRing})}
             onUpdate={update} onEdit={openEditor} onBatch={openBatch} onTab={tab=>navigate('games',tab)}
             onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={()=>openJsmImport()}
-            motion={<MotionSettings profile={profile} profileId={draft.id} update={update} split={splitTouchpad}
-              missingImu={!!device&&(!device.gyro||!device.accelerometer)}
-              deviceNoise={workspace.settings.motion_calibrations[devicePath]?.gyro_noise_dps}
-              recording={gyroRecording} canRecord={canRecordGyro}
-              bindingLocked={!!gyroRecording||!!status?.binding_capture||!!status?.motion?.measuring}
-              onRecord={recordGyroInput} onCancelRecording={cancelCapture}
-              onOpenDevice={openDeviceCalibration} onPreviewOutput={openOutputPreview}
-              filtersRunning={status?.profile_id===draft.id&&['running','observing'].includes(status.state)}
-              filterStatuses={filterStatus?.length ? filterStatus : undefined}
-              onMotionAction={motionAction}/>}
+            motion={{
+              split:splitTouchpad, missingImu:!!device&&(!device.gyro||!device.accelerometer),
+              deviceNoise:workspace.settings.motion_calibrations[devicePath]?.gyro_noise_dps,
+              recording:gyroRecording, canRecord:canRecordGyro,
+              bindingLocked:!!gyroRecording||!!status?.binding_capture||!!status?.motion?.measuring,
+              onRecord:recordGyroInput, onCancelRecording:cancelCapture,
+              onOpenDevice:openDeviceCalibration, onPreviewOutput:openOutputPreview,
+              filtersRunning:status?.profile_id===draft.id&&['running','observing'].includes(status.state),
+              filterStatuses:filterStatus?.length ? filterStatus : undefined, onMotionAction:motionAction,
+            }}
             onExport={() => void run(() => exportProfile(draft))} onOpenFolder={() => openLocation('profiles')} onNavigate={navigate} />
         : <section className="app-card"><h2>创建你的第一份游戏配置</h2>
             <p className="studio-muted">选择合适的模板后，就可以按游戏动作配置手柄。</p>
@@ -1083,6 +1159,9 @@ export default function App() {
         onBackend={backend => void run(() => changeSettings({output_backend: backend}), '输出后端已保存，下次开始映射时生效')}
         busy={busy} onRefresh={() => void run(refreshComponents)} onOpen={openLocation} onComponent={componentAction}
         onInstall={installComponent} onSetup={()=>setComponentSetupOpen(true)} installationBlocked={checkingComponents}
+        onRepairHidHide={repairHidHide} repairingHidHide={repairingHidHide}
+        onUninstall={uninstallComponent} uninstalling={uninstallingComponent} componentResult={componentResult}
+        checkError={componentError} pendingRestart={componentRestarts} requiredComponents={setupPlan.items} onStop={stop}
         onGameConfig={()=>navigate('games')}
         onRecover={() => void run(() => invoke('engine_action', { action: 'recover' }), '引擎已重启，请手动启用输出')}
         onRestore={() => void run(async () => { await invoke('restore_backup', { id: 'settings' }); await refresh(); }, '已恢复设置备份')}
@@ -1092,6 +1171,7 @@ export default function App() {
     {componentSetupOpen&&<ComponentSetup plan={setupPlan} checking={checkingComponents} error={componentError}
       rebootRequired={componentRebootRequired} profileName={draft?.profile.name} busy={busy} outputActive={active}
       installing={installingComponent} result={componentResult} onInstall={installComponent} onRefresh={()=>void run(refreshComponents)}
+      onRepairHidHide={repairHidHide} repairingHidHide={repairingHidHide}
       onInstallAll={()=>installComponents(setupPlan.installable)}
       onClose={closeComponentSetup} onStop={stop} onUsbip={()=>openLocation('usbip')}
       onSettings={()=>{closeComponentSetup();navigate('settings');}}/>}

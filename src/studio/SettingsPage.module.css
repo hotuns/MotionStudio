@@ -6,7 +6,7 @@
 .heading p { margin: 5px 0 0; max-width: 730px; }
 .page p { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin: 8px 0; }
 .page small { color: var(--text-muted); line-height: 1.6; }
-.settingRow { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 0; border-top: 1px solid var(--panel-border); }
+.settingRow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 16px 0; border-top: 1px solid var(--panel-border); }
 .heading + .settingRow { padding-top: 0; border-top: 0; }
 .settingRow:last-child { padding-bottom: 0; }
 .settingRow > div { min-width: 0; }
@@ -25,7 +25,8 @@
 .badge { display: inline-flex; padding: 3px 7px; border: 1px solid var(--panel-border); border-radius: var(--control-radius); font-size: 11px; color: var(--text-muted); background: var(--bg-2); }
 .badge[data-ready=true] { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 25%, var(--border-1)); background: color-mix(in srgb, var(--accent) 7%, var(--bg-2)); }
 .statusLine { justify-content: flex-start; margin: 10px 0; }
-.field { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 12px; align-items: center; margin: 16px 0; max-width: 720px; font-size: 12px; }
+.field { display: grid; gap: 6px; margin: 12px 0 6px; max-inline-size: 24rem; font-size: 13px; }
+.field input[type=number] { width: min(100%, 7rem); }
 .field select { width: 100%; min-width: 0; min-height: 34px; padding: 7px 10px; border-radius: var(--control-radius); border: 1px solid var(--border-1); background: var(--bg-input); color: var(--text-strong); font: inherit; }
 .check { display: flex; align-items: center; gap: 9px; margin: 14px 0 8px; }
 .check input { accent-color: var(--accent); }
@@ -62,7 +63,5 @@
   .runtimeGrid { grid-template-columns: 1fr; }
 }
 @media (max-width: 540px) {
-  .field { grid-template-columns: 1fr; gap: 6px; }
-  .settingRow { flex-wrap: wrap; }
   .advanced > summary span { display: block; margin: 5px 0 0 16px; }
 }

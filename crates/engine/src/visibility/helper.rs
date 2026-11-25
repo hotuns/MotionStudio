@@ -1,11 +1,11 @@
 use super::*;
-use crate::visibility::control::{self, Gate};
-use flexinput_hidmaestro::hidhide::HidHide;
-use policy::{Driver, DriverState, Journal, Record};
+use crate::hidmaestro::transport::PIPE_MESSAGE_BYTES;
+use crate::visibility::control::{Gate, RealDriver};
+use policy::{Driver, Journal, Record};
 use std::{fs, io::Read};
 use windows_sys::Win32::{Foundation::*, System::Threading::*};
 
-pub(super) const JOURNAL_FILE: &str = "hidhide-session.json";
+use crate::visibility::SESSION_JOURNAL;
 struct FileJournal(PathBuf);
 impl Journal for FileJournal {
     fn load(&self) -> Result<Option<Record>> {
@@ -31,40 +31,6 @@ impl Journal for FileJournal {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),
         }
-    }
-}
-struct RealDriver(HidHide);
-impl RealDriver {
-    fn open() -> Result<Self> {
-        let mut last = 0;
-        for _ in 0..5 {
-            match HidHide::open_checked() {
-                Ok(driver) => return Ok(Self(driver)),
-                Err(code) => last = code,
-            }
-            if last != 32 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        bail!("无法访问 HidHide（Windows {last}）。请确认已安装 HidHide，并关闭官方配置工具后重试；也可停止后关闭自动隐藏")
-    }
-}
-impl Driver for RealDriver {
-    fn read(&mut self) -> Result<DriverState> {
-        control::read_state(&self.0).map_err(anyhow::Error::msg)
-    }
-    fn set_hidden(&mut self, paths: &[String]) -> Result<()> {
-        ensure!(self.0.set_blacklist(paths), "HidHide 拒绝更新实体隐藏规则");
-        Ok(())
-    }
-    fn set_apps(&mut self, paths: &[String]) -> Result<()> {
-        ensure!(self.0.set_whitelist(paths), "HidHide 拒绝登记引擎读取权限");
-        Ok(())
-    }
-    fn set_active(&mut self, active: bool) -> Result<()> {
-        ensure!(self.0.set_active(active), "HidHide 拒绝更新启用状态");
-        Ok(())
     }
 }
 fn image(process: HANDLE) -> Result<String> {
@@ -121,21 +87,28 @@ impl Lease {
         self.releasing = false;
         Ok(())
     }
-    fn acquire(&mut self, path: &str) -> Result<()> {
+    fn acquire(&mut self, path: &str, gameinput_container: Option<&str>) -> Result<()> {
         if self.record.is_some() || self.journal.load()?.is_some() {
             self.restore()?;
         }
-        let targets = topology::selected(path)?.context("所选实体手柄已断开，请重新开始映射")?;
+        let targets = topology::selected(path, gameinput_container)?
+            .context("所选实体手柄已断开，请重新开始映射")?;
+        let status = VisibilityStatus {
+            requested: true,
+            active: true,
+            hidden_paths: targets.clone(),
+            error: None,
+        };
+        let reply = Reply::State { status: status.clone() };
+        ensure!(
+            serde_json::to_vec(&reply)?.len() < PIPE_MESSAGE_BYTES,
+            "所选接收器接口过多，无法自动隐藏。请停止后手动管理隐藏"
+        );
         self.gate = Some(Gate::acquire()?);
         self.baseline = topology::virtual_ids(&topology::inventory());
         let mut driver = RealDriver::open()?;
         let record = policy::acquire(&mut driver, &mut self.journal, targets, self.engine.clone())?;
-        self.status = VisibilityStatus {
-            requested: true,
-            active: true,
-            hidden_paths: record.targets.clone(),
-            error: None,
-        };
+        self.status = status;
         self.record = Some(record);
         self.preparing = true;
         self.releasing = false;
@@ -172,7 +145,7 @@ pub(super) fn run(parent_pid: u32, token: &str) -> Result<()> {
     );
     let mut pipe = Pipe::connect(token, parent_pid)?;
     let mut lease = Lease {
-        journal: FileJournal(root()?.join(JOURNAL_FILE)),
+        journal: FileJournal(root()?.join(SESSION_JOURNAL)),
         gate: None,
         record: None,
         status: VisibilityStatus::default(),
@@ -213,7 +186,10 @@ pub(super) fn run(parent_pid: u32, token: &str) -> Result<()> {
                 let mut shutdown = false;
                 let result = (|| -> Result<()> {
                     match control {
-                        Control::Acquire { device_path } => lease.acquire(&device_path),
+                        Control::Acquire {
+                            device_path,
+                            gameinput_container,
+                        } => lease.acquire(&device_path, gameinput_container.as_deref()),
                         Control::Preparing {} => {
                             ensure!(
                                 lease.record.is_some() && !lease.releasing,
@@ -317,7 +293,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("motion-visibility-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&directory).unwrap();
-        let path = directory.join(JOURNAL_FILE);
+        let path = directory.join(SESSION_JOURNAL);
         let record = Record {
             version: 1,
             targets: vec![r"HID\VID_1234&PID_5678\PAD".into()],

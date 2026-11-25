@@ -74,7 +74,7 @@ impl Record {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.version == 1, "未知的自动隐藏恢复记录版本");
         ensure!(
-            !self.targets.is_empty() && self.targets.len() <= 8 && self.added.len() <= 8,
+            !self.targets.is_empty() && self.added.len() <= self.targets.len(),
             "自动隐藏恢复记录不完整"
         );
         ensure!(
@@ -101,6 +101,43 @@ impl Record {
     }
 }
 
+fn authorized_apps(before: &DriverState, engine: &str) -> Result<Vec<String>> {
+    ensure!(
+        !before.inverse,
+        "HidHide 正在使用反向应用列表，请先在官方工具改为普通模式"
+    );
+    let mut apps = before.apps.clone();
+    push_unique(&mut apps, engine.to_owned());
+    Ok(apps)
+}
+
+fn confirm_engine_access(
+    driver: &mut impl Driver,
+    before: &DriverState,
+    apps: &[String],
+    engine: &str,
+) -> Result<DriverState> {
+    if apps != before.apps.as_slice() {
+        driver
+            .set_apps(apps)
+            .context("HidHide 引擎读取权限设置失败")?;
+    }
+    let allowed = driver.read()?;
+    ensure!(
+        !allowed.inverse && contains(&allowed.apps, engine),
+        "HidHide 未确认引擎读取权限"
+    );
+    Ok(allowed)
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn authorize_engine(driver: &mut impl Driver, engine: &str) -> Result<()> {
+    let before = driver.read()?;
+    let apps = authorized_apps(&before, engine)?;
+    confirm_engine_access(driver, &before, &apps, engine)?;
+    Ok(())
+}
+
 /// The recovery record is durable before the first driver write. Whitelist
 /// registration is application authorization and intentionally persists.
 pub fn acquire(
@@ -114,12 +151,7 @@ pub fn acquire(
         "上次自动隐藏尚未恢复，请先恢复隐藏规则"
     );
     let before = driver.read()?;
-    ensure!(
-        !before.inverse,
-        "HidHide 正在使用反向应用列表，请先在官方工具改为普通模式"
-    );
-    let mut apps = before.apps.clone();
-    push_unique(&mut apps, engine.clone());
+    let apps = authorized_apps(&before, &engine)?;
     let added: Vec<_> = targets
         .iter()
         .filter(|p| !contains(&before.hidden, p))
@@ -139,16 +171,7 @@ pub fn acquire(
         .save(&record)
         .context("无法保存自动隐藏恢复记录，未修改隐藏规则")?;
     let result = (|| {
-        if apps != before.apps {
-            driver
-                .set_apps(&apps)
-                .context("HidHide 引擎读取权限设置失败")?;
-        }
-        let allowed = driver.read()?;
-        ensure!(
-            !allowed.inverse && contains(&allowed.apps, &record.engine),
-            "HidHide 未确认引擎读取权限"
-        );
+        let allowed = confirm_engine_access(driver, &before, &apps, &record.engine)?;
         let mut hidden = allowed.hidden;
         for path in &record.targets {
             push_unique(&mut hidden, path.clone());
@@ -288,6 +311,33 @@ mod tests {
         r"\Device\HarddiskVolume3\Studio\motion-engine.exe".into()
     }
     #[test]
+    fn repair_adds_the_current_engine_and_preserves_existing_policy() {
+        let mut driver = Mock {
+            state: DriverState {
+                active: true,
+                inverse: false,
+                hidden: target(),
+                apps: vec![r"\Device\HarddiskVolume3\Other\Mapper.exe".into()],
+            },
+            ..Default::default()
+        };
+        let mut expected = driver.state.clone();
+        expected.apps.push(engine());
+        authorize_engine(&mut driver, &engine()).unwrap();
+        authorize_engine(&mut driver, &engine()).unwrap();
+        assert_eq!(driver.state, expected);
+        assert_eq!(driver.events, ["allow"]);
+    }
+    #[test]
+    fn repair_respects_inverted_application_lists() {
+        let mut driver = Mock::default();
+        driver.state.inverse = true;
+        let expected = driver.state.clone();
+        assert!(authorize_engine(&mut driver, &engine()).is_err());
+        assert_eq!(driver.state, expected);
+        assert!(driver.events.is_empty());
+    }
+    #[test]
     fn whitelist_precedes_hiding_and_stop_restores_only_added_entries() {
         let mut d = Mock::default();
         d.state.hidden = vec!["external".into()];
@@ -323,6 +373,23 @@ mod tests {
         restore(&mut d, &mut j).unwrap();
         assert_eq!(d.state.hidden, ["other-new-rule"]);
         assert!(d.state.active);
+    }
+    #[test]
+    fn whole_receiver_rules_restore_only_the_instances_added_by_the_session() {
+        let mut d = Mock::default();
+        let mut j = Memory::default();
+        let receiver = r"USB\VID_4131&PID_3519\RECEIVER".to_owned();
+        let mut targets = vec![receiver];
+        targets.extend((0..12).map(|collection| {
+            format!(r"HID\VID_4131&PID_3519&MI_01&COL{collection:02X}\RECEIVER")
+        }));
+        let manual = vec![targets[1].clone(), r"HID\VID_1234&PID_5678\MANUAL".into()];
+        d.state.hidden = manual.clone();
+        acquire(&mut d, &mut j, targets.clone(), engine()).unwrap();
+        assert!(targets.iter().all(|id| contains(&d.state.hidden, id)));
+        restore(&mut d, &mut j).unwrap();
+        assert_eq!(d.state.hidden, manual);
+        assert!(!d.state.active);
     }
     #[test]
     fn failed_journal_save_cannot_change_driver_state() {

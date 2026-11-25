@@ -1,5 +1,5 @@
-.preview { display: flex; align-items: center; gap: 20px; margin: 8px 0 16px; padding: 8px 12px; }
-.preview svg { width: 128px; height: 128px; flex-shrink: 0; }
+.preview { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 8px 0 16px; }
+.preview svg { width: min(128px, 100%); height: auto; flex-shrink: 0; }
 .preview path { stroke: var(--border-1); stroke-width: .7; }
 .preview text { fill: var(--text-strong); font-size: 14px; }
 .cardinal { fill: var(--bg-1-5); background: var(--bg-1-5); }

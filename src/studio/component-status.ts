@@ -17,8 +17,14 @@ export function useComponentStatus(native:boolean,settingsPage:boolean) {
     }).finally(()=>{request.current=null;setChecking(false);});
     request.current=next;return next;
   },[]);
-  // Check once at startup and when entering settings, never on the input poll.
+  // Windows may finish a driver change while Settings is in the background.
   useEffect(()=>{if(native)void refresh().catch(()=>{});},[native,refresh]);
-  useEffect(()=>{if(native&&settingsPage)void refresh().catch(()=>{});},[native,settingsPage,refresh]);
+  useEffect(()=>{
+    if(!native||!settingsPage)return;
+    const check=()=>{void refresh().catch(()=>{});};
+    check();
+    window.addEventListener('focus',check);
+    return ()=>window.removeEventListener('focus',check);
+  },[native,settingsPage,refresh]);
   return {components,checking,error,refresh};
 }

@@ -1,11 +1,11 @@
 import {useId, useState, type ReactNode} from 'react';
-import type { ComponentStatus, OutputBackend, GamepadBackend, IoRates, Snapshot } from '../types';
+import type { ComponentKind, ComponentRemoval, ComponentStatus, OutputBackend, GamepadBackend, IoRates, Snapshot } from '../types';
 import {t} from '../i18n';
-import { gamepadNames } from './Controls';
+import { Dialog, gamepadNames } from './Controls';
 import {VirtualOutputStatus} from './VirtualOutputStatus';
 import styles from './SettingsPage.module.css';
-import {SettingField, SettingLabel} from './SettingLayout';
-import {componentNames,componentStateNames} from '../component-setup';
+import {SettingField, SettingLabel, settingStyles} from './SettingLayout';
+import {componentNames,componentStateNames,installedAppNames,removalImpact,type ComponentResult,type InstallableComponent,type RequiredComponent} from '../component-setup';
 
 export type ComponentAction = 'allow' | 'hide' | 'show' | 'restore';
 type Props = {
@@ -16,7 +16,16 @@ type Props = {
   dataDir: string;
   busy: boolean;
   onRefresh: () => void;
-  onInstall: (kind: 'hidhide' | 'vigem' | 'hidmaestro') => void;
+  onInstall: (kind: InstallableComponent) => void;
+  onRepairHidHide: () => void;
+  repairingHidHide: boolean;
+  onUninstall: (removal: ComponentRemoval) => void;
+  uninstalling: ComponentKind | null;
+  componentResult: ComponentResult | null;
+  checkError: string | null;
+  pendingRestart: readonly ComponentKind[];
+  requiredComponents: RequiredComponent[];
+  onStop: () => void;
   onSetup: () => void;
   installationBlocked: boolean;
   backend: OutputBackend;
@@ -71,9 +80,13 @@ function FrequencyField({label, value, disabled, onChange}: {
 
 export function SystemPage(props: Props) {
   const { components, snapshot, busy } = props;
+  const keyMouseBackendId = useId();
+  const gamepadBackendId = useId();
   const visibility = snapshot?.status.visibility;
   const displaySync = snapshot?.status.mouse_display_sync;
   const [showOutput,setShowOutput]=useState(false);
+  const [removal,setRemoval]=useState<ComponentRemoval|null>(null);
+  const maintenanceBlocked=busy || props.outputActive || props.installationBlocked;
   const automaticBusy = !!visibility?.requested || !!visibility?.active;
   const {ioRates, onIoRates} = props;
   const outputFollowsPolling = ioRates.output_hz === 0;
@@ -95,7 +108,7 @@ export function SystemPage(props: Props) {
               disabled={busy || props.outputActive} onChange={event => props.onAutoHide(event.target.checked)}/>
             映射时自动隐藏实体手柄
           </label>
-          <p>避免重复输入。停止映射后恢复本次隐藏的手柄。</p>
+          <p>避免重复输入。使用可定位的 XInput USB 接收器时，按整只接收器隐藏。停止映射后撤销本次新增的隐藏规则。</p>
         </div>
         <button type="button" className="secondary-btn" onClick={props.onDevices}>查看设备与输入</button>
       </div>
@@ -111,56 +124,73 @@ export function SystemPage(props: Props) {
     </section>
     <section className={styles.section}>
       <div className={styles.heading}>
-        <div><h2>系统组件</h2><p>检查 HID 输出、设备隐藏和兼容模式所需的驱动。</p></div>
+        <div><h2>组件管理</h2><p>安装或卸载虚拟输出和手柄隐藏所用的系统驱动。</p></div>
         <div className={styles.actions}><button type="button" className="primary-btn" disabled={busy} onClick={props.onSetup}>组件安装指引</button>
           <button type="button" className="secondary-btn" disabled={busy} onClick={props.onRefresh}>重新检测</button></div>
       </div>
       <div className={styles.drivers}>{(['hidmaestro', 'hidhide', 'vigem', 'usbip'] as const).map(kind => {
         const state = components?.[kind];
+        const method=components?.uninstallMethods?.[kind];
+        const pendingRestart=props.pendingRestart.includes(kind);
         const hidhide = kind === 'hidhide';
         return <div className={styles.driver} key={kind}>
           <div className={styles.driverInfo}>
             <div className={styles.driverTitle}><h3>{componentNames[kind]}</h3>
-              <span className={styles.badge} data-ready={state?.status === 'running'}>{state ? componentStateNames[state.status] ?? state.status : '等待检测'}</span></div>
+              <span className={styles.badge} data-ready={!pendingRestart && state?.status === 'running'}>{pendingRestart?'等待重启':state ? componentStateNames[state.status] ?? state.status : '等待检测'}</span></div>
             <p>{kind === 'usbip'?'创建支持六轴传感器直通、USB 音频与高清触觉的虚拟 DualSense。':kind === 'hidmaestro' ? '提供虚拟键盘、鼠标、Xbox 360 和 DualShock 4。安装时会在本机生成签名证书，Windows 会请求管理员授权。' : hidhide ? '安装后由软件自动管理：开始映射时隐藏实体手柄，停止后恢复，无需手动配置。' : '安装此驱动后可使用 ViGEm 虚拟手柄。'}</p>
             {state?.error && <p className={styles.error} role="alert">{state.error}</p>}
           </div>
           <div className={styles.actions}>
-            {kind!=='usbip'&&state?.status === 'missing' && <button type="button" className="primary-btn" disabled={busy || props.outputActive || props.installationBlocked} onClick={() => props.onInstall(kind)}>安装内置组件</button>}
+            {hidhide&&state?.status!=='unsupported'&&<button type="button" className="primary-btn"
+              disabled={maintenanceBlocked||pendingRestart||!!visibility?.requested} onClick={props.onRepairHidHide}>
+              {props.repairingHidHide?'正在修复 HidHide…':'一键修复 HidHide'}
+            </button>}
+            {kind!=='usbip'&&!hidhide&&state?.status === 'missing' && <button type="button" className="primary-btn" disabled={maintenanceBlocked||pendingRestart} onClick={() => props.onInstall(kind)}>安装内置组件</button>}
             {!hidhide&&<button type="button" className="secondary-btn" onClick={() => kind==='usbip'?props.onOpen('usbip'):setShowOutput(true)}>
               {kind==='usbip'?'打开官方安装说明':'检查虚拟手柄'}
+            </button>}
+            {method&&<button type="button" className="secondary-btn" disabled={maintenanceBlocked||pendingRestart}
+              aria-label={t('卸载 {0}').replace('{0}',componentNames[kind])} onClick={()=>setRemoval({kind,method})}>
+              {props.uninstalling===kind?'正在处理…':method==='windows'?'在 Windows 中卸载':'卸载'}
             </button>}
           </div>
         </div>;
       })}</div>
-      {props.outputActive && <p className={styles.hint}>停止映射或观察后可安装组件。</p>}
+      {props.outputActive && <div className={styles.notice}>
+        <span>停止映射或观察后，可安装、修复或卸载组件。</span>
+        <button type="button" className="secondary-btn" disabled={busy} onClick={props.onStop}>停止映射或观察</button>
+      </div>}
+      {props.checkError&&<p className={styles.error} role="alert">{props.checkError}</p>}
+      {props.componentResult&&<p className={props.componentResult.error?styles.error:styles.notice} role={props.componentResult.error?'alert':'status'}>{props.componentResult.message}</p>}
     </section>
     <div className={styles.advancedHeading}><h2>高级设置</h2><p>按需调整输出实现、设备隐藏和诊断工具。</p></div>
     <details className={styles.advanced}>
       <summary><strong>输出后端</strong><span>键鼠与虚拟手柄 · 显示同步</span></summary>
       <div className={styles.detailsBody}>
         <p>此设置保存在本机，所有游戏配置共用。</p>
-        <SettingField label="键鼠输出后端"><div className={styles.field}><SettingLabel label="键鼠输出后端"/>
-          <select aria-label="输出后端" value={props.backend} disabled={busy || props.outputActive}
+        <SettingField label="键鼠输出后端"><div className={styles.field}><SettingLabel label="键鼠输出后端" htmlFor={keyMouseBackendId}/>
+          <select id={keyMouseBackendId} aria-label="输出后端" value={props.backend} disabled={busy || props.outputActive}
             onChange={event => props.onBackend(event.target.value as OutputBackend)}>
             <option value="hid_maestro">HIDMaestro · HID 键鼠输出</option>
             <option value="legacy">SendInput / ViGEm · 兼容模式</option>
           </select>
         </div></SettingField>
         <p>组合键、滚轮、鼠标侧键和体感鼠标共用此后端。</p>
-        <SettingField label="虚拟手柄后端"><div className={styles.field}><SettingLabel label="虚拟手柄后端"/>
-          <select aria-label="虚拟手柄后端" value={props.backend==='legacy'?'vigem':props.gamepadBackend} disabled={busy||props.outputActive||props.backend==='legacy'} onChange={event=>props.onGamepadBackend(event.target.value as GamepadBackend)}>
+        <SettingField label="虚拟手柄后端"><div className={styles.field}><SettingLabel label="虚拟手柄后端" htmlFor={gamepadBackendId}/>
+          <select id={gamepadBackendId} aria-label="虚拟手柄后端" value={props.backend==='legacy'?'vigem':props.gamepadBackend} disabled={busy||props.outputActive||props.backend==='legacy'} onChange={event=>props.onGamepadBackend(event.target.value as GamepadBackend)}>
             <option value="vigem">ViGEm · 虚拟 Xbox／DS4（推荐）</option>
             <option value="hid_maestro">HIDMaestro · HID 虚拟手柄</option>
           </select>
         </div></SettingField>
         <p>ViGEm 提供标准 Xbox／DS4 虚拟手柄，需安装 ViGEmBus。可以同时使用 HIDMaestro 键鼠输出。</p>
         <p>DualSense 音频输出自动使用 USB/IP，需要已安装的 usbip-win2 主控制器。</p>
-        <FrequencyField label="输入轮询频率" value={ioRates.polling_hz} disabled={busy}
-          onChange={polling_hz => onIoRates({...ioRates, polling_hz})}/>
-        <FrequencyField label="固定输出频率" value={outputFollowsPolling ? ioRates.polling_hz : ioRates.output_hz}
-          disabled={busy || props.mouseDisplaySync || outputFollowsPolling}
-          onChange={output_hz => onIoRates({...ioRates, output_hz})}/>
+        <div className={settingStyles.fieldGrid}>
+          <FrequencyField label="输入轮询频率" value={ioRates.polling_hz} disabled={busy}
+            onChange={polling_hz => onIoRates({...ioRates, polling_hz})}/>
+          <FrequencyField label="固定输出频率" value={outputFollowsPolling ? ioRates.polling_hz : ioRates.output_hz}
+            disabled={busy || props.mouseDisplaySync || outputFollowsPolling}
+            onChange={output_hz => onIoRates({...ioRates, output_hz})}/>
+        </div>
         <label className={styles.check}>
           <input type="checkbox" checked={outputFollowsPolling} disabled={busy || props.mouseDisplaySync}
             onChange={event => onIoRates({...ioRates, output_hz: event.currentTarget.checked ? 0 : ioRates.polling_hz})}/>
@@ -200,7 +230,7 @@ export function SystemPage(props: Props) {
         <p>自动隐藏不依赖官方管理工具。此处仅供手动维护已有规则。</p>
         <button type="button" className="secondary-btn" disabled={busy||automaticBusy} onClick={()=>props.onOpen('hidhide')}>官方管理工具</button>
         {components?.hidhide.status==='running'&&!components.cliAvailable&&<p>未检测到手动管理工具，自动隐藏仍可正常使用。</p>}
-        <p>开始映射时隐藏所选实体手柄及可确认的 XInput 伴随接口，保留虚拟输出可见。断线等待和配置切换期间保持隐藏；停止、F12 或退出后恢复本次新增的规则。</p>
+        <p>开始映射时隐藏所选实体手柄，保留虚拟输出可见。断线等待和配置切换期间保持隐藏。停止、F12 或退出后撤销本次新增的规则。</p>
         {automaticBusy && <p className={styles.notice}>自动隐藏会话运行期间，请先停止映射，再手动修改隐藏规则。</p>}
         {components?.devices.map(device => <div className="studio-device-rule" key={device.id}>
           <div><strong>{device.name || device.description}</strong>
@@ -234,5 +264,19 @@ export function SystemPage(props: Props) {
       </div>
     </details>
     {showOutput&&<VirtualOutputStatus status={snapshot?.status} onClose={()=>setShowOutput(false)} onOpenLegacy={()=>props.onOpen('gamepads')}/>}
+    {removal&&<Dialog title={t('卸载 {0}？').replace('{0}',componentNames[removal.kind])} onClose={()=>setRemoval(null)} actions={<>
+      <button type="button" className="secondary-btn" autoFocus onClick={()=>setRemoval(null)}>取消</button>
+      <button type="button" className={removal.method==='windows'?'primary-btn':'danger-btn'}
+        disabled={maintenanceBlocked||props.pendingRestart.includes(removal.kind)||components?.uninstallMethods?.[removal.kind]!==removal.method}
+        onClick={()=>{props.onUninstall(removal);setRemoval(null);}}>
+        {removal.method==='windows'?'打开 Windows 已安装的应用':'确认卸载'}
+      </button>
+    </>}>
+      <p>{removalImpact[removal.kind]}</p>
+      {props.requiredComponents.some(item=>item.kind===removal.kind)&&<p><strong>当前配置需要此组件。</strong> 卸载后，请调整对应设置或重新安装，再启动映射。</p>}
+      <p>这是系统共享驱动，其他使用它的软件也会受到影响。</p>
+      {removal.method==='windows'&&<p>{t('在 Windows 的应用列表中选择 {0}，然后点击卸载。').replace('{0}',installedAppNames[removal.kind])}</p>}
+      {removal.method==='windows'&&removal.kind!=='usbip'&&<p>如果列表里找不到这个驱动，可使用原安装程序修复后再卸载。</p>}
+    </Dialog>}
   </div>;
 }

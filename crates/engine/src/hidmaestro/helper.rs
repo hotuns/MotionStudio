@@ -189,7 +189,7 @@ impl OutputDevices {
         Ok(())
     }
 }
-pub(super) fn run(parent_pid: u32, token: &str, installing: bool) -> Result<()> {
+pub(super) fn run(parent_pid: u32, token: &str, mode: HelperMode) -> Result<()> {
     let parent = Process::open(parent_pid)?;
     let mut pipe = Pipe::connect(token, parent_pid)?;
     if !matches!(
@@ -199,7 +199,21 @@ pub(super) fn run(parent_pid: u32, token: &str, installing: bool) -> Result<()> 
         bail!("Invalid output handshake");
     }
     let result = (|| -> Result<()> {
-        if installing {
+        if mode == HelperMode::Uninstall {
+            let _lease = transport::OutputLease::acquire()?;
+            if claims::other_live_owner().is_some()
+                || nodes::list_hidmaestro_devices().iter().any(|node| {
+                    claims::legacy_owner_holds(node.index)
+                        || nodes::node_diag(&node.instance_id).started
+                })
+            {
+                bail!("HIDMaestro 仍有虚拟设备正在使用。请先关闭使用这些设备的软件，再卸载。");
+            }
+            flexinput_hidmaestro::deploy::uninstall_driver()?;
+            pipe.send(&Reply::Ok)?;
+            return Ok(());
+        }
+        if mode == HelperMode::Install {
             // This is the only driver-install entry. It never replaces an
             // installed version or sweeps devices owned by another application.
             match install::driver_state() {

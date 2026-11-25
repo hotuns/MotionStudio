@@ -1,7 +1,8 @@
-//! Short, read-only inspection through the same native client as the mapping lease.
-use super::policy::DriverState;
-use anyhow::{ensure, Result};
+//! Shared native control, guarded inspection and engine authorization.
+use super::policy::{self, Driver, DriverState};
+use anyhow::{bail, ensure, Result};
 use flexinput_hidmaestro::hidhide::HidHide;
+use std::{path::Path, time::Duration};
 use windows_sys::Win32::{Foundation::*, System::Threading::*};
 
 pub(super) struct Gate(HANDLE);
@@ -41,7 +42,7 @@ pub struct InspectionError {
     pub code: Option<u32>,
     pub message: String,
 }
-pub(super) fn read_state(driver: &HidHide) -> Result<DriverState, String> {
+fn read_state(driver: &HidHide) -> Result<DriverState, String> {
     let state = driver.checked_state()?;
     Ok(DriverState {
         active: state.active,
@@ -49,6 +50,47 @@ pub(super) fn read_state(driver: &HidHide) -> Result<DriverState, String> {
         hidden: state.blacklist,
         apps: state.whitelist,
     })
+}
+
+pub(super) struct RealDriver(HidHide);
+impl RealDriver {
+    pub(super) fn open() -> Result<Self> {
+        let mut last = 0;
+        for _ in 0..5 {
+            match HidHide::open_checked() {
+                Ok(driver) => return Ok(Self(driver)),
+                Err(code) => last = code,
+            }
+            if last != 32 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        bail!("无法访问 HidHide（Windows {last}）。请确认已安装 HidHide，并关闭官方配置工具后重试；也可停止后关闭自动隐藏")
+    }
+}
+impl Driver for RealDriver {
+    fn read(&mut self) -> Result<DriverState> {
+        read_state(&self.0).map_err(anyhow::Error::msg)
+    }
+    fn set_hidden(&mut self, paths: &[String]) -> Result<()> {
+        ensure!(self.0.set_blacklist(paths), "HidHide 拒绝更新实体隐藏规则");
+        Ok(())
+    }
+    fn set_apps(&mut self, paths: &[String]) -> Result<()> {
+        ensure!(self.0.set_whitelist(paths), "HidHide 拒绝登记引擎读取权限");
+        Ok(())
+    }
+    fn set_active(&mut self, active: bool) -> Result<()> {
+        ensure!(self.0.set_active(active), "HidHide 拒绝更新启用状态");
+        Ok(())
+    }
+}
+
+pub fn authorize_engine(path: &Path) -> Result<()> {
+    let engine = native_image_path(path)?;
+    let _gate = Gate::acquire()?;
+    policy::authorize_engine(&mut RealDriver::open()?, &engine)
 }
 
 fn guarded_read<G>(
@@ -85,7 +127,7 @@ pub fn inspect() -> Result<Option<DriverState>, InspectionError> {
 
 /// Match the NT image path recorded by the engine's existing recovery companion.
 /// This opens only the executable file, never a controller or the control device.
-pub fn native_image_path(path: &std::path::Path) -> Result<String> {
+pub fn native_image_path(path: &Path) -> Result<String> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, VOLUME_NAME_NT};
     let file = std::fs::File::open(path)?;

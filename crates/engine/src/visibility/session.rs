@@ -20,6 +20,7 @@ mod helper;
 enum Control {
     Acquire {
         device_path: String,
+        gameinput_container: Option<String>,
     },
     Preparing {},
     Verify {
@@ -64,7 +65,7 @@ fn root() -> Result<PathBuf> {
     Ok(path)
 }
 fn pending_record() -> Result<bool> {
-    Ok(root()?.join(helper::JOURNAL_FILE).try_exists()?)
+    Ok(root()?.join(super::SESSION_JOURNAL).try_exists()?)
 }
 impl Session {
     fn start() -> Result<Self> {
@@ -155,9 +156,9 @@ fn connected(slot: &mut Option<Session>) -> Result<&mut Session> {
     Ok(slot.as_mut().unwrap())
 }
 
-pub fn acquire(device_path: &str) -> Result<Option<VisibilityStatus>> {
+pub fn acquire(device_path: &str, gameinput_container: Option<&str>) -> Result<Option<VisibilityStatus>> {
     // Do not spawn a helper or change driver state while the chosen pad is absent.
-    let Some(targets) = topology::selected(device_path)? else {
+    let Some(targets) = topology::selected(device_path, gameinput_container)? else {
         return Ok(None);
     };
     let mut slot = manager()
@@ -168,6 +169,7 @@ pub fn acquire(device_path: &str) -> Result<Option<VisibilityStatus>> {
         session.call(
             &Control::Acquire {
                 device_path: device_path.into(),
+                gameinput_container: gameinput_container.map(str::to_owned),
             },
             false,
         )?;

@@ -78,6 +78,8 @@ pub struct Device {
     pub vendor: u16,
     pub product: u16,
     pub path: String,
+    #[serde(skip)]
+    pub gameinput_container: Option<String>,
     #[serde(default)]
     pub origin: InputOrigin,
     pub gyro: bool,
@@ -136,6 +138,12 @@ fn string(ptr: *const c_char) -> String {
             .into_owned()
     }
 }
+
+// SDL exposes GameInput's APP_LOCAL_DEVICE_ID in place of a PnP interface path.
+pub fn is_gameinput_path(path: &str) -> bool {
+    path.len() == 64 && path.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Use the device tree for auto-selection. The virtual DS4 shares a VID/PID
 /// with a real controller and SDL can expose both as gyro-capable.
 #[cfg(windows)]
@@ -261,6 +269,7 @@ impl Sdl {
             } else {
                 windows_input_origin(&raw.path)
             },
+            gameinput_container: raw.container_id.filter(|_| is_gameinput_path(&raw.path)),
             path: raw.path,
             gyro: raw.gyro,
             gamepad: raw.gamepad,

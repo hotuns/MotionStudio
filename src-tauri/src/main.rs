@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod binding_window;
 mod client;
+mod component_removal;
 mod components;
 mod controller_overlay;
 mod game_calibration;
@@ -761,6 +762,27 @@ async fn component_status(
     .await
 }
 #[tauri::command]
+async fn repair_hidhide(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<components::HidHideRepairResult, String> {
+    if window.label() != "main" {
+        return Err("请在主窗口的组件管理中修复 HidHide。".into());
+    }
+    let app = window.app_handle().clone();
+    let state = state.inner().clone();
+    background(move || {
+        let _lock = state.operations.lock().map_err(text)?;
+        if active(&state)
+            || state.client.snapshot.lock().map_err(text)?.status.visibility.requested
+        {
+            return Err("请先停止映射或观察，再修复 HidHide。".into());
+        }
+        components::repair_hidhide(&app, &state)
+    })
+    .await
+}
+#[tauri::command]
 async fn component_action(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -800,6 +822,26 @@ async fn install_component(
         installers::install(&app, &kind)
     })
     .await
+}
+#[tauri::command]
+async fn uninstall_component(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    kind: component_removal::Component,
+    method: component_removal::RemovalMethod,
+) -> Result<installers::InstallResult, String> {
+    if window.label() != "main" {
+        return Err("请在主窗口的组件管理中卸载驱动。".into());
+    }
+    let app = window.app_handle().clone();
+    let state = state.inner().clone();
+    background(move || {
+        let _lock = state.operations.lock().map_err(text)?;
+        if active(&state) {
+            return Err("请先停止映射或观察，再卸载组件。".into());
+        }
+        component_removal::uninstall(&app, &state, kind, method)
+    }).await
 }
 #[tauri::command]
 async fn open_location(state: State<'_, AppState>, kind: String) -> Result<(), String> {
@@ -964,8 +1006,10 @@ fn main() {
             save_sensor_calibration,
             restore_backup,
             component_status,
+            repair_hidhide,
             component_action,
             install_component,
+            uninstall_component,
             open_location,
             export_diagnostics
         ])

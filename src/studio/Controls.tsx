@@ -27,12 +27,13 @@ export function Toggle({ value, onChange, label, help, disabled, settingPath }: 
   disabled?: boolean;
   settingPath?: string | string[];
 }) {
+  const id = useId();
   return <SettingField label={label} path={settingPath} disabled={disabled}><div className="studio-toggle-row">
-    <SettingLabel label={label} help={help}/>
-    <button className="studio-toggle" type="button" role="switch" aria-checked={value} aria-label={label}
+    <button id={id} className="studio-toggle" type="button" role="switch" aria-checked={value} aria-label={label}
       disabled={disabled} onClick={() => onChange(!value)}>
       <span className="studio-toggle-track" aria-hidden="true" />
     </button>
+    <SettingLabel label={label} htmlFor={id} help={help}/>
   </div></SettingField>;
 }
 
@@ -70,27 +71,18 @@ export function Range({ label, value, min, max, step, onChange, unit = '', help,
 }) {
   const id = useId();
   const compact=useContext(SettingContext)!==null;
-  const number=<NumericInput id={id} value={value} min={min} max={max} step={step} onChange={onChange}/>;
-  if(compact)return <SettingField label={label} path={settingPath}>
-    <div className={settingStyles.compactRange} data-slider={slider}>
-      <SettingLabel label={label} htmlFor={id} help={help}/>
-      {slider&&<input aria-label={label+'滑块'} type="range" min={min} max={max} step={step}
-        value={Number.isFinite(value)?value:min} onChange={event=>onChange(event.target.valueAsNumber)}/>}
-      <div className={settingStyles.number}>{number}{unit&&<span>{unit}</span>}</div>
+  const field = <div className={settingStyles.range} data-slider={slider}>
+    <SettingLabel label={label} htmlFor={id} help={help}/>
+    {slider && <input aria-label={label+'滑块'} type="range" min={min} max={max} step={step}
+      value={Number.isFinite(value)?value:min} onChange={event=>onChange(event.target.valueAsNumber)}/>}
+    <div className={settingStyles.number}>
+      <NumericInput id={id} value={value} min={min} max={max} step={step} onChange={onChange}/>
+      {unit && <span>{unit}</span>}
     </div>
-  </SettingField>;
-  return <div className={'studio-range '+settingStyles.field}>
-    <div className="studio-range-heading">
-      <SettingLabel label={label} htmlFor={id} help={help}/>
-      <div>
-        {number}
-        {unit && <span>{unit}</span>}
-      </div>
-    </div>
-    {slider&&<><input aria-label={label + '滑块'} type="range" min={min} max={max} step={step}
-      value={Number.isFinite(value) ? value : min} onChange={event => onChange(event.target.valueAsNumber)} />
-    <div className="studio-range-limits"><span>{min}{unit}</span><span>{max}{unit}</span></div></>}
+    {!compact && slider && <div className="studio-range-limits"><span>{min}{unit}</span><span>{max}{unit}</span></div>}
   </div>;
+  return compact ? <SettingField label={label} path={settingPath}>{field}</SettingField>
+    : <div className={'studio-range '+settingStyles.field}>{field}</div>;
 }
 
 export function Dialog({ title, onClose, onSubmit, actions, children, description, error, className }: {

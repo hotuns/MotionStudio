@@ -6,14 +6,14 @@ mod runtime;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let result = if args
+    let result = if let Some(mode) = args
         .get(1)
-        .is_some_and(|s| s == "--hidmaestro-output" || s == "--hidmaestro-install")
+        .and_then(|arg| motion_core::hidmaestro::HelperMode::from_argument(arg))
     {
         (|| -> anyhow::Result<()> {
             anyhow::ensure!(args.len() == 4, "Invalid HIDMaestro helper arguments");
             let pid = args[2].parse::<u32>()?;
-            motion_core::hidmaestro::run_helper(pid, &args[3], args[1] == "--hidmaestro-install")
+            motion_core::hidmaestro::run_helper(pid, &args[3], mode)
         })()
     } else if args.get(1).is_some_and(|s| s == "--hidhide-lease") {
         (|| -> anyhow::Result<()> {

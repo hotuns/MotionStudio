@@ -68,17 +68,21 @@ export const StickSettings = memo(function StickSettings({profile,update}:{profi
           <OptionPicker label="摇杆鼠标使用的摇杆" value={stick.stick} groups={stickChoices}
             onChange={value=>update(draft=>{freezeInputDeadzones(draft);draft.stick_mouse.stick=value;})}/>
         </div></SettingField>
-        <Range label="最大移动速度" value={stick.speed} min={100} max={10000} step={100} unit=" 计数/s"
-          onChange={value=>update(draft=>{draft.stick_mouse.speed=value;})}/>
-        {!stick.response_points && stick.response_model!=='bezier' && <Range label="摇杆鼠标响应" value={stick.exponent} min={1} max={4} step={0.1}
-          onChange={value=>update(draft=>{draft.stick_mouse.exponent=value;})} help="1 为线性。数值越大，小幅拨动时移动越慢。"/>}
+        <div className={settingStyles.fieldGrid}>
+          <Range label="最大移动速度" value={stick.speed} min={100} max={10000} step={100} unit=" 计数/s"
+            onChange={value=>update(draft=>{draft.stick_mouse.speed=value;})}/>
+          {!stick.response_points && stick.response_model!=='bezier' && <Range label="摇杆鼠标响应" value={stick.exponent} min={1} max={4} step={0.1}
+            onChange={value=>update(draft=>{draft.stick_mouse.exponent=value;})} help="1 为线性。数值越大，小幅拨动时移动越慢。"/>}
+        </div>
         <StickMouseCurve stick={stick} update={update}/>
       </>}
     </SettingSection>
     <StickDirectionSettings profile={profile} update={update}/>
     <SettingSection id="stick-zones" title="摇杆内外圈映射" summary={<>左 {Math.round(zones.left_outer*100)}% · 右 {Math.round(zones.right_outer*100)}%</>}>
-      <Range label="左摇杆外圈阈值" value={zones.left_outer} min={0.1} max={1} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,left_outer:value};})}/>
-      <Range label="右摇杆外圈阈值" value={zones.right_outer} min={0.1} max={1} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,right_outer:value};})}/>
+      <div className={settingStyles.fieldGrid}>
+        <Range label="左摇杆外圈阈值" value={zones.left_outer} min={0.1} max={1} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,left_outer:value};})}/>
+        <Range label="右摇杆外圈阈值" value={zones.right_outer} min={0.1} max={1} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,right_outer:value};})}/>
+      </div>
       <Range label="区域切换回差" value={zones.hysteresis} min={0} max={0.09} step={0.01} onChange={value=>update(p=>{p.stick_zones={...zones,hysteresis:value};})}/>
       <p className={styles.hint}>在「动作映射」中可绑定整个外圈，也可分别绑定上、下、左、右外圈。四个方向各占 90°，沿外圈转动即可切换方向。整圈和四向共用这里的阈值与回差。内圈从中心死区之外开始。</p>
     </SettingSection>

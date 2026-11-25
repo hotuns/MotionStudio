@@ -58,13 +58,12 @@
   outline-offset: 2px;
 }
 .studio-range { margin: 12px 0; min-width: 0; }
-.studio-range-heading { display: flex; gap: 8px; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 12px; }
-.studio-range-heading > div { display: flex; gap: 5px; align-items: center; color: var(--text-muted); }
 .studio-range input[type='number'] { width: 79px; padding: 5px 7px; font-variant-numeric: tabular-nums; }
-.studio-range input[type='range'] { width: 100%; margin: 5px 0; accent-color: var(--accent); }
 .studio-range-limits { display: flex; justify-content: space-between; color: var(--text-muted); font-size: 11px; }
-.studio-range p { margin-top: 7px; }
-.studio-toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 0; font-size: 12px; }
+.studio-toggle-row { display: flex; align-items: center; gap: 9px; padding: 9px 0; font-size: 13px; }
+.studio-toggle-row > div { flex: 1; min-width: 0; }
+.studio-toggle-row label { cursor: pointer; }
+.studio-toggle-row:has(:disabled) label { cursor: default; }
 .studio-toggle {
   display: inline-grid;
   place-items: center;

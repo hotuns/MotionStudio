@@ -756,10 +756,10 @@
     {
       "path": "crates/devices/src/devnode.rs",
       "upstreamSha256": "c6e6230a242fc8574aa550c08b542537934083ed28fd7a80317872d65486a8f9",
-      "vendoredSha256": "9dc6840b4ae141aefcb6589d454ae2c03b7e506555d0287a49251a29d5ba53e5",
+      "vendoredSha256": "472430c63dd6e1743f426f9cd29d24f755dc20274b76e55794a33a5387d49e50",
       "upstreamGitBlob": "6cfa8dad5f3fb7965091d2b520e785ced1848653",
       "modified": true,
-      "patch": "Studio headless provider: remove audio/network/radio startup dependencies; add timestamped event seam before aggregation, selected-device sensor lifecycle, shared SDL linkage and safe test gates. Native parsers remain available but the live provider is SDL."
+      "patch": "Studio headless provider: expose the original Windows device-tree helpers and XInput instance IDs. Expose the existing container_of_instance lookup for GameInput identity resolution."
     },
     {
       "path": "crates/devices/src/gamepad.rs",
@@ -815,10 +815,10 @@
     },
     {
       "path": "crates/devices/src/raw.rs",
-      "vendoredSha256": "4a36d664ec4e5e79c067ae78eeee551bc85f0ac503148a22748b76bfac38728c",
+      "vendoredSha256": "f9386397380a10352aa73bf20fb1a4cf37fe46ed2de901183a57ae13ef699a55",
       "added": true,
       "modified": true,
-      "patch": "Timestamped SDL touch down/motion/up DTOs added to the existing selected-device FIFO; gyro sample/order/overflow contracts unchanged."
+      "patch": "Timestamped SDL touch down/motion/up DTOs added to the existing selected-device FIFO; gyro sample/order/overflow contracts unchanged. RawDevice carries the optional Windows container ID during discovery."
     },
     {
       "path": "crates/devices/src/raw_hid.rs",
@@ -838,10 +838,10 @@
     },
     {
       "path": "crates/devices/src/sdl_raw.rs",
-      "vendoredSha256": "014c5f6f7159720474cb9a264bfdb68efbae2bab490d76f09798041de71e3c09",
+      "vendoredSha256": "d6956316ef49a5302457a2e0c05f974c49d4307aa3b5fdbac89f3bf622d900bb",
       "added": true,
       "modified": true,
-      "patch": "Expose original DeviceBackend::send and LedOut::due on the selected OpenPad; cancellation drops pending colors. Surface capabilities and reuse original read_touchpad_fingers for snapshots. No sampled input poll or extra handles. Expose FIFO dequeue separately from the existing SDL update for the I/O deadline loop."
+      "patch": "Expose original DeviceBackend::send and LedOut::due on the selected OpenPad; cancellation drops pending colors. Surface capabilities and reuse original read_touchpad_fingers for snapshots. No sampled input poll or extra handles. Expose FIFO dequeue separately from the existing SDL update for the I/O deadline loop. Read the pinned SDL container ID property from the existing discovery handle."
     },
     {
       "path": "crates/devices/src/spike.rs",

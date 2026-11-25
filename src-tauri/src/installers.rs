@@ -72,7 +72,7 @@ fn verify(path: &Path, expected: &Installer) -> Result<File, String> {
     }
     Ok(file)
 }
-fn result(code: u32) -> Result<InstallResult, String> {
+pub(super) fn result(code: u32) -> Result<InstallResult, String> {
     match code {
         0 => Ok(InstallResult {cancelled:false,reboot_required:false,exit_code:code}),
         3010 | 1641 => Ok(InstallResult {cancelled:false,reboot_required:true,exit_code:code}),
@@ -121,6 +121,13 @@ pub fn verify_engine(path: &Path) -> Result<File, String> {
         },
     )
 }
+pub(super) fn hidmaestro_result(operation: anyhow::Result<()>) -> Result<InstallResult, String> {
+    match operation {
+        Ok(()) => result(0),
+        Err(e) if e.to_string().contains("已取消 Windows 管理员授权") => result(1223),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
 pub fn install(app: &AppHandle, kind: &str) -> Result<InstallResult, String> {
     if !cfg!(all(windows, target_arch = "x86_64")) {
         return Err("Bundled drivers require Windows x64".into());
@@ -135,22 +142,19 @@ pub fn install(app: &AppHandle, kind: &str) -> Result<InstallResult, String> {
         }
         let path = super::runtime::engine_path(app)?;
         let _verified_engine = verify_engine(&path)?;
-        return match motion_core::hidmaestro::install_driver(&path) {
-            Ok(()) => result(0),
-            Err(e) if e.to_string().contains("已取消 Windows 管理员授权") => result(1223),
-            Err(e) => Err(format!("HIDMaestro 安装失败：{e:#}")),
-        };
+        return hidmaestro_result(motion_core::hidmaestro::install_driver(&path))
+            .map_err(|e| format!("HIDMaestro 安装失败：{e}"));
     }
     let entry = installer(kind)?;
     let _gate = super::components::GATE
         .lock()
         .map_err(|_| "Component control lock failed")?;
-    let service = if kind == "hidhide" {
-        "HidHide"
+    let component = if kind == "hidhide" {
+        super::component_removal::Component::HidHide
     } else {
-        "ViGEmBus"
+        super::component_removal::Component::Vigem
     };
-    let status = super::components::driver(service);
+    let (status, _) = component.inspect();
     if status.status != "missing" {
         return Err("The driver is already installed or its state is unknown. Detect again; restart Windows if the installed driver is not running.".into());
     }
@@ -160,7 +164,29 @@ pub fn install(app: &AppHandle, kind: &str) -> Result<InstallResult, String> {
     if let Some(parent) = log.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    launch(&path, &log).map_err(|error| format!("{error} 安装日志：{}", log.display()))
+    launch(&path, &setup_parameters(&log), "runas")
+        .map_err(|error| format!("{error} 安装日志：{}", log.display()))
+}
+
+#[cfg(windows)]
+pub(super) fn uninstall_product(id: uuid::Uuid) -> Result<InstallResult, String> {
+    use std::{ffi::OsString, os::windows::ffi::OsStringExt};
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut directory = [0u16; 32768];
+    let len =
+        unsafe { GetSystemDirectoryW(directory.as_mut_ptr(), directory.len() as u32) } as usize;
+    if len == 0 || len >= directory.len() {
+        return Err("Windows system directory unavailable".into());
+    }
+    let exe = PathBuf::from(OsString::from_wide(&directory[..len])).join("msiexec.exe");
+    let code = id.braced().to_string().to_ascii_uppercase();
+    // Let Windows Installer resolve the registered product and request its own
+    // privileges, just as it does from Installed apps.
+    launch(&exe, &format!("/x {code} /norestart"), "open")
+}
+#[cfg(not(windows))]
+pub(super) fn uninstall_product(_: uuid::Uuid) -> Result<InstallResult, String> {
+    Err("Driver removal requires Windows".into())
 }
 
 // Both pinned official EXEs use Advanced Installer. Hide the bootstrapper and
@@ -169,7 +195,7 @@ fn setup_parameters(log: &Path) -> String {
     format!("/exenoui /qn /norestart /L*V \"{}\"", log.display())
 }
 #[cfg(windows)]
-fn launch(path: &Path, log: &Path) -> Result<InstallResult, String> {
+fn launch(path: &Path, arguments: &str, verb: &str) -> Result<InstallResult, String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::{
         Foundation::{CloseHandle, GetLastError, ERROR_CANCELLED, WAIT_OBJECT_0},
@@ -189,8 +215,8 @@ fn launch(path: &Path, log: &Path) -> Result<InstallResult, String> {
         .encode_wide()
         .chain(Some(0))
         .collect();
-    let verb: Vec<u16> = "runas".encode_utf16().chain(Some(0)).collect();
-    let parameters: Vec<u16> = setup_parameters(log).encode_utf16().chain(Some(0)).collect();
+    let verb: Vec<u16> = verb.encode_utf16().chain(Some(0)).collect();
+    let parameters: Vec<u16> = arguments.encode_utf16().chain(Some(0)).collect();
     unsafe {
         let mut info: SHELLEXECUTEINFOW = std::mem::zeroed();
         info.cbSize = std::mem::size_of_val(&info) as u32;
@@ -232,7 +258,7 @@ fn launch(path: &Path, log: &Path) -> Result<InstallResult, String> {
     }
 }
 #[cfg(not(windows))]
-fn launch(_: &Path, _: &Path) -> Result<InstallResult, String> {
+fn launch(_: &Path, _: &str, _: &str) -> Result<InstallResult, String> {
     Err("Driver installation requires Windows".into())
 }
 

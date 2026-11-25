@@ -11,16 +11,18 @@ import type {StudioPage} from './StudioShell';
 import styles from './GameProfilesPage.module.css';
 import {StudioIcon} from './StudioIcon';
 import {MotionOutputSettings} from './AdvancedMotion';
+import {MotionSettings, type MotionSettingsInputs} from './MotionSettings';
 import {SettingContext,settingStyles} from './SettingLayout';
 import type {SettingRequest} from './settings-catalog';
 import {t} from '../i18n';
 
 type Props = Omit<ActionMappingsProps, 'touchOnly' | 'onClearTouch'> & {
+  profileId: string;
   tab: GameTab;
   layerMode: boolean;
   editingLayerKey: string;
   layerControls?: ReactNode;
-  motion: ReactNode;
+  motion: MotionSettingsInputs;
   editingLayer?: ProfileLayer;
   settingRequest?: SettingRequest;
   onRestoreSetting: (paths: string[]) => void;
@@ -77,7 +79,8 @@ export function GameProfilesPage(props: Props) {
           target.scrollIntoView({block:'start'});
           const focusTarget=field
             ? target.querySelector<HTMLElement>('input[type="number"]:not(:disabled),select:not(:disabled),textarea:not(:disabled)')
-              ??target.querySelector<HTMLElement>('input:not(:disabled),button:not(:disabled)')
+              ??target.querySelector<HTMLElement>('button[role="switch"]:not(:disabled),button[aria-haspopup="dialog"]:not(:disabled),button[aria-pressed="true"]:not(:disabled)')
+              ??target.querySelector<HTMLElement>('input:not(:disabled),button:not(:disabled):not([aria-controls])')
             : target.querySelector<HTMLElement>('summary,button:not(:disabled)');
           focusTarget?.focus({preventScroll:true});
           target.dataset.settingHighlight='true';highlighted=target;
@@ -111,7 +114,7 @@ export function GameProfilesPage(props: Props) {
     layer: props.editingLayer, blocked: settingsBlocked, restore: props.onRestoreSetting, request: props.settingRequest,
   }), [props.editingLayer, settingsBlocked, props.onRestoreSetting, props.settingRequest]);
   return <SettingContext.Provider value={settingContext}>
-  <div className={styles.page} ref={pageRef}>
+  <div className={styles.page} data-layout={tab === 'actions' ? 'mapping' : 'settings'} ref={pageRef}>
     <div className={styles.profileNavigation} ref={navigationRef}>
       <section className={styles.profileHeader} aria-label="游戏配置与输出">
         <label className={styles.gameInfo}>
@@ -179,8 +182,8 @@ export function GameProfilesPage(props: Props) {
         capture={capture} onCapture={props.onCapture} onCancelCapture={props.onCancelCapture} onAssignEscape={props.onAssignEscape}
         onUpdate={onUpdate} onEdit={props.onEdit} onBatch={props.onBatch} touchOnly={touchOnly} onClearTouch={()=>setTouchOnly(false)}/> :
         <fieldset className="studio-content" disabled={blocked || !!capture || measuring}>
-          {(tab==='motion'||tab==='sticks')&&<MotionOutputSettings profile={profile} update={onUpdate}
-            vigemGamepad={props.vigemGamepad} showGameResponse={tab==='motion'}
+          {tab==='sticks'&&<MotionOutputSettings profile={profile} update={onUpdate}
+            vigemGamepad={props.vigemGamepad} tab="sticks"
             canMeasure={props.canMeasure} onOpenCalibration={props.onOpenCalibration}/>}
           {tab==='sticks' && <StickSettings profile={profile} update={onUpdate}/>}
           {tab==='triggers' && <TriggerSettings profile={profile} layerMode={layerMode} update={onUpdate} onEditBase={props.onEditBase}/>}
@@ -192,7 +195,8 @@ export function GameProfilesPage(props: Props) {
             </div>
             {profile.virtual_gamepad==='dualshock_4' && <p className={styles.hint}>虚拟 DualShock 4 的触摸板按键可在动作映射中绑定。</p>}
           </section>}
-          {tab==='motion' && props.motion}
+          {tab==='motion' && <MotionSettings {...props.motion} profile={profile} profileId={props.profileId} update={onUpdate}
+            vigemGamepad={props.vigemGamepad} canMeasure={props.canMeasure} onOpenCalibration={props.onOpenCalibration}/>}
         </fieldset>}
     </div>
   </div></SettingContext.Provider>;

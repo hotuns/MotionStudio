@@ -1,4 +1,22 @@
 .page { display: flex; flex-direction: column; gap: var(--section-gap); min-width: 0; }
+.gyroHeader {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 24px;
+  padding: 12px 16px;
+  border: 1px solid var(--panel-border);
+  border-inline-start: 3px solid var(--border-1);
+  border-radius: var(--section-radius);
+  background: var(--bg-2);
+  scroll-margin-block-start: calc(var(--profile-navigation-offset, 120px) + 12px);
+}
+.gyroHeader[data-enabled=true] { border-inline-start-color: var(--accent); }
+.gyroHeader[data-setting-highlight] { outline: 2px solid var(--accent); outline-offset: 3px; }
+.gyroMaster { flex: 0 1 12rem; min-inline-size: min(100%, 10rem); }
+.gyroMaster label { font-size: 16px; font-weight: 650; }
+.gyroHeader > [data-setting-path="gyro.output"] { flex: 0 1 17rem; min-inline-size: min(100%, 12rem); }
+.gyroHeader > button { align-self: center; }
 .modeHeader { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px 18px; }
 .modeHeader h2 { margin: 0; font-size: 15px; font-weight: 600; }
 .simpleGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: stretch; gap: var(--section-gap); }
@@ -31,7 +49,6 @@
 .stabilityTriplet { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .samplingFields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 232px), 1fr)); column-gap: 12px; }
 .samplingFields :global(.studio-field) { margin-block: 8px; }
-.stabilityGrid :global(.studio-range-heading) { flex-wrap: wrap; }
 .curveIntro, .curveLegend { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
 .curveIntro { justify-content: space-between; }
 .curveIntro p { margin: 0; }
@@ -71,11 +88,11 @@
 .hint { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin: 12px 0 0; }
 .group details { margin-top: 18px; border-top: 1px solid var(--border-1); padding-top: 14px; }
 .group summary { cursor: pointer; font-size: 13px; color: var(--text-mid); }
-.group button { margin-top: 10px; }
-.bindingField { margin-top: 12px; }
-.activationModes { display: flex; gap: 5px; flex-wrap: wrap; }
-.activationModes button { margin: 0; font-size: 12px; }
-.activationModes button[aria-pressed='true'] { border-color: color-mix(in srgb, var(--accent) 38%, var(--border-1)); color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--bg-2)); }
+.group > button { margin-top: 10px; }
+.bindingField { min-width: 0; }
+.activationModes { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; padding: 3px; border: 1px solid var(--panel-border); border-radius: var(--control-radius); background: var(--bg-1); }
+.activationModes button { margin: 0; min-height: 32px; padding: 4px 10px; border-color: transparent; background: transparent; box-shadow: none; font-size: 12px; }
+.activationModes button[aria-pressed='true'] { border-color: var(--panel-border); color: var(--accent); background: var(--bg-2); font-weight: 600; }
 .freeCurve, .parameterChart { min-width: 0; }
 .bezierEditor { min-width: 0; margin: 0; padding: 0; border: 0; }
 .bezierParameters { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 12px; }
@@ -83,9 +100,6 @@
 .bezierParameters input { min-width: 0; flex: 1 1 225px; font-variant-numeric: tabular-nums; }
 .accelerationLayout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: start; gap: 20px; }
 .accelerationLayout .parameterChart, .freeCurve { max-width: 900px; }
-@media (min-width: 901px) {
-  .stabilityGrid .chartColumns { grid-template-columns: minmax(210px, 1fr) minmax(0, 1.25fr); }
-}
 @media (max-width: 900px) { .accelerationLayout { grid-template-columns: minmax(0, 1fr); } }
 .freeCurve .stickPlotSurface { height: clamp(160px, 20vw, 230px); }
 .parameterChart .stickPlotSurface { height: clamp(135px, 14vw, 185px); cursor: default; }

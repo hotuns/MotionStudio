@@ -40,6 +40,7 @@ pub struct RawDevice {
     pub id: u32,
     pub name: String,
     pub path: String,
+    pub container_id: Option<String>,
     pub vendor: u16,
     pub product: u16,
     pub gamepad: bool,

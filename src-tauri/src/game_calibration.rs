@@ -666,6 +666,7 @@ mod tests {
             id: 1,
             name: "Test".into(),
             path: "test://calibration".into(),
+            gameinput_container: None,
             vendor: 0,
             product: 0,
             origin: InputOrigin::Physical,

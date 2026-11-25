@@ -58,6 +58,7 @@ mod tests {
             vendor: 0x37d7,
             product: 0x2502,
             path: String::new(),
+            gameinput_container: None,
             origin: InputOrigin::Physical,
             gyro,
             gamepad: true,

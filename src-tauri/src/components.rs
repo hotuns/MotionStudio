@@ -1,4 +1,7 @@
-use crate::runtime;
+use crate::{
+    component_removal::{Component, RemovalMethod},
+    runtime,
+};
 use motion_core::visibility::{policy::DriverState, VisibilityStatus};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -75,6 +78,7 @@ pub struct ComponentsStatus {
     pub vigem: DriverInfo,
     pub hidmaestro: DriverInfo,
     pub usbip: DriverInfo,
+    pub uninstall_methods: BTreeMap<Component, RemovalMethod>,
     pub cli_available: bool,
     pub control_available: bool,
     pub hidhide_session: bool,
@@ -409,11 +413,45 @@ fn snapshot(path: &Path) -> Result<Snapshot, String> {
 }
 
 #[cfg(windows)]
+fn service_pending_removal(service: &str) -> bool {
+    use windows_sys::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD},
+    };
+    // PnP can leave a live kernel driver queryable after unregistering its package.
+    let key: Vec<u16> = format!(r"SYSTEM\CurrentControlSet\Services\{service}")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut flag = 0u32;
+    let mut size = std::mem::size_of_val(&flag) as u32;
+    let result = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            windows_sys::core::w!("DeleteFlag"),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            std::ptr::from_mut(&mut flag).cast(),
+            &mut size,
+        )
+    };
+    result == ERROR_SUCCESS && flag == 1
+}
+
+#[cfg(windows)]
 pub(super) fn driver(service: &str) -> DriverInfo {
     use windows_sys::Win32::{
-        Foundation::{GetLastError, ERROR_SERVICE_DOES_NOT_EXIST},
+        Foundation::{GetLastError, ERROR_SERVICE_DOES_NOT_EXIST, ERROR_SERVICE_MARKED_FOR_DELETE},
         System::Services::*,
     };
+    let pending_removal = || DriverInfo {
+        status: "restart_required".into(),
+        error: Some("Windows 正在移除驱动。请重启后重新检测。".into()),
+    };
+    if service_pending_removal(service) {
+        return pending_removal();
+    }
     let service: Vec<u16> = service.encode_utf16().chain(Some(0)).collect();
     unsafe {
         let manager = OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_CONNECT);
@@ -427,17 +465,15 @@ pub(super) fn driver(service: &str) -> DriverInfo {
         if handle.is_null() {
             let code = GetLastError();
             CloseServiceHandle(manager);
-            return DriverInfo {
-                status: if code == ERROR_SERVICE_DOES_NOT_EXIST {
-                    "missing"
-                } else {
-                    "unknown"
-                }
-                .into(),
-                error: if code == ERROR_SERVICE_DOES_NOT_EXIST {
-                    None
-                } else {
-                    Some(format!("Windows error {code}"))
+            return match code {
+                ERROR_SERVICE_MARKED_FOR_DELETE => pending_removal(),
+                ERROR_SERVICE_DOES_NOT_EXIST => DriverInfo {
+                    status: "missing".into(),
+                    error: None,
+                },
+                _ => DriverInfo {
+                    status: "unknown".into(),
+                    error: Some(format!("Windows error {code}")),
                 },
             };
         }
@@ -523,7 +559,18 @@ fn hidhide_health(
         policy,
         session,
     };
-    if let Some(session) = visibility.filter(|v| v.requested || v.active) {
+    let session = visibility.filter(|v| v.requested || v.active);
+    if service.status == "restart_required"
+        || (session.is_none()
+            && matches!(service.status.as_str(), "missing" | "partial" | "unsupported"))
+    {
+        return HideHealth {
+            driver: service,
+            policy: None,
+            session: session.is_some(),
+        };
+    }
+    if let Some(session) = session {
         return report(
             if session.error.is_some() {
                 "unknown"
@@ -536,13 +583,6 @@ fn hidhide_health(
             None,
             true,
         );
-    }
-    if matches!(service.status.as_str(), "missing" | "unsupported") {
-        return HideHealth {
-            driver: service,
-            policy: None,
-            session: false,
-        };
     }
     match read() {
         HideInspection::State(state) => {
@@ -585,26 +625,22 @@ fn status_inner(
     let engine = application_path(&runtime::engine_path(app)?.to_string_lossy());
     let cli = cli_path();
     let owned = load_owned(app)?;
-    let health = hidhide_health(driver("HidHide"), visibility, inspect_hidhide);
+    let mut uninstall_methods = BTreeMap::new();
+    let mut inspect = |kind: Component| {
+        let (info, removal) = kind.inspect();
+        if let Some(removal) = removal {
+            uninstall_methods.insert(kind, removal.method());
+        }
+        info
+    };
+    let health = hidhide_health(inspect(Component::HidHide), visibility, inspect_hidhide);
     let mut result = ComponentsStatus {
         supported: cfg!(windows),
         hidhide: health.driver,
-        vigem: driver("ViGEmBus"),
-        hidmaestro: {
-            let (status, error) = motion_core::hidmaestro::driver_status();
-            DriverInfo { status, error }
-        },
-        usbip: DriverInfo {
-            status: if !cfg!(windows) {
-                "unsupported"
-            } else if motion_core::dualsense::host_controller_available() {
-                "running"
-            } else {
-                "unavailable"
-            }
-            .into(),
-            error: None,
-        },
+        vigem: inspect(Component::Vigem),
+        hidmaestro: inspect(Component::HidMaestro),
+        usbip: inspect(Component::Usbip),
+        uninstall_methods,
         cli_available: cli.is_some(),
         control_available: health.policy.is_some(),
         hidhide_session: health.session,
@@ -679,6 +715,96 @@ pub fn get_status(
     let _gate = GATE.lock().map_err(|_| "Component control lock failed")?;
     status_inner(app, Some(visibility))
 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HidHideRepairResult {
+    message: String,
+    reboot_required: bool,
+}
+
+#[cfg(any(windows, test))]
+fn repair_hide_policy(
+    health: HideHealth,
+    needs_recovery: bool,
+    recover: impl FnOnce() -> Result<(), String>,
+    authorize: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    if health.driver.status != "running"
+        && !(needs_recovery && (health.policy.is_some() || health.session))
+    {
+        return Err(health.driver.error.unwrap_or_else(|| {
+            "HidHide 尚未就绪，请查看组件管理中的检测结果。".into()
+        }));
+    }
+    if needs_recovery {
+        recover()?;
+    }
+    authorize()
+}
+
+#[cfg(windows)]
+pub fn repair_hidhide(app: &AppHandle, state: &crate::AppState) -> Result<HidHideRepairResult, String> {
+    if Component::HidHide.inspect().0.status == "missing" {
+        let install = super::installers::install(app, "hidhide")?;
+        if install.cancelled || install.reboot_required {
+            return Ok(HidHideRepairResult {
+                message: if install.cancelled {
+                    "已取消 HidHide 修复。"
+                } else {
+                    "HidHide 已安装，请重启 Windows 后再次运行修复。"
+                }.into(),
+                reboot_required: install.reboot_required,
+            });
+        }
+    }
+    let _gate = GATE.lock().map_err(|_| "Component control lock failed")?;
+    let health = hidhide_health(Component::HidHide.inspect().0, None, inspect_hidhide);
+    let journal = state.store.root.join(motion_core::visibility::SESSION_JOURNAL);
+    let journal_pending = journal.try_exists().map_err(crate::text)?;
+    let (engine_ready, navigating, visibility) = {
+        let snapshot = state.client.snapshot.lock().map_err(crate::text)?;
+        (snapshot.engine_ready, snapshot.status.ui_navigation, snapshot.status.visibility.clone())
+    };
+    repair_hide_policy(
+        health,
+        journal_pending || visibility.active || visibility.error.is_some(),
+        || {
+            if !engine_ready {
+                return Err("请先重启引擎，再恢复遗留的自动隐藏规则。".into());
+            }
+            state.client.request(motion_core::protocol::Command::RecoverVisibility)?;
+            if journal.try_exists().map_err(crate::text)? {
+                return Err("自动隐藏恢复尚未完成，请再次运行 HidHide 修复。".into());
+            }
+            Ok(())
+        },
+        || {
+            let path = runtime::engine_path(app)?;
+            let _verified = super::installers::verify_engine(&path)?;
+            motion_core::visibility::authorize_engine(&path).map_err(|error| format!("{error:#}"))
+        },
+    )?;
+    if engine_ready && !navigating {
+        state.client.request(motion_core::protocol::Command::Scan).map_err(|error| {
+            format!("HidHide 读取权限已确认，重新检测手柄失败：{error}")
+        })?;
+    }
+    Ok(HidHideRepairResult {
+        message: if journal_pending || visibility.active {
+            "已恢复上次自动隐藏遗留的规则，并确认引擎读取权限。"
+        } else {
+            "HidHide 已就绪，引擎读取权限已确认。"
+        }.into(),
+        reboot_required: false,
+    })
+}
+
+#[cfg(not(windows))]
+pub fn repair_hidhide(_: &AppHandle, _: &crate::AppState) -> Result<HidHideRepairResult, String> {
+    Err("HidHide requires Windows".into())
+}
+
 pub fn open_tool(kind: &str) -> Result<(), String> {
     if !cfg!(windows) {
         return Err("Component tools require Windows".into());
@@ -820,6 +946,9 @@ mod tests {
         });
         assert_eq!(health.driver.status, "running");
         assert!(health.session && health.policy.is_none());
+        let removed = hidhide_health(service("restart_required"), Some(&visibility), || panic!());
+        assert_eq!(removed.driver.status, "restart_required");
+        assert!(removed.session && removed.policy.is_none());
         visibility.active = false;
         assert_eq!(
             hidhide_health(service("running"), Some(&visibility), || panic!())
@@ -867,12 +996,52 @@ mod tests {
         assert_eq!(stopped.driver.status, "stopped");
     }
     #[test]
+    fn hidhide_repair_recovers_a_pending_lease_before_allowing_the_engine() {
+        let health = hidhide_health(service("running"), None, || HideInspection::InUse);
+        let recovered = std::cell::Cell::new(false);
+        repair_hide_policy(
+            health,
+            true,
+            || {
+                recovered.set(true);
+                Ok(())
+            },
+            || {
+                assert!(recovered.get());
+                Ok(())
+            },
+        )
+        .unwrap();
+    }
+    #[test]
+    fn hidhide_repair_returns_the_driver_error_when_an_external_client_holds_it() {
+        let health = hidhide_health(service("running"), None, || HideInspection::Failed {
+            code: Some(32),
+            message: "sharing violation".into(),
+        });
+        let error = health.driver.error.clone().unwrap();
+        assert_eq!(
+            repair_hide_policy(health, true, || panic!(), || panic!()),
+            Err(error)
+        );
+    }
+    #[test]
+    fn hidhide_repair_stops_if_pending_rules_could_not_be_restored() {
+        let health = hidhide_health(service("running"), None, || {
+            HideInspection::State(DriverState::default())
+        });
+        assert_eq!(
+            repair_hide_policy(health, true, || Err("restore failed".into()), || panic!()),
+            Err("restore failed".into())
+        );
+    }
+    #[test]
     #[ignore = "manual system integration only; CLI may register itself in the allow list"]
     fn manual_windows_driver_and_cli_probe() {
         for name in ["HidHide", "ViGEmBus"] {
             let result = driver(name);
             eprintln!("{name}: {}", result.status);
-            assert!(["running", "missing", "stopped", "unknown", "unsupported"]
+            assert!(["running", "missing", "stopped", "unknown", "unsupported", "restart_required"]
                 .contains(&result.status.as_str()));
         }
         if let Some(path) = cli_path() {

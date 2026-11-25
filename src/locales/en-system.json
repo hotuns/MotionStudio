@@ -53,7 +53,7 @@
   "重新确认引擎权限": "Recheck engine access",
   "允许引擎读取手柄": "Allow engine to read controllers",
   "映射时自动隐藏实体手柄": "Automatically hide physical controller while mapping",
-  "开始映射时隐藏所选实体手柄及可确认的 XInput 伴随接口，保留虚拟输出可见。断线等待和配置切换期间保持隐藏；停止、F12 或退出后恢复本次新增的规则。": "Starting mapping hides the selected physical controller and identifiable XInput companion interfaces while keeping virtual output visible. Hiding remains during reconnect waits and profile switches. Stopping, F12 or exiting restores only rules added for this session.",
+  "开始映射时隐藏所选实体手柄，保留虚拟输出可见。断线等待和配置切换期间保持隐藏。停止、F12 或退出后撤销本次新增的规则。": "Starting mapping hides the selected physical controller and keeps virtual output visible. Hiding remains during reconnect waits and profile switches. Stopping, pressing F12, or exiting removes the rules added by this session.",
   "请先安装 HidHide；自动隐藏未就绪时不会开始输出。也可以停止后关闭此设置，自行管理设备隐藏。": "Install HidHide first. Output will not start unless automatic hiding is ready. You can also stop, disable this setting and manage device hiding yourself.",
   "实体手柄已隐藏 · 映射会话管理中": "Physical controller hidden · Managed by mapping session",
   "自动隐藏会话运行期间，请先停止映射，再手动修改隐藏规则。": "Stop mapping before manually changing hiding rules while an automatic session is active.",

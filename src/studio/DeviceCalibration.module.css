@@ -45,10 +45,6 @@
   background: var(--bg-1);
 }
 
-.columns :global(.studio-range-heading) {
-  flex-wrap: wrap;
-}
-
 .columns :global(.studio-range),
 .columns :global(.studio-toggle) {
   margin: 0;

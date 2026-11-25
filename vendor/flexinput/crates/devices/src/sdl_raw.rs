@@ -1,6 +1,7 @@
 //! Event-oriented API over the upstream SdlBackend and OpenPad lifecycle.
 use super::*;
 use crate::raw::{RawDevice, RawEvent, SampleTime};
+use sdl3::sys::{gamepad::SDL_GetGamepadProperties, properties::SDL_GetStringProperty};
 
 impl SdlBackend {
     pub fn for_events() -> Result<Self, String> {
@@ -67,6 +68,22 @@ impl SdlBackend {
                 id: raw_id,
                 name,
                 path,
+                container_id: gp.and_then(|gamepad| {
+                    // The pinned SDL exposes this property on the open pad,
+                    // including GameInput pads whose paths are app-local IDs.
+                    unsafe {
+                        let props = SDL_GetGamepadProperties(gamepad.raw());
+                        if props.0 == 0 {
+                            return None;
+                        }
+                        let value = SDL_GetStringProperty(
+                            props,
+                            c"SDL.joystick.container_id".as_ptr(),
+                            std::ptr::null(),
+                        );
+                        (!value.is_null()).then(|| str_of(value))
+                    }
+                }),
                 vendor,
                 product,
                 gamepad,

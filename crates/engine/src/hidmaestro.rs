@@ -27,6 +27,29 @@ const HEARTBEAT: Duration = Duration::from_millis(400);
 const LEASE_TIMEOUT: Duration = Duration::from_secs(2);
 const START_TIMEOUT: Duration = Duration::from_secs(90);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HelperMode {
+    Output,
+    Install,
+    Uninstall,
+}
+
+impl HelperMode {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Output => "--hidmaestro-output",
+            Self::Install => "--hidmaestro-install",
+            Self::Uninstall => "--hidmaestro-uninstall",
+        }
+    }
+
+    pub fn from_argument(arg: &str) -> Option<Self> {
+        [Self::Output, Self::Install, Self::Uninstall]
+            .into_iter()
+            .find(|mode| mode.argument() == arg)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Devices {
@@ -57,7 +80,7 @@ pub fn driver_status() -> (String, Option<String>) {
         DriverState::Partial { .. } => (
             "partial".into(),
             Some(
-                "HIDMaestro 驱动包不完整，请先在原安装工具中修复；本应用不会覆盖其他软件的驱动"
+                "HIDMaestro 驱动包不完整，可在组件管理中卸载后重新安装，或使用原安装程序修复。"
                     .into(),
             ),
         ),
@@ -108,39 +131,29 @@ fn manager() -> &'static Mutex<Option<Session>> {
     static S: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(None))
 }
+fn start_helper(exe: &Path, mode: HelperMode) -> Result<(Pipe, Process, String, Reply)> {
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let mut pipe = Pipe::server(&token)?;
+    let child = transport::elevate(exe, mode, &token)?;
+    pipe.accept(&child, Instant::now() + START_TIMEOUT)?;
+    pipe.send(&Control::Begin {})?;
+    // Once Windows starts changing the driver, cancelling the wait would release
+    // the maintenance lock while the driver change was still in progress.
+    let reply = match mode {
+        HelperMode::Output => pipe.receive(&child, START_TIMEOUT)?,
+        HelperMode::Install | HelperMode::Uninstall => pipe.receive_until(&child, None)?,
+    };
+    if let Reply::Error { message } = reply {
+        bail!("{message}");
+    }
+    Ok((pipe, child, token, reply))
+}
+
 impl Session {
-    fn start(exe: &Path, installing: bool) -> Result<Self> {
-        let token = uuid::Uuid::new_v4().simple().to_string();
-        let mut pipe = Pipe::server(&token)?;
-        let child = transport::elevate(
-            exe,
-            if installing {
-                "--hidmaestro-install"
-            } else {
-                "--hidmaestro-output"
-            },
-            &token,
-        )?;
-        pipe.accept(&child, Instant::now() + START_TIMEOUT)?;
-        pipe.send(&Control::Begin {})?;
-        let reply: Reply = pipe.receive(
-            &child,
-            if installing {
-                Duration::from_secs(180)
-            } else {
-                START_TIMEOUT
-            },
-        )?;
-        let devices = match reply {
-            Reply::Ready { devices } if !installing => devices,
-            Reply::Ok if installing => Devices {
-                keyboard: 0,
-                mouse: 0,
-                pad: None,
-                protected: vec![],
-            },
-            Reply::Error { message } => bail!("{message}"),
-            _ => bail!("Invalid HIDMaestro helper startup reply"),
+    fn start(exe: &Path) -> Result<Self> {
+        let (pipe, child, token, reply) = start_helper(exe, HelperMode::Output)?;
+        let Reply::Ready { devices } = reply else {
+            bail!("Invalid HIDMaestro helper startup reply");
         };
         Ok(Self {
             pipe,
@@ -237,12 +250,22 @@ pub fn shutdown() -> Result<()> {
     }
     Ok(())
 }
-pub fn install_driver(exe: &Path) -> Result<()> {
-    let _session = Session::start(exe, true)?;
+fn maintain_driver(exe: &Path, mode: HelperMode) -> Result<()> {
+    let (_, _, _, reply) = start_helper(exe, mode)?;
+    anyhow::ensure!(
+        matches!(reply, Reply::Ok),
+        "Invalid driver maintenance reply"
+    );
     Ok(())
 }
-pub fn run_helper(parent_pid: u32, token: &str, installing: bool) -> Result<()> {
-    helper::run(parent_pid, token, installing)
+pub fn install_driver(exe: &Path) -> Result<()> {
+    maintain_driver(exe, HelperMode::Install)
+}
+pub fn uninstall_driver(exe: &Path) -> Result<()> {
+    maintain_driver(exe, HelperMode::Uninstall)
+}
+pub fn run_helper(parent_pid: u32, token: &str, mode: HelperMode) -> Result<()> {
+    helper::run(parent_pid, token, mode)
 }
 
 struct Writer {
@@ -308,7 +331,7 @@ impl HidMaestroSink {
             state.take();
         }
         if state.is_none() {
-            *state = Some(Session::start(&std::env::current_exe()?, false)?);
+            *state = Some(Session::start(&std::env::current_exe()?)?);
         }
         let result = (|| {
             let session = state.as_mut().unwrap();

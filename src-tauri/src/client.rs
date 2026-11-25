@@ -213,13 +213,12 @@ impl Client {
         &self,
         command: EngineCommand,
     ) -> Result<Option<GameAngleMeasurement>, String> {
-        let timeout = if matches!(
-            &command,
-            EngineCommand::Start { .. } | EngineCommand::Apply { .. } | EngineCommand::ApplyCursor { .. }
-        ) {
-            120
-        } else {
-            8
+        let timeout = match &command {
+            EngineCommand::Start { .. }
+            | EngineCommand::Apply { .. }
+            | EngineCommand::ApplyCursor { .. } => 120,
+            EngineCommand::RecoverVisibility => 30,
+            _ => 8,
         };
         let id = self.serial.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();

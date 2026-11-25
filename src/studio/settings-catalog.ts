@@ -7,8 +7,13 @@ const group = (tab: GameTab, section: string, prefix: string, fields: [string, s
 
 export const settingsCatalog: SettingTarget[] = [
   ...group('motion','motion-main','gyro.',[
-    ['enabled','启用体感'], ['activation','开启按键'], ['activation_mode','开启方式'], ['pause_input','按住暂停'],
-    ['activation_threshold','扳机与摇杆阈值'], ['sensitivity','体感灵敏度'], ['vertical_ratio','垂直灵敏度比例'],
+    ['enabled','启用体感'], ['output','体感输出','DS4 DualSense PS5 传感器直通 ViGEm USB/IP IMU'],
+  ]),
+  ...group('motion','motion-activation','gyro.',[
+    ['activation','开启按键'], ['activation_mode','开启方式'], ['pause_input','按住暂停'], ['activation_threshold','扳机与摇杆阈值'],
+  ]),
+  ...group('motion','motion-sensitivity','gyro.',[
+    ['sensitivity','体感灵敏度'], ['vertical_ratio','垂直灵敏度比例'],
   ]),
   ...group('motion','motion-idle','gyro.jsm_response.',[['cutoff_recovery_dps','完全恢复转速']]),
   ...group('motion','motion-direction','gyro.jsm_response.',[
@@ -51,7 +56,7 @@ export const settingsCatalog: SettingTarget[] = [
     ['smoothing_ms','直通平滑时间'], ['noise_gate','直通噪声抑制倍率'], ['use_custom_filters','直通应用原始角速度脚本','Rhai'],
   ]),
   ...group('motion','motion-calibration','gyro.',[
-    ['output','体感输出','DS4 DualSense PS5 传感器直通 ViGEm USB/IP IMU'], ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
+    ['stick_full_scale_dps','游戏满杆角速度','满杆角速度 满杆速度 转角校准'], ['counts_per_degree','基础鼠标计数','转角校准'],
   ]),
   ...group('sticks','stick-input','input.',[['deadzone_left','左摇杆输入死区'], ['deadzone_right','右摇杆输入死区']]),
   ...group('sticks','stick-game-response','gyro.',[

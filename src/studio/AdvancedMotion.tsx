@@ -1,4 +1,4 @@
-import {memo, useLayoutEffect, useRef, useState} from 'react';
+import {memo, useId, useLayoutEffect, useRef, useState} from 'react';
 import {invoke} from '@tauri-apps/api/core';
 import {isSensorOutput,sensorOutputLabel} from '../sensor-passthrough';
 import type { MotionConfig, Profile } from '../types';
@@ -20,10 +20,14 @@ export type MotionUpdate=(change:(profile:Profile)=>void)=>void;
 type Props={profile:Profile;update:MotionUpdate};
 type NumberSpec=[string,string,number,number,number,string?];
 function Numbers({object,specs,onChange,sliders}:{object:object;specs:NumberSpec[];onChange:(key:string,value:number)=>void;sliders?:boolean}) {
-  return <>{specs.map(([key,label,min,max,step,unit])=><Range key={key} label={label} value={Number((object as Record<string,unknown>)[key])} min={min} max={max} step={step} unit={unit} slider={sliders??(!unit?.includes('ms')&&!unit?.includes('°/s'))} onChange={v=>onChange(key,v)} />)}</>;
+  return <div className={settingStyles.fieldGrid}>{specs.map(([key,label,min,max,step,unit])=>
+    <Range key={key} label={label} value={Number((object as Record<string,unknown>)[key])}
+      min={min} max={max} step={step} unit={unit} slider={sliders??(!unit?.includes('ms')&&!unit?.includes('°/s'))}
+      onChange={v=>onChange(key,v)}/>)}</div>;
 }
 export function MotionChoice({label,value,options,onChange,disabled,settingPath}:{label:string;value:string;options:readonly (readonly [string,string])[];onChange:(v:string)=>void;disabled?:boolean;settingPath?:string|string[]}) {
-  return <SettingField label={label} path={settingPath} disabled={disabled}><div className={settingStyles.row}><SettingLabel label={label}/><select aria-label={label} value={value} disabled={disabled} onChange={e=>onChange(e.target.value)}>{options.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div></SettingField>;
+  const id=useId();
+  return <SettingField label={label} path={settingPath} disabled={disabled}><div className={settingStyles.row}><SettingLabel label={label} htmlFor={id}/><select id={id} value={value} disabled={disabled} onChange={e=>onChange(e.target.value)}>{options.map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></div></SettingField>;
 }
 const Choice=MotionChoice;
 function ControlInput({label,value,onChange}:{label:string;value:string|null;onChange:(v:string|null)=>void}) {
@@ -64,14 +68,16 @@ export function MotionBehavior({profile,update}:Props) {
         p.gyro.motion.space=v as MotionConfig['space'];
       })}/>
       {jsm&&space in spaceHelp&&<p className={styles.hint}>{spaceHelp[space as keyof typeof spaceHelp]}</p>}
-      {jsm&&local&&<div className={settingStyles.columns}>
+      {jsm&&local&&<div className={settingStyles.fieldGrid}>
         <Choice label="水平瞄准输入轴" settingPath="gyro.jsm_response.mouse_x_axes"
           value={String(response?.mouse_x_axes??(m.space==='pitch_roll'?4:2))} options={axisOptions} onChange={v=>setAxis('mouse_x_axes',v)}/>
         <Choice label="垂直瞄准输入轴" settingPath="gyro.jsm_response.mouse_y_axes"
           value={String(response?.mouse_y_axes??1)} options={axisOptions} onChange={v=>setAxis('mouse_y_axes',v)}/>
       </div>}
-      <Toggle label="反转垂直方向" value={profile.gyro.invert_y} onChange={v=>update(p=>{p.gyro.invert_y=v;})}/>
-      <Toggle label="反转水平方向" value={m.invert_x} onChange={v=>set('invert_x',v)}/>
+      <div className={settingStyles.fieldGrid}>
+        <Toggle label="反转水平方向" value={m.invert_x} onChange={v=>set('invert_x',v)}/>
+        <Toggle label="反转垂直方向" value={profile.gyro.invert_y} onChange={v=>update(p=>{p.gyro.invert_y=v;})}/>
+      </div>
       {(jsm?space==='yaw_plus_roll':space==='pitch_yaw')&&<Range label="横滚参与水平转向" value={m.roll_contribution} min={-100} max={100} step={1} unit="%" onChange={v=>set('roll_contribution',v)}/>}
       {(!jsm||local)&&<SettingField label="习惯握持角度" path="gyro.motion.hold_angles">
         {(jsm?['俯仰']:['俯仰','偏航','横滚']).map((label,i)=><Range key={label} label={label+'补偿'} settingPath={[]} slider={false} value={m.hold_angles[i]} min={-180} max={180} step={1} unit="°" onChange={v=>update(p=>{p.gyro.motion.hold_angles[i]=v;})}/>)}
@@ -83,14 +89,18 @@ export function MotionBehavior({profile,update}:Props) {
           p.gyro.motion.mode=v as MotionConfig['mode'];
           if(v!=='pointer') {p.gyro.output='right_stick';p.gyro.motion.edge.mode='off';}
         })}/>
-      {!jsm&&<><ControlInput label="姿态归零按键" value={m.reset_input} onChange={v=>set('reset_input',v)}/>
-      <ControlInput label="设置正前方按键" value={m.neutral_input} onChange={v=>set('neutral_input',v)}/>
+      {!jsm&&<><div className={settingStyles.fieldGrid}>
+        <ControlInput label="姿态归零按键" value={m.reset_input} onChange={v=>set('reset_input',v)}/>
+        <ControlInput label="设置正前方按键" value={m.neutral_input} onChange={v=>set('neutral_input',v)}/>
+      </div>
       <p className={styles.hint}>姿态归零重新记录当前朝向。设置正前方只重置水平朝向，保留重力方向上的俯仰与横滚。</p>
       <AdvancedTurning profile={profile} update={update}/></>}
     </SettingSection>
     <SettingSection id="motion-inertia" title="Trackball 惯性体感" summary={m.trackball.horizontal_input||m.trackball.vertical_input?'已设置惯性按键':'未设置'}>
-        <ControlInput label="保持水平惯性" value={m.trackball.horizontal_input} onChange={v=>nested(update,'trackball','horizontal_input',v)}/>
-        <ControlInput label="保持垂直惯性" value={m.trackball.vertical_input} onChange={v=>nested(update,'trackball','vertical_input',v)}/>
+        <div className={settingStyles.fieldGrid}>
+          <ControlInput label="保持水平惯性" value={m.trackball.horizontal_input} onChange={v=>nested(update,'trackball','horizontal_input',v)}/>
+          <ControlInput label="保持垂直惯性" value={m.trackball.vertical_input} onChange={v=>nested(update,'trackball','vertical_input',v)}/>
+        </div>
         <Range label="惯性衰减" value={m.trackball.decay} min={0} max={20} step={0.1} onChange={v=>nested(update,'trackball','decay',v)} help="按住指定按键后沿之前的方向继续转动；0 表示保持速度。松开后恢复手腕控制。"/>
     </SettingSection>
   </>;
@@ -170,7 +180,7 @@ export function StabilitySettings({profile,update,onOpenDevice,deviceNoise}:Prop
   });
   const set = (key: string, value: unknown) => mutate(update, key, value);
   const {curves, failed} = useStabilityPreview(gyro, deviceNoise);
-  const chartColumns = settingStyles.columns+' '+styles.chartColumns;
+  const chartColumns = settingStyles.columns;
   const graph = {gyro, curves, deviceNoise, onChange:(key:Parameters<typeof withStabilityValue>[1], value:number)=>
     update(p=>{p.gyro=withStabilityValue(p.gyro,key,value);})};
   return <div className={styles.stabilityGrid}>
@@ -345,8 +355,10 @@ export function FlickStickSettings({profile,update}:Props) {
       {active&&<section className={styles.flickGroup}>
         <h3>共用启用与输出规则</h3>
         <Toggle label="关闭体感时也启用" value={f.standalone??false} onChange={v=>change('standalone',v)}/>
-        <ControlInput label="按住启用（不设置则常开）" value={f.enable_input} onChange={v=>setControl('enable_input',v)}/>
-        <ControlInput label="按住暂停拨动" value={f.pause_input??null} onChange={v=>setControl('pause_input',v)}/>
+        <div className={settingStyles.fieldGrid}>
+          <ControlInput label="按住启用（不设置则常开）" value={f.enable_input} onChange={v=>setControl('enable_input',v)}/>
+          <ControlInput label="按住暂停拨动" value={f.pause_input??null} onChange={v=>setControl('pause_input',v)}/>
+        </div>
         <p className={styles.hint}>按住启用与按住暂停互斥，设置一个会清除另一个；都不设置时常开，仍受功能启用开关控制。</p>
         <Choice label="原始摇杆输出" value={f.suppress} options={[["full","使用时屏蔽"],["deadzone","只屏蔽外圈"],["off","保留原始输出"]]} onChange={v=>change('suppress',v)}/>
         {!f.standalone&&!profile.gyro.enabled&&<p className={styles.hint}>请在「体感」页启用体感，以使用拨动／转动和配套摇杆瞄准。</p>}
@@ -401,46 +413,58 @@ export function GameStickResponse({profile,update}:Props) {
   </>;
 }
 
-export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,showGameResponse}:
-  Props&GameCalibrationProps&{vigemGamepad:boolean;showGameResponse:boolean}) {
-  useLanguage();
+export function MotionOutputChoice({profile,update,vigemGamepad,disabled}: Props & {vigemGamepad:boolean;disabled?:boolean}) {
+  const id=useId();
   const gyro=profile.gyro;
   const passthrough=isSensorOutput(gyro.output);
   const isDs4=profile.virtual_gamepad==='dualshock_4';
   const isDualSense=profile.virtual_gamepad==='dualsense';
   const sensorOutput=isDualSense?'dualsense_imu':'ds4_imu';
   const canUsePassthrough=isDualSense||(isDs4&&vigemGamepad);
-  const outputLocked=gyro.motion.mode!=='pointer'&&!passthrough&&!canUsePassthrough;
+  const outputLocked=disabled||(gyro.motion.mode!=='pointer'&&!passthrough&&!canUsePassthrough);
+  const help=profile.virtual_gamepad==='none'
+    ?'在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。'
+    :isDs4&&!vigemGamepad
+    ?'请在「设置与组件」将虚拟手柄后端设为 ViGEm，再使用 DS4 传感器直通。'
+    :!isDs4&&!isDualSense?'选择虚拟 DualSense（PS5）或使用 ViGEm 的虚拟 DualShock 4，即可直通六轴传感器。':undefined;
+  return <SettingField label="体感输出" disabled={outputLocked}>
+    <div className={settingStyles.row}><SettingLabel label="体感输出" htmlFor={id} help={help}/><select id={id} value={gyro.output}
+      disabled={outputLocked} onChange={event=>{
+        const output=event.currentTarget.value as Profile['gyro']['output'];
+        update(p=>{p.gyro.output=output;});
+      }}>
+      <option value="mouse" disabled={gyro.motion.mode!=='pointer'}>鼠标</option>
+      <option value="right_stick" disabled={profile.virtual_gamepad==='none'}>虚拟手柄右摇杆</option>
+      <option value={sensorOutput} disabled={!canUsePassthrough}>{isDualSense||isDs4?sensorOutputLabel(sensorOutput):'传感器直通'}</option>
+    </select></div>
+  </SettingField>;
+}
+
+export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,tab}:
+  Props&GameCalibrationProps&{vigemGamepad:boolean;tab:'motion'|'sticks'}) {
+  useLanguage();
+  const gyro=profile.gyro;
+  const passthrough=isSensorOutput(gyro.output);
   const showMouseScale=passthrough
     ? gyro.motion.turns.some(turn=>turn.output!=='right_stick')
     : gyro.output==='mouse';
   const showStickScale=passthrough
     ? gyro.motion.turns.some(turn=>turn.output!=='mouse')
     : gyro.output==='right_stick';
-  return <SettingSection id="motion-calibration" title={passthrough?'体感输出':'输出与转角校准'}
-    summary={passthrough?sensorOutputLabel(sensorOutput):gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
-    <SettingField label="体感输出" disabled={outputLocked}>
-      <div className={settingStyles.row}><SettingLabel label="体感输出"/><select aria-label="体感输出" value={gyro.output}
-        disabled={outputLocked} onChange={event=>{
-          const output=event.currentTarget.value as Profile['gyro']['output'];
-          update(p=>{p.gyro.output=output;});
-        }}>
-        <option value="mouse" disabled={gyro.motion.mode!=='pointer'}>鼠标</option><option value="right_stick" disabled={profile.virtual_gamepad==='none'}>虚拟手柄右摇杆</option>
-        <option value={sensorOutput} disabled={!canUsePassthrough}>{isDualSense||isDs4?sensorOutputLabel(sensorOutput):'传感器直通'}</option>
-      </select></div>
-    </SettingField>
-    {isDs4&&!vigemGamepad&&<p className={settingStyles.notice}>请在「设置与组件」将虚拟手柄后端设为 ViGEm，再使用 DS4 传感器直通。</p>}
-    {!isDs4&&!isDualSense&&<p className={styles.hint}>选择虚拟 DualSense（PS5）或使用 ViGEm 的虚拟 DualShock 4，即可直通六轴传感器。</p>}
-    {passthrough?<>
-      <p className={styles.hint}>{isDualSense?'通过 USB/IP 向虚拟 DualSense 发送校准后的陀螺仪和加速度计数据。可在支持 DualSense 体感的游戏或 Steam 输入中设置瞄准。':'向虚拟 DualShock 4 发送经设备校准的陀螺仪和加速度计数据。请在支持读取 DS4 传感器的游戏或 Steam 输入中设置体感。'}</p>
-      {(showStickScale||showMouseScale)&&<p className={styles.hint}>下面的转角换算用于按键触发的定角转身。</p>}
-    </>:<>
+  if(tab==='motion'&&passthrough&&!showStickScale&&!showMouseScale)return null;
+  const title=tab==='motion'?'游戏内转角校准':passthrough?'体感输出':'输出与转角校准';
+  return <SettingSection id="motion-calibration" title={title}
+    summary={isSensorOutput(gyro.output)?sensorOutputLabel(gyro.output):gyro.output==='mouse'?'鼠标':'虚拟右摇杆'}>
+    {tab==='sticks'&&<MotionOutputChoice profile={profile} update={update} vigemGamepad={vigemGamepad}/>}
+    {passthrough
+      ?(showStickScale||showMouseScale)&&<p className={styles.hint}>下面的转角换算用于按键触发的定角转身。</p>
+      :<>
       <p className={styles.hint}>体感、拨动和配套摇杆瞄准共用这里的输出与转角换算。</p>
       {profile.virtual_gamepad==='none'&&<p className={styles.hint}>在游戏配置页头选择虚拟手柄，即可使用右摇杆输出。</p>}
     </>}
     {showStickScale&&<Range label="游戏满杆角速度" value={gyro.stick_full_scale_dps} min={30} max={1440} step={1} unit=" °/s" slider={false}
       onChange={v=>update(p=>{p.gyro.stick_full_scale_dps=v;})} help="填写游戏实际满杆时的转向速度，用于将目标转角换算成摇杆输出。提高这里的值不会让游戏转得更快。"/>}
-    {showGameResponse&&showStickScale&&!passthrough&&(usesJsmAim(gyro)||gyro.motion.flick.enabled||gyro.motion.flick.stick_aim)&&
+    {tab==='motion'&&showStickScale&&!passthrough&&(usesJsmAim(gyro)||gyro.motion.flick.enabled||gyro.motion.flick.stick_aim)&&
       <GameStickResponse profile={profile} update={update}/>}
     {showMouseScale&&<Range label="基础鼠标计数" value={gyro.counts_per_degree} min={1} max={100} step={0.5} unit=" /°" slider={false}
       onChange={v=>update(p=>{p.gyro.counts_per_degree=v;})} help="每旋转一度产生的基础鼠标计数，再乘以体感灵敏度。"/>}

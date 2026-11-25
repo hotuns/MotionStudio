@@ -11,7 +11,7 @@ use motion_core::{
         Command, Event, PadRegionCapture, PadShortcutEvent, Request, RunConfig, Status,
         PROTOCOL_VERSION,
     },
-    sdl::{Device, InputOrigin, Sdl},
+    sdl::{is_gameinput_path, Device, InputOrigin, Sdl},
     shortcut::{
         validate_shortcut_rules, PadShortcut, PadShortcutEdges, ShortcutRule, ShortcutTrigger,
     },
@@ -65,7 +65,11 @@ fn probe_output(
 }
 
 trait VisibilityLease {
-    fn acquire(&mut self, path: &str) -> Result<Option<VisibilityStatus>>;
+    fn acquire(
+        &mut self,
+        path: &str,
+        gameinput_container: Option<&str>,
+    ) -> Result<Option<VisibilityStatus>>;
     fn preparing(&mut self) -> Result<()>;
     fn verify(&mut self, protected: Vec<String>, gamepad: bool) -> Result<()>;
     fn heartbeat(&mut self) -> Result<Option<VisibilityStatus>>;
@@ -74,8 +78,12 @@ trait VisibilityLease {
 }
 struct DriverVisibility;
 impl VisibilityLease for DriverVisibility {
-    fn acquire(&mut self, path: &str) -> Result<Option<VisibilityStatus>> {
-        visibility::acquire(path)
+    fn acquire(
+        &mut self,
+        path: &str,
+        gameinput_container: Option<&str>,
+    ) -> Result<Option<VisibilityStatus>> {
+        visibility::acquire(path, gameinput_container)
     }
     fn preparing(&mut self) -> Result<()> {
         visibility::preparing()
@@ -739,32 +747,42 @@ impl Runtime {
             .set_enabled(config.emit && config.mouse_display_sync);
         Ok(())
     }
-    fn discover(&mut self) -> Result<()> {
-        let config = self.config.as_ref().context("Missing configuration")?;
-        if config.emit && config.auto_hide {
-            self.status.state = "preparing_output".into();
-            self.status.message = "正在隐藏所选实体手柄并登记引擎读取权限".into();
-            self.publish_status();
-            match self.visibility.acquire(&config.device_path) {
-                Ok(Some(status)) => self.status.visibility = status,
-                Ok(None) => {
-                    self.close_input();
-                    self.status.state = "waiting".into();
-                    self.status.message = "等待所选实体手柄连接；尚未新增隐藏规则".into();
-                    self.next_discovery = Instant::now() + Duration::from_secs(2);
-                    return Ok(());
-                }
-                Err(error) => {
-                    self.fault(format!("自动隐藏未就绪，映射已停止：{error:#}"));
-                    return Ok(());
-                }
+    fn acquire_visibility(&mut self, path: &str, gameinput_container: Option<&str>) -> bool {
+        self.status.state = "preparing_output".into();
+        self.status.message = "正在隐藏所选实体手柄并登记引擎读取权限".into();
+        self.publish_status();
+        match self.visibility.acquire(path, gameinput_container) {
+            Ok(Some(status)) => {
+                self.status.visibility = status;
+                true
+            }
+            Ok(None) => {
+                self.close_input();
+                self.status.state = "waiting".into();
+                self.status.message = "等待所选实体手柄连接；尚未新增隐藏规则".into();
+                self.next_discovery = Instant::now() + Duration::from_secs(2);
+                false
+            }
+            Err(error) => {
+                self.fault(format!("自动隐藏未就绪，映射已停止：{error:#}"));
+                false
             }
         }
+    }
+    fn discover(&mut self) -> Result<()> {
         let config = self.config.as_ref().context("Missing configuration")?;
         let path = config.device_path.clone();
+        let auto_hide = config.emit && config.auto_hide;
+        let gameinput_hide = auto_hide && is_gameinput_path(&path);
         let passthrough = config.profile.has_sensor_passthrough();
         let require_gyro = config.profile.gyro.enabled || passthrough;
-        let require_accel = passthrough || (config.profile.gyro.enabled && config.profile.gyro.needs_accel());
+        let require_accel =
+            passthrough || (config.profile.gyro.enabled && config.profile.gyro.needs_accel());
+        // A PnP path can be authorized before SDL opens the pad. GameInput
+        // exposes its Windows container only through the live SDL handle.
+        if auto_hide && !gameinput_hide && !self.acquire_visibility(&path, None) {
+            return Ok(());
+        }
         let selected = self
             .connected_input()
             .filter(|device| device.path.eq_ignore_ascii_case(&path))
@@ -817,6 +835,9 @@ impl Runtime {
             self.status.message =
                 "当前体感设置需要加速度计，请选择支持的接口或关闭依赖重力的功能".into();
             self.next_discovery = Instant::now() + Duration::from_secs(2);
+            return Ok(());
+        }
+        if gameinput_hide && !self.acquire_visibility(&path, device.gameinput_container.as_deref()) {
             return Ok(());
         }
         if !reuse {
@@ -1042,6 +1063,7 @@ impl Runtime {
                         Command::Start { .. }
                             | Command::Navigate { .. }
                             | Command::Stop
+                            | Command::RecoverVisibility
                             | Command::TrialTurn { .. }
                             | Command::BeginMeasure { .. }
                             | Command::EndMeasure { .. }
@@ -1099,7 +1121,6 @@ impl Runtime {
                                 bail!("请先停止映射，再恢复隐藏规则");
                             }
                             self.status.visibility = self.visibility.recover()?;
-                            self.publish_status();
                             Ok(())
                         }
                         Command::SetBindingCapture { active } => self.set_binding_capture(active),
@@ -2753,7 +2774,7 @@ mod tests {
         fail_release: bool,
     }
     impl VisibilityLease for FakeVisibility {
-        fn acquire(&mut self, _: &str) -> Result<Option<VisibilityStatus>> {
+        fn acquire(&mut self, _: &str, _: Option<&str>) -> Result<Option<VisibilityStatus>> {
             self.events.borrow_mut().push("hide");
             Ok((!self.absent).then(|| VisibilityStatus {
                 requested: true,
@@ -2840,6 +2861,7 @@ mod tests {
             vendor: 0,
             product: 0,
             path: "physical#MI_02".into(),
+            gameinput_container: None,
             origin: InputOrigin::Physical,
             gyro: true,
             gamepad: true,

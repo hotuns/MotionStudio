@@ -94,6 +94,8 @@ pub fn pipe_name(token: &str) -> Result<String> {
     }
     Ok(format!(r"\\.\pipe\MotionStudio.HidMaestro.{token}"))
 }
+pub(crate) const PIPE_MESSAGE_BYTES: usize = 4096;
+
 pub struct Pipe {
     file: File,
     pending: Vec<u8>,
@@ -172,7 +174,7 @@ impl Pipe {
     }
     pub fn send<T: Serialize>(&mut self, message: &T) -> Result<()> {
         let mut bytes = serde_json::to_vec(message)?;
-        if bytes.len() > 4095 {
+        if bytes.len() >= PIPE_MESSAGE_BYTES {
             bail!("Output message too large");
         }
         bytes.push(b'\n');
@@ -202,7 +204,7 @@ impl Pipe {
         if available == 0 {
             return Ok(None);
         }
-        if self.pending.len() + available as usize > 4096 {
+        if self.pending.len() + available as usize > PIPE_MESSAGE_BYTES {
             bail!("Output message too large");
         }
         let mut bytes = vec![0; available as usize];
@@ -220,32 +222,40 @@ impl Pipe {
         }
     }
     pub fn receive<T: DeserializeOwned>(&mut self, peer: &Process, timeout: Duration) -> Result<T> {
-        let deadline = Instant::now() + timeout;
+        self.receive_until(peer, Some(Instant::now() + timeout))
+    }
+    pub(super) fn receive_until<T: DeserializeOwned>(
+        &mut self,
+        peer: &Process,
+        deadline: Option<Instant>,
+    ) -> Result<T> {
+        let poll_interval = Duration::from_millis(if deadline.is_some() { 1 } else { 25 });
         loop {
             if let Some(message) = self.poll()? {
                 return Ok(message);
             }
             if !peer.alive() {
-                bail!("HIDMaestro 输出辅助进程已结束");
+                return self.poll()?.context("HIDMaestro 输出辅助进程已结束");
             }
-            if Instant::now() >= deadline {
-                bail!("HIDMaestro 输出辅助进程响应超时");
+            if let Some(deadline) = deadline {
+                if Instant::now() >= deadline {
+                    bail!("HIDMaestro 输出辅助进程响应超时");
+                }
+                if crate::output::emergency_stop() {
+                    bail!("F12 已取消输出初始化");
+                }
             }
-            if crate::output::emergency_stop() {
-                bail!("F12 已取消输出初始化");
-            }
-            std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(poll_interval);
         }
     }
 }
-pub fn elevate(exe: &Path, mode: &str, token: &str) -> Result<Process> {
+pub(super) fn elevate(exe: &Path, mode: super::HelperMode, token: &str) -> Result<Process> {
     pipe_name(token)?;
-    if !["--hidmaestro-output", "--hidmaestro-install"].contains(&mode) {
-        bail!("Invalid helper mode");
-    }
     let file = wide(&exe.display().to_string());
     let verb = wide("runas");
-    let args = wide(&format!("{mode} {} {token}", std::process::id()));
+    let args = wide(&format!(
+        "{} {} {token}", mode.argument(), std::process::id()
+    ));
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
     info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
     info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;

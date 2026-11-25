@@ -39,18 +39,26 @@ export function TriggerSettings({profile, layerMode, update, onEditBase}: {
         <button type="button" className="secondary-btn" onClick={onEditBase}>编辑基础层</button>
       </div>}
       <fieldset className="studio-content" disabled={layerMode}>
-        <div className={styles.grid}>
-          <SettingField label="左扳机全拉模式"><SettingLabel label="左扳机全拉模式"/><OptionPicker label="左扳机全拉模式" value={stage.left_mode} groups={stageChoices}
-            onChange={value => updateStages({left_mode:value as TriggerStageMode})}/></SettingField>
-          <SettingField label="右扳机全拉模式"><SettingLabel label="右扳机全拉模式"/><OptionPicker label="右扳机全拉模式" value={stage.right_mode} groups={stageChoices}
-            onChange={value => updateStages({right_mode:value as TriggerStageMode})}/></SettingField>
+        <div className={settingStyles.fieldGrid}>
+          <SettingField label="左扳机全拉模式"><div className="studio-field">
+            <SettingLabel label="左扳机全拉模式"/>
+            <OptionPicker label="左扳机全拉模式" value={stage.left_mode} groups={stageChoices}
+              onChange={value => updateStages({left_mode:value as TriggerStageMode})}/>
+          </div></SettingField>
+          <SettingField label="右扳机全拉模式"><div className="studio-field">
+            <SettingLabel label="右扳机全拉模式"/>
+            <OptionPicker label="右扳机全拉模式" value={stage.right_mode} groups={stageChoices}
+              onChange={value => updateStages({right_mode:value as TriggerStageMode})}/>
+          </div></SettingField>
+        </div>
+        <Toggle label="随扳机移动触发轻拉" value={stage.soft_threshold < 0}
+          onChange={enabled => updateStages({soft_threshold:enabled ? -1 : stageDefaults.soft_threshold})}/>
+        <div className={settingStyles.fieldGrid}>
           {stage.soft_threshold >= 0 && <Range label="轻拉阈值" value={stage.soft_threshold} min={0} max={0.99} step={0.01}
             onChange={soft_threshold => updateStages({soft_threshold})}/>}
           {skipping && <Range label="快速全拉时间窗" value={stage.skip_delay_ms} min={0} max={5000} step={1} unit=" ms" slider={false}
             onChange={skip_delay_ms => updateStages({skip_delay_ms})}/>}
         </div>
-        <Toggle label="随扳机移动触发轻拉" value={stage.soft_threshold < 0}
-          onChange={enabled => updateStages({soft_threshold:enabled ? -1 : stageDefaults.soft_threshold})}/>
       </fieldset>
     </SettingSection>
     <TriggerInputSettings profile={profile} update={update}/>

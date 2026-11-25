@@ -1,6 +1,8 @@
 //! Session-owned physical-controller hiding; no input/output algorithms here.
 use serde::{Deserialize, Serialize};
 
+pub const SESSION_JOURNAL: &str = "hidhide-session.json";
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VisibilityStatus {
     pub requested: bool,
@@ -13,7 +15,7 @@ pub mod policy;
 #[cfg(windows)]
 mod control;
 #[cfg(windows)]
-pub use control::{inspect, native_image_path, InspectionError};
+pub use control::{authorize_engine, inspect, native_image_path, InspectionError};
 #[cfg(windows)]
 mod session;
 #[cfg(windows)]
@@ -86,7 +88,7 @@ pub fn recover() -> anyhow::Result<VisibilityStatus> {
     Ok(VisibilityStatus::default())
 }
 #[cfg(not(windows))]
-pub fn acquire(_: &str) -> anyhow::Result<Option<VisibilityStatus>> {
+pub fn acquire(_: &str, _: Option<&str>) -> anyhow::Result<Option<VisibilityStatus>> {
     anyhow::bail!("自动隐藏需要 Windows 和 HidHide")
 }
 #[cfg(not(windows))]
