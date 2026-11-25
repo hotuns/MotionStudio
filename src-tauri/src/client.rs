@@ -166,6 +166,11 @@ impl Client {
                 self.publish_calibration();
                 let _ = self.app.emit("engine-status", status);
             }
+            Event::CalibrationButton { session_id, button } => {
+                if let Some(state) = self.app.try_state::<crate::AppState>() {
+                    state.game_calibration.pad_input(session_id, button);
+                }
+            }
             Event::Devices { devices } => {
                 self.snapshot.lock().unwrap().devices = devices.clone();
                 let _ = self.app.emit("engine-devices", devices);

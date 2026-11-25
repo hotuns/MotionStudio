@@ -192,8 +192,10 @@ export default function App() {
   const gamepadRecording = capture && 'onGamepadInput' in capture && !capture.controlId ? capture : undefined;
   const actionRecording = capture && !('onGamepadInput' in capture) && !('gyroField' in capture) ? capture : null;
   const captureActive = !!capture || !!status?.binding_capture;
+  const curvePhase = status?.curve_probe?.phase.phase;
+  const measuring = !!status?.motion?.measuring || curvePhase === 'waiting_for_mark' || curvePhase === 'timing';
   const measuringRef=useRef(false);
-  measuringRef.current=!!status?.motion?.measuring;
+  measuringRef.current=measuring;
   const active = !!status && !status.ui_navigation && ['running', 'observing', 'waiting', 'preparing_output', 'calibrating', 'capturing', 'capture_release'].includes(status.state);
   const waiting = !status?.ui_navigation && ['waiting','preparing_output'].includes(status?.state ?? '');
   const calibrating = status?.state === 'calibrating';
@@ -203,9 +205,9 @@ export default function App() {
     (status?.device?.path === devicePath ? status.device : null);
   const canRecordGyro = !!snapshot?.engine_ready && !!device?.gamepad && device.origin !== 'virtual' && !device.open_error && !waiting;
   const canCalibrate = !!status?.device?.gyro && status.device.path===devicePath &&
-    ['running','observing'].includes(status.state) && !captureActive && !status.motion?.measuring;
+    ['running','observing'].includes(status.state) && !captureActive && !measuring;
   const calibrationBlocked = !native || busy || calibrating || captureActive ||
-    !!status?.motion?.measuring || !!batch || !!bindingWindowId;
+    measuring || !!batch || !!bindingWindowId;
   const appliedId = active ? status?.profile_id : workspace?.settings.selected_profile;
   const pending = dirty || !!(draft && (draft.id !== appliedId || (active && draft.id === failedApplyId)));
   const needsBindings = useMemo(() => !!baseProfile && hasUnboundActions(baseProfile), [baseProfile]);
@@ -273,9 +275,21 @@ export default function App() {
         if (JSON.stringify(current) === JSON.stringify(previous)) return structuredClone(entry);
         const gyro = current.profile.gyro;
         const calibrated = entry.profile.gyro;
+        const before = previous.profile.gyro;
+        const next = {...gyro};
         const key = calibrated.output === 'mouse' ? 'counts_per_degree' : 'stick_full_scale_dps';
-        if (gyro.output !== calibrated.output || gyro[key] !== previous.profile.gyro[key]) return current;
-        return {...current,profile:{...current.profile,gyro:{...gyro,[key]:calibrated[key]}}};
+        if (gyro.output === calibrated.output && gyro[key] === before[key]) next[key] = calibrated[key];
+        const curve = calibrated.right_stick_curve;
+        if (curve) {
+          // Measurement updates the active model and points together. Preserve
+          // independent draft edits such as the physical-stick toggle or Bezier handles.
+          const curveKeys = ['enabled', 'model', 'points'] as const;
+          const unchanged = curveKeys.every(field => JSON.stringify(gyro.right_stick_curve?.[field])
+            === JSON.stringify(before.right_stick_curve?.[field]));
+          if (unchanged) next.right_stick_curve = {...curve, ...gyro.right_stick_curve,
+            enabled:curve.enabled, model:curve.model, points:curve.points};
+        }
+        return {...current,profile:{...current.profile,gyro:next}};
       });
       recordSave(payload);
     }).then(dispose => {
@@ -338,7 +352,7 @@ export default function App() {
   useEffect(()=>{gestureSerial.current=status?.input_serial??0;},[snapshot?.restart_count]);
   useEffect(()=>{
     const serial=status?.input_serial??0;if(serial<=gestureSerial.current)return;gestureSerial.current=serial;
-    if(!windowFocused||busy||batch||calibrating||status?.motion?.measuring)return;
+    if(!windowFocused||busy||batch||calibrating||measuring)return;
     const chord=status?.input_chord??[];
     if(chord.includes('back')&&chord.includes('start')){
       if(capture&&status?.ui_navigation){cancelCapture();notify('录入已取消');}
@@ -507,7 +521,7 @@ export default function App() {
     }
     cancelCapture();
     setSettingRequest(undefined);
-    if (target === 'games') setGameTab(measuringRef.current ? 'motion' : tab);
+    if (target === 'games' && !measuringRef.current) setGameTab(tab);
     setRevealDeviceCalibration(showCalibration);
     setPage(target);
   }, [cancelCapture, notify]);
@@ -528,7 +542,7 @@ export default function App() {
     if(status?.ui_navigation&&path&&path!==devicePath)void run(async()=>{await invoke('set_ui_navigation',{active:true,devicePath:path});setSnapshot(await invoke<Snapshot>('snapshot'));});
   }
   function openJsmImport(initialGame = editingGameId) {
-    if(busy||calibrating||status?.motion?.measuring)return;
+    if(busy||calibrating||measuring)return;
     if(dirty){notify('请先保存或撤销当前配置的修改。',true);return;}
     cancelCapture();setTargetGame(initialGame);setImportingJsm(true);
   }
@@ -604,7 +618,7 @@ export default function App() {
   }
 
   function beginCapture(target: CaptureRequest) {
-    if (busy || calibrating || status?.motion?.measuring) return;
+    if (busy || calibrating || measuring) return;
     if (capture) { cancelCapture(); return; }
     const gyro = 'gyroField' in target;
     const gamepad = 'onGamepadInput' in target;
@@ -978,7 +992,7 @@ export default function App() {
 
   const locked = busy || calibrating;
   const updateBlocked = dirty ? '请先保存或撤销当前配置的修改。'
-    : captureActive || calibrating || status?.motion?.measuring || batch || bindingWindowId ? '请先结束录入或校准，再安装更新。'
+    : captureActive || calibrating || measuring || batch || bindingWindowId ? '请先结束录入或校准，再安装更新。'
     : busy || status?.state === 'preparing_output' ? '请等待当前操作完成。' : null;
   const dialogError = notice?.error ? notice.text : undefined;
   const shellStatus = calibrating ? status.message :
@@ -987,7 +1001,7 @@ export default function App() {
     pending ? '点击应用修改可切换当前配置。' : status?.message || '连接设备后可开始测试。';
 
   const splitTouchpad = (device?.touchpads ?? 0) >= 2;
-  const captureLocked = locked || captureActive || !!status?.motion?.measuring || !!batch || !!bindingWindowId;
+  const captureLocked = locked || captureActive || measuring || !!batch || !!bindingWindowId;
   // A capture needs the latest device and engine state only when the user starts it.
   const beginCaptureRef = useRef(beginCapture);
   useLayoutEffect(() => { beginCaptureRef.current = beginCapture; });
@@ -1013,24 +1027,31 @@ export default function App() {
   const profileOptions = useMemo(() => entries.map(entry => ({
     id: entry.id, name: entry.id === profileId ? profileName ?? entry.profile.name : entry.profile.name,
   })), [entries, profileId, profileName]);
-  const openCalibration = useCallback(() => {
+  const openCalibration = useCallback((curveMode?: boolean) => {
     if (profileId) void run(() => invoke('open_calibration_window', {
-      profileId, theme:document.documentElement.dataset.theme==='light'?'light':'dark',
+      profileId, curveMode, theme:document.documentElement.dataset.theme==='light'?'light':'dark',
     }));
   }, [profileId, run]);
+  const openAngleCalibration = useCallback(() => openCalibration(), [openCalibration]);
+  const openCurveMeasurement = useCallback(() => openCalibration(true), [openCalibration]);
+  const canMeasure = status?.state === 'running' && status.emitting && !!status.device
+    && !pending && !captureActive && !editingLayer && !status.active_layers?.length
+    && !batch && !bindingWindowId && runningProfile === profileId;
+  const canMeasureCurve = canMeasure && profile?.virtual_gamepad !== 'none'
+    && status.output_gamepad?.connected && status.output_gamepad.target === profile?.virtual_gamepad;
   const filterStatus = status?.profile_id === profileId ? status?.motion?.filters : undefined;
 
   return <PadInputCaptureContext.Provider value={padCapture}>
     <StudioShell page={page} gameTab={gameTab} onNavigate={navigate} onGameTab={tab=>navigate('games',tab)}
       setupNotice={native&&workspace&&<ComponentSetupNotice plan={setupPlan} checking={checkingComponents} error={componentError}
-        rebootRequired={componentRebootRequired} blocked={busy||captureActive||calibrating||!!status?.motion?.measuring}
+        rebootRequired={componentRebootRequired} blocked={busy||captureActive||calibrating||measuring}
         onOpen={()=>setComponentSetupOpen(true)}/>}
-      settingsBlocked={locked||captureActive||!!status?.motion?.measuring||!!editor||!!batch||!!bindingWindowId||!draft}
+      settingsBlocked={locked||captureActive||measuring||!!editor||!!batch||!!bindingWindowId||!draft}
       onSetting={target=>{
         if(locked||captureActive||measuringRef.current||!draft)return;
         navigate('games',target.tab);setSettingRequest({...target,serial:++settingSerial.current});
       }}
-      controllerNavigation={<GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||!!status?.motion?.measuring}
+      controllerNavigation={<GamepadNavigation status={status} foreground={windowFocused} blocked={locked||captureActive||measuring}
         canSave={canSave} canPlay={canObserve&&!locked&&!needsBindings}
         onSave={()=>{if(dirty&&!locked)void run(saveDraft);}} onPlay={()=>void run(()=>startMapping(true))} onDisable={disableGamepad}/>}
       profiles={profileOptions} games={games}
@@ -1072,13 +1093,13 @@ export default function App() {
             editingLayer={draft.profile.layers?.find(layer=>layer.id===editingLayer)} settingRequest={settingRequest}
             onRestoreSetting={restoreSetting}
             vigemGamepad={workspace.settings.output_backend==='legacy'||(workspace.settings.gamepad_backend??'vigem')==='vigem'}
-            canMeasure={!!status?.emitting&&!!status.device&&!pending&&!captureActive&&!editingLayer&&!batch&&runningProfile===draft.id}
-            onOpenCalibration={openCalibration}
+            canMeasure={canMeasure} measuring={measuring} onOpenCalibration={openAngleCalibration}
+            onMeasureCurve={canMeasureCurve ? openCurveMeasurement : undefined}
             layerControls={<LayerToolbar key={draft.id} profile={draft.profile} profileId={draft.id} selected={editingLayer} onSelect={setEditingLayer}
-              blocked={locked||!!capture&&!controlRecording||!!editor||!!batch||!!status?.motion?.measuring} status={status}
+              blocked={locked||!!capture&&!controlRecording||!!editor||!!batch||measuring} status={status}
               onUpdate={change=>setDraft(current=>{if(!current)return current;const entry=structuredClone(current);change(entry.profile);return entry;})}/>}
             blocked={locked} capture={actionRecording} onCapture={startCapture} onCancelCapture={cancelCapture} onAssignEscape={assignEscapeCapture}
-            gamepadRecording={gamepadRecording} canRecordGamepad={!!snapshot?.engine_ready && !waiting && !status?.motion?.measuring && !status?.binding_capture}
+            gamepadRecording={gamepadRecording} canRecordGamepad={!!snapshot?.engine_ready && !waiting && !measuring && !status?.binding_capture}
             onRecordGamepad={(wholeStick,onGamepadInput,outerRing)=>beginCapture({kind:'pad',index:null,wholeStick,onGamepadInput,outerRing})}
             onUpdate={update} onEdit={openEditor} onBatch={openBatch} onTab={tab=>navigate('games',tab)}
             onEditBase={()=>{cancelCapture();setEditingLayer('');}} onImportJsm={()=>openJsmImport()}
@@ -1086,7 +1107,7 @@ export default function App() {
               split:splitTouchpad, missingImu:!!device&&(!device.gyro||!device.accelerometer),
               deviceNoise:workspace.settings.motion_calibrations[devicePath]?.gyro_noise_dps,
               recording:gyroRecording, canRecord:canRecordGyro,
-              bindingLocked:!!gyroRecording||!!status?.binding_capture||!!status?.motion?.measuring,
+              bindingLocked:!!gyroRecording||!!status?.binding_capture||measuring,
               onRecord:recordGyroInput, onCancelRecording:cancelCapture,
               onOpenDevice:openDeviceCalibration, onPreviewOutput:openOutputPreview,
               filtersRunning:status?.profile_id===draft.id&&['running','observing'].includes(status.state),
@@ -1135,7 +1156,7 @@ export default function App() {
         onChange={patch => void run(() => changeSettings(patch))} status={status} onPadCapture={bindingCapture}
         onSaveRules={rules=>run(()=>changeSettings({shortcut_rules:rules}),undefined,true)}
         onPreparePad={async()=>{
-          if(calibrating||status?.motion?.measuring)throw new Error('请先结束校准或转角测量');
+          if(calibrating||measuring)throw new Error('请先结束校准或转角测量');
           if(!active&&!status?.ui_navigation&&!(await startMapping(false,false)))throw new Error('请先选择一个手柄接口');
           await bindingCapture(true);
           snapshotEpoch.current++;

@@ -1,4 +1,6 @@
 use crate::{calibration::Calibration, guardian::Guard, io_clock::IoClock};
+mod curve_probe;
+use curve_probe::CurveProbe;
 use anyhow::{bail, Context, Result};
 use motion_core::{
     engine::{Engine, Frame, InputEvent, StickPosition},
@@ -8,8 +10,8 @@ use motion_core::{
     },
     profile::{pressed_inputs, GamepadTarget, Profile},
     protocol::{
-        Command, Event, PadRegionCapture, PadShortcutEvent, Request, RunConfig, Status,
-        PROTOCOL_VERSION,
+        CalibrationButton, CalibrationSessionId, Command, Event, PadRegionCapture, PadShortcutEvent,
+        Request, RunConfig, Status, PROTOCOL_VERSION,
     },
     sdl::{is_gameinput_path, Device, InputOrigin, Sdl},
     shortcut::{
@@ -34,6 +36,11 @@ use std::{
 
 const PAD_SHORTCUT_EVENT_LIMIT: usize = 64;
 const IMU_REQUIRES_SENSORS: &str = "传感器直通需要同时支持陀螺仪和加速度计的手柄接口";
+
+struct CalibrationControls {
+    session_id: CalibrationSessionId,
+    armed_ns: u64,
+}
 
 fn validate_imu_backend(config: &RunConfig, profile: &Profile) -> Result<()> {
     anyhow::ensure!(
@@ -187,6 +194,9 @@ pub struct Runtime {
     seeding: bool,
     resync_input: bool,
     measurement_input_interrupted: bool,
+    calibration_controls: Option<CalibrationControls>,
+    curve_probe: Option<CurveProbe>,
+    consumed_calibration_buttons: BTreeSet<u8>,
     pad_shortcut_edges: Vec<PadShortcutEdges>,
     feedback: motion_core::feedback::FeedbackRouter,
     haptics: Option<motion_core::haptics::Session>,
@@ -202,6 +212,7 @@ impl Runtime {
 
     fn status_snapshot(&self) -> Status {
         let mut status = self.status.clone();
+        status.curve_probe = self.curve_probe.map(|probe| probe.status);
         status.mouse_display_sync = self.io_clock.status();
         status.feedback = self.feedback.status.clone();
         status.output_gamepad = self
@@ -209,12 +220,12 @@ impl Runtime {
             .as_ref()
             .filter(|_| self.gamepad_output_configured())
             .and_then(|output| output.gamepad_status());
-        if (status.emitting || status.state == "observing")
-            && !self.output_paused()
-            && !status.ui_navigation
-        {
+        let mapping_visible = !self.output_paused() && !status.ui_navigation;
+        if (status.emitting || status.state == "observing") && (mapping_visible || self.active_curve_probe().is_some()) {
             status.output_preview = self.output.as_ref().map(Dispatcher::preview);
-            status.mapping = self.engine.as_ref().map(Engine::mapping_status).unwrap_or_default();
+            if mapping_visible {
+                status.mapping = self.engine.as_ref().map(Engine::mapping_status).unwrap_or_default();
+            }
         }
         status.motion.filters = self
             .engine
@@ -258,6 +269,9 @@ impl Runtime {
             seeding: false,
             resync_input: false,
             measurement_input_interrupted: false,
+            calibration_controls: None,
+            curve_probe: None,
+            consumed_calibration_buttons: BTreeSet::new(),
             pad_shortcut_edges: vec![],
             feedback: Default::default(),
             haptics: None,
@@ -320,6 +334,7 @@ impl Runtime {
             || self.status.binding_capture
             || self.resync_input
             || self.measurement_input_interrupted
+            || self.active_curve_probe().is_some()
     }
     fn update_feedback(&mut self) {
         let active = self.status.emitting
@@ -398,6 +413,9 @@ impl Runtime {
     }
     fn close_input(&mut self) {
         self.sdl.take();
+        self.calibration_controls = None;
+        self.curve_probe = None;
+        self.consumed_calibration_buttons.clear();
         self.resync_input = false;
         self.measurement_input_interrupted = false;
         self.status.device = None;
@@ -421,6 +439,8 @@ impl Runtime {
         result
     }
     fn finish_session(&mut self, message: &str, keep_input: bool) -> Result<()> {
+        self.calibration_controls = None;
+        self.curve_probe = None;
         let mut result = self.close_output();
         if result.is_err() {
             let _ = motion_core::hidmaestro::shutdown();
@@ -699,6 +719,8 @@ impl Runtime {
             self.status.state = "navigating".into();
             self.status.message = "手柄操作界面 · A 确认 · B 返回 · LB/RB 切换区域".into();
         }
+        self.calibration_controls = None;
+        self.curve_probe = None;
         self.status.revision += 1;
         self.status.buttons.fill(false);
         self.status.axes = [0.0; 6];
@@ -924,12 +946,13 @@ impl Runtime {
             } else {
                 config.profile.virtual_gamepad != profile.virtual_gamepad
             };
-        if config.emit && (recreate || self.output.is_none()) {
-            probe_output(
-                config.output_backend,
-                config.gamepad_backend,
-                profile.virtual_gamepad,
-            )?;
+        let probe_target = (config.emit && (recreate || self.output.is_none()))
+            .then_some((config.output_backend, config.gamepad_backend));
+        if let Some(probe) = self.active_curve_probe() {
+            self.cancel_curve_probe(probe.status.session_id)?;
+        }
+        if let Some((backend, pad_backend)) = probe_target {
+            probe_output(backend, pad_backend, profile.virtual_gamepad)?;
         }
         if preserve_press
             && !recreate
@@ -1014,6 +1037,8 @@ impl Runtime {
         self.status.profile_id = Some(id);
         self.status.profile_name = Some(config.profile.name.clone());
         self.status.reload_error = None;
+        self.calibration_controls = None;
+        self.curve_probe = None;
         self.status.revision += 1;
         self.layer_activation = Default::default();
         self.active_layers.clear();
@@ -1061,15 +1086,27 @@ impl Runtime {
                     || matches!(
                         &request.command,
                         Command::Start { .. }
+                            | Command::Apply { .. }
+                            | Command::ApplyCursor { .. }
                             | Command::Navigate { .. }
                             | Command::Stop
                             | Command::RecoverVisibility
                             | Command::TrialTurn { .. }
+                            | Command::StartCurveProbe { .. }
+                            | Command::MarkCurveProbe { .. }
+                            | Command::CancelCurveProbe { .. }
                             | Command::BeginMeasure { .. }
                             | Command::EndMeasure { .. }
                     );
                 let mut measurement = None;
                 let result = (|| -> Result<()> {
+                    if self.active_curve_probe().is_some() && matches!(request.command,
+                        Command::Navigate { .. } | Command::Calibrate | Command::CalibrateFace { .. }
+                        | Command::SetSensorCalibration { .. } | Command::BeginMeasure { .. }
+                        | Command::TrialTurn { .. } | Command::EndMeasure { .. } | Command::ResetPose
+                    ) {
+                        bail!("请先结束当前曲线测量。");
+                    }
                     match request.command {
                         Command::Start { config } => self.start(*config),
                         Command::Navigate { device_path } => {
@@ -1124,6 +1161,19 @@ impl Runtime {
                             Ok(())
                         }
                         Command::SetBindingCapture { active } => self.set_binding_capture(active),
+                        Command::SetCalibrationControls {
+                            session_id,
+                            expected_revision,
+                            active,
+                        } => self.set_calibration_controls(session_id, expected_revision, active),
+                        Command::StartCurveProbe { session_id, expected_revision, percent } => {
+                            self.start_curve_probe(session_id, expected_revision, percent)
+                        }
+                        Command::MarkCurveProbe { session_id } => {
+                            let now = self.sdl.as_ref().context("引擎未运行")?.now_ns();
+                            self.mark_curve_probe(session_id, now)
+                        }
+                        Command::CancelCurveProbe { session_id } => self.cancel_curve_probe(session_id),
                         Command::SetPadShortcuts { bindings } => self.set_pad_shortcuts(bindings),
                         Command::Scan => self.scan(),
                         Command::Calibrate => {
@@ -1389,7 +1439,87 @@ impl Runtime {
         self.publish_status();
         Ok(())
     }
+    fn set_calibration_controls(
+        &mut self,
+        session_id: CalibrationSessionId,
+        expected_revision: u64,
+        active: bool,
+    ) -> Result<()> {
+        if active {
+            anyhow::ensure!(
+                self.status.revision == expected_revision
+                    && self.status.emitting
+                    && self.status.state == "running"
+                    && !self.output_paused()
+                    && self.connected_input().is_some_and(|device| device.origin != InputOrigin::Virtual),
+                "校准所用的映射已改变，请重新打开校准悬浮窗。"
+            );
+            if let Some(controls) = &self.calibration_controls {
+                anyhow::ensure!(controls.session_id == session_id, "请先关闭另一份配置的校准悬浮窗。");
+            } else {
+                self.calibration_controls = Some(CalibrationControls {
+                    session_id,
+                    armed_ns: self.sdl.as_ref().context("引擎未运行")?.now_ns(),
+                });
+            }
+        } else if self.calibration_controls.as_ref().is_some_and(|c| c.session_id == session_id) {
+            self.cancel_curve_probe(session_id)?;
+            self.calibration_controls = None;
+        }
+        Ok(())
+    }
+
+    fn consume_calibration_button(
+        &mut self,
+        event: &InputEvent,
+        from_snapshot: bool,
+    ) -> Result<bool> {
+        let InputEvent::Button { time, index, down } = *event else {
+            return Ok(false);
+        };
+        // A press belongs to the same consumer through its release, even if the
+        // overlay opens or closes, or its save operation reseeds the engine.
+        if self.consumed_calibration_buttons.contains(&index) {
+            if !down {
+                self.consumed_calibration_buttons.remove(&index);
+            }
+            return Ok(true);
+        }
+        let Some(controls) = &self.calibration_controls else {
+            return Ok(false);
+        };
+        let button = match motion_core::profile::BUTTONS.get(usize::from(index)).copied() {
+            Some("south") => CalibrationButton::Measure,
+            Some("north") => CalibrationButton::Apply,
+            Some("dpad_left") => CalibrationButton::Less,
+            Some("dpad_right") => CalibrationButton::More,
+            Some("west") => CalibrationButton::Mode,
+            Some("east") => CalibrationButton::Back,
+            _ => return Ok(false),
+        };
+        if self.status.buttons.get(usize::from(index)) == Some(&true) {
+            return Ok(false);
+        }
+        if down {
+            self.consumed_calibration_buttons.insert(index);
+            if !from_snapshot && time.host_ns >= controls.armed_ns {
+                let session_id = controls.session_id;
+                if self.handle_curve_button(button, time.host_ns)? {
+                    return Ok(true);
+                }
+                self.publisher.reliable(Event::CalibrationButton {
+                    session_id,
+                    button,
+                })?;
+            }
+        }
+        Ok(true)
+    }
+
     fn input(&mut self, event: InputEvent, from_snapshot: bool) -> Result<()> {
+        if self.consume_calibration_button(&event, from_snapshot)? {
+            return Ok(());
+        }
         if !self.press_handoffs.is_empty()
             && matches!(
                 event,
@@ -1555,8 +1685,9 @@ impl Runtime {
             }
             return Ok(());
         }
+        let probing = self.active_curve_probe().is_some();
         if let Some(engine) = &mut self.engine {
-            if from_snapshot {
+            if from_snapshot || probing {
                 engine.process_snapshot(&event)
             } else {
                 engine.process(&event)
@@ -1567,7 +1698,7 @@ impl Runtime {
         if controls_event {
             self.track_pad_shortcut(from_snapshot);
         }
-        if controls_event && !from_snapshot {
+        if controls_event && !from_snapshot && !probing {
             self.sync_layers()?;
         }
         if !self.output_paused() && !self.seeding {
@@ -1769,7 +1900,9 @@ impl Runtime {
     }
     fn set_binding_capture(&mut self, active: bool) -> Result<()> {
         if active {
-            if self.calibration.is_some() || self.engine.as_ref().is_some_and(Engine::is_measuring)
+            if self.calibration_controls.is_some()
+                || self.calibration.is_some()
+                || self.engine.as_ref().is_some_and(Engine::is_measuring)
             {
                 bail!("请先结束校准或转角测量");
             }
@@ -1846,6 +1979,10 @@ impl Runtime {
             .saturating_duration_since(self.last_advance)
             .as_secs_f32();
         self.last_advance = advance_at;
+        if let Some(probe) = self.active_curve_probe() {
+            self.io_clock.begin_flush(pass);
+            return self.emit_curve_frame(probe.status.percent);
+        }
         if self.output_paused() {
             self.io_clock.begin_flush(pass);
             if let Some(output) = &mut self.output {
@@ -1870,10 +2007,11 @@ impl Runtime {
         Ok(())
     }
     fn begin_input_resync(&mut self) -> Result<()> {
-        self.reset_layer_activation()?;
+        self.interrupt_curve_probe();
         self.resync_input = true;
         self.reset_pad_shortcut_events();
         self.clear_outputs()?;
+        self.reset_layer_activation()?;
         if let Some(engine) = &mut self.engine {
             if engine.is_measuring() {
                 self.measurement_input_interrupted = true;
@@ -1939,6 +2077,12 @@ impl Runtime {
             }
             self.queue.add(age);
             let start = Instant::now();
+            // A real button edge must still be able to cancel an interrupted
+            // measurement while mapping is only resynchronizing its state.
+            if self.measurement_input_interrupted && self.consume_calibration_button(&event, false)?
+            {
+                continue;
+            }
             self.input(
                 event,
                 self.config.is_none() || self.measurement_input_interrupted,
@@ -1983,6 +2127,7 @@ impl Runtime {
             self.stop_mapping("F12 紧急停止：输出已释放")?;
             self.publish_status();
         }
+        self.expire_curve_probe()?;
         if let Some(status) = self.visibility.heartbeat()? {
             self.status.visibility = status;
         }

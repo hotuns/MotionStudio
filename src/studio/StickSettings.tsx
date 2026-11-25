@@ -47,7 +47,9 @@ function StickMouseCurve({stick, update}: {stick: Profile['stick_mouse']; update
   </SettingField>;
 }
 
-export const StickSettings = memo(function StickSettings({profile,update}:{profile:Profile;update:MotionUpdate}) {
+export const StickSettings = memo(function StickSettings({profile,update,onMeasureCurve}:{
+  profile:Profile; update:MotionUpdate; onMeasureCurve?:()=>void;
+}) {
   useLanguage();
   const stick=profile.stick_mouse;
   const zones=profile.stick_zones??{left_outer:0.85,right_outer:0.85,hysteresis:0.05};
@@ -57,7 +59,7 @@ export const StickSettings = memo(function StickSettings({profile,update}:{profi
       <Toggle label="矫正实体摇杆输出" value={profile.gyro.right_stick_curve?.linearize_stick??false}
         onChange={value=>update(p=>{p.gyro.right_stick_curve={...p.gyro.right_stick_curve,linearize_stick:value};})}/>
       <p className={styles.hint}>将实体摇杆映射到虚拟右摇杆后，有效推杆量 50% 对应满杆转速的 50%。可以单独使用，也可以与体感和快速转向共用这条游戏曲线。</p>
-      <GameStickResponse profile={profile} update={update}/>
+      <GameStickResponse profile={profile} update={update} onMeasureCurve={onMeasureCurve}/>
     </SettingSection>
     <FlickStickSettings profile={profile} update={update}/>
     <SettingSection id="stick-mouse" title="摇杆鼠标" summary={stick.enabled?<>{stick.speed} 计数/s</>:'关闭'}>

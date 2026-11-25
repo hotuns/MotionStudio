@@ -32,8 +32,9 @@ export type MotionSettingsInputs = {
 
 export const MotionSettings = memo(function MotionSettings({profile,profileId,update,split,missingImu,recording,canRecord,onRecord,
   bindingLocked,onCancelRecording,onOpenDevice,onPreviewOutput,filtersRunning,filterStatuses,onMotionAction,deviceNoise,vigemGamepad,
-  canMeasure,onOpenCalibration}: MotionSettingsInputs & {
+  canMeasure,onOpenCalibration,onMeasureCurve}: MotionSettingsInputs & {
   profile:Profile; profileId:string; update:Update; vigemGamepad:boolean; canMeasure:boolean; onOpenCalibration:()=>void;
+  onMeasureCurve?:()=>void;
 }) {
   useLanguage();
   const gyro=profile.gyro;
@@ -119,7 +120,7 @@ export const MotionSettings = memo(function MotionSettings({profile,profileId,up
       <SampleClock value={gyro.timestamp_source} onChange={value=>setGyro('timestamp_source',value)}/>
     </SettingSection>}
     <MotionOutputSettings profile={profile} update={update} tab="motion" vigemGamepad={vigemGamepad}
-      canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>
+      canMeasure={canMeasure} onOpenCalibration={onOpenCalibration} onMeasureCurve={onMeasureCurve}/>
     {gyro.enabled&&<>
       {!passthrough&&<>
         <StabilitySettings profile={profile} update={update} onOpenDevice={onOpenDevice} deviceNoise={deviceNoise}/>

@@ -60,7 +60,7 @@ export const settingsCatalog: SettingTarget[] = [
   ]),
   ...group('sticks','stick-input','input.',[['deadzone_left','左摇杆输入死区'], ['deadzone_right','右摇杆输入死区']]),
   ...group('sticks','stick-game-response','gyro.',[
-    ['right_stick_curve.linearize_stick','矫正实体摇杆输出'], ['right_stick_curve.enabled','游戏摇杆响应','分段曲线 线性补偿'],
+    ['right_stick_curve.linearize_stick','矫正实体摇杆输出'], ['right_stick_curve.enabled','游戏摇杆响应','分段曲线 线性补偿 在游戏中测量曲线 标准 动态'],
     ['right_stick_curve.points','游戏曲线点'], ['right_stick_curve.bezier_points','游戏贝塞尔曲线','Bézier Bezier'],
     ['jsm_response.right_undeadzone_inner','右摇杆内死区补偿'], ['jsm_response.right_undeadzone_outer','右摇杆外死区补偿'], ['jsm_response.right_unpower','右摇杆响应指数'],
   ]),

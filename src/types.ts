@@ -95,6 +95,7 @@ export type Device = {touchpads?:number;rumble?:boolean;lightbar?:boolean;id:num
 export type NavCommand='up'|'down'|'left'|'right'|'confirm'|'back'|'edit'|'save'|'sidebar'|'menu'|'previous_zone'|'next_zone';
 export type MappingStatus={name:string;input:string;output:string;trigger:NonNullable<TriggerSettings['trigger']>;active:boolean;latched:boolean;reason:string};
 export type Status = {
+  curve_probe?: {session_id:string;percent:number;phase:{phase:'waiting_for_mark'|'timing'|'finished'|'interrupted';seconds?:number}} | null;
   mapping?:MappingStatus[];
   mouse_display_sync?:{live:boolean;frame_hz:number;reports_per_frame:number;vrr?:boolean;fallback_hz?:number};
   output_preview?: OutputPreviewStatus | null;

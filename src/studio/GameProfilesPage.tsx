@@ -29,6 +29,8 @@ type Props = Omit<ActionMappingsProps, 'touchOnly' | 'onClearTouch'> & {
   vigemGamepad: boolean;
   canMeasure: boolean;
   onOpenCalibration: () => void;
+  onMeasureCurve?: () => void;
+  measuring: boolean;
   onTab: (tab: GameTab) => void;
   onEditBase: () => void;
   onImportJsm: () => void;
@@ -45,7 +47,7 @@ export function GameProfilesPage(props: Props) {
   const pageRef = useRef<HTMLDivElement>(null);
   const navigationRef = useRef<HTMLDivElement>(null);
   const outputModeId = useId();
-  const measuring = !!status?.motion?.measuring;
+  const measuring = props.measuring;
   const virtual = profile.virtual_gamepad !== 'none';
   const conflicts = !virtual && profile.gyro.enabled && profile.gyro.output === 'right_stick';
   const base = props.baseProfile ?? profile;
@@ -166,7 +168,7 @@ export function GameProfilesPage(props: Props) {
     {tab==='actions'&&<p className={styles.profileContext}>{virtual ? '在动作映射中编辑虚拟手柄按键，可填入标准布局。' : '用手柄操作游戏中的键盘与鼠标动作。'}</p>}
     {searchHint&&<div className={settingStyles.shared}><p className={settingStyles.notice} role="status">{searchHint}</p>
       <button type="button" className="ghost-btn" onClick={()=>setSearchHint(null)}>关闭提示</button></div>}
-    {measuring&&<div className={settingStyles.shared}><p className={settingStyles.notice}>正在进行转角校准，结束或取消后可继续编辑。</p>
+    {measuring&&<div className={settingStyles.shared}><p className={settingStyles.notice}>正在进行游戏内测量，结束或取消后可继续编辑。</p>
       <button type="button" className="secondary-btn" onClick={props.onOpenCalibration}>返回校准悬浮窗</button></div>}
     {conflicts && <div className={styles.warning}>当前体感使用虚拟右摇杆。请为游戏配置选择虚拟手柄，或在「体感」改用鼠标输出。</div>}
     {feedbackOpen&&<Dialog title="游戏震动与灯光" onClose={()=>setFeedbackOpen(false)}
@@ -185,7 +187,7 @@ export function GameProfilesPage(props: Props) {
           {tab==='sticks'&&<MotionOutputSettings profile={profile} update={onUpdate}
             vigemGamepad={props.vigemGamepad} tab="sticks"
             canMeasure={props.canMeasure} onOpenCalibration={props.onOpenCalibration}/>}
-          {tab==='sticks' && <StickSettings profile={profile} update={onUpdate}/>}
+          {tab==='sticks' && <StickSettings profile={profile} update={onUpdate} onMeasureCurve={props.onMeasureCurve}/>}
           {tab==='triggers' && <TriggerSettings profile={profile} layerMode={layerMode} update={onUpdate} onEditBase={props.onEditBase}/>}
           {tab==='touch' && <section className="app-card">
             <h2>触控设置</h2>
@@ -196,7 +198,8 @@ export function GameProfilesPage(props: Props) {
             {profile.virtual_gamepad==='dualshock_4' && <p className={styles.hint}>虚拟 DualShock 4 的触摸板按键可在动作映射中绑定。</p>}
           </section>}
           {tab==='motion' && <MotionSettings {...props.motion} profile={profile} profileId={props.profileId} update={onUpdate}
-            vigemGamepad={props.vigemGamepad} canMeasure={props.canMeasure} onOpenCalibration={props.onOpenCalibration}/>}
+            vigemGamepad={props.vigemGamepad} canMeasure={props.canMeasure} onOpenCalibration={props.onOpenCalibration}
+            onMeasureCurve={props.onMeasureCurve}/>}
         </fieldset>}
     </div>
   </div></SettingContext.Provider>;

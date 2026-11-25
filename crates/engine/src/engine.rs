@@ -161,7 +161,7 @@ pub struct PadState {
     pub right_y: i16,
 }
 
-fn axis_to_i16(value: f32) -> i16 {
+pub fn axis_to_i16(value: f32) -> i16 {
     (value.clamp(-1.0, 1.0) * if value < 0.0 { 32768.0 } else { 32767.0 }).round() as i16
 }
 

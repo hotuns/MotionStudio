@@ -1,12 +1,14 @@
 use super::{
-    measured_angles, run_input, CalibrationAction, CalibrationView, Hotkey, Hotkeys, Input,
+    measured_angles, run_input, CalibrationAction, CalibrationView, CurvePhase, CurveView, Input,
     IMU_CALIBRATION_UNAVAILABLE,
 };
 use crate::{background, text, AppState};
-use motion_core::{motion_config::Stick, profile::GyroOutput, storage::Language};
+use motion_core::{
+    motion_config::Stick, profile::GyroOutput, protocol::CalibrationButton, storage::Language,
+};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ptr::{null, null_mut},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -28,8 +30,7 @@ use windows_sys::{
         UI::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::{
-                EnableWindow, GetCapture, IsWindowEnabled, RegisterHotKey, ReleaseCapture,
-                SetCapture, UnregisterHotKey, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_F8, VK_F9,
+                EnableWindow, GetCapture, IsWindowEnabled, ReleaseCapture, SetCapture,
             },
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::*,
@@ -38,21 +39,32 @@ use windows_sys::{
 };
 
 const SUBCLASS_ID: usize = 1;
-const MEASURE_ID: i32 = 0x4d41;
-const APPLY_ID: i32 = 0x4d42;
 const BUTTON_ID: usize = 0x4d43;
 const SCALE_ID: usize = 0x4d50;
 const WM_REFRESH: u32 = WM_APP + 1;
+const WM_PAD: u32 = WM_APP + 2;
 
 struct Target {
+    session: Uuid,
     hwnd: usize,
     queued: bool,
+    pad_inputs: VecDeque<CalibrationButton>,
 }
 
 #[derive(Default)]
 pub(super) struct Updates(Mutex<Option<Target>>);
 
 impl Updates {
+    pub(super) fn pad_input(&self, session: Uuid, button: CalibrationButton) {
+        if let Ok(mut slot) = self.0.lock() {
+            if let Some(target) = slot.as_mut().filter(|target| target.session == session) {
+                if unsafe { PostMessageW(target.hwnd as HWND, WM_PAD, 0, 0) } != 0 {
+                    target.pad_inputs.push_back(button);
+                }
+            }
+        }
+    }
+
     pub(super) fn request(&self) {
         let Ok(mut target) = self.0.lock() else {
             return;
@@ -142,10 +154,34 @@ impl Button {
                 Cancel if view.measuring.as_deref() == Some("trial") => "停止试转",
                 Cancel if view.measuring.is_some() => "取消测量",
                 Cancel => "重新测量",
+                CurveStart if view.curve.as_ref().is_some_and(|curve| {
+                    curve.samples.iter().any(|(travel, _)| *travel == curve.percent)
+                }) => "重测这一档",
+                CurveStart => "开始推杆",
+                CurveMark if view.curve.as_ref().is_some_and(|curve| matches!(curve.phase, CurvePhase::Timing)) => "完成计时",
+                CurveMark => "标记起点",
+                CurveCancel => "停止本次推杆",
+                CurveZero => "镜头未动 · 记为 0%",
+                CurvePrev => "上一档",
+                CurveNext => "下一档",
+                CurveLaps => "切换圈数",
+                Apply if view.curve.is_some() => "保存游戏曲线",
                 Apply => "保存并应用校准",
                 Close => "关闭悬浮窗",
             };
-            self.control.set_text(translated(view.language, label));
+            let label = translated(view.language, label);
+            // The action table is shared with dispatch, including manual mode and saved results.
+            if let Some(index) = view
+                .pad_actions
+                .iter()
+                .position(|mapped| *mapped == Some(action))
+            {
+                let key = ["面键 ↓", "面键 ↑", "十字键 ←", "十字键 →", "面键 ←", "面键 →"][index];
+                self.control
+                    .set_text(&format!("{} · {}", translated(view.language, key), label));
+            } else {
+                self.control.set_text(label);
+            }
         }
         let next_action = action.filter(|_| enabled);
         if self.action.replace(next_action) != next_action && GetCapture() == self.control.hwnd {
@@ -194,6 +230,8 @@ struct Context {
     scale_visible: Cell<bool>,
     last_scale: Cell<f32>,
     game_window: Cell<HWND>,
+    curve_game: Cell<HWND>,
+    curve_focus_lost: Cell<bool>,
     buttons: [Button; 6],
     bg: u32,
     fg: u32,
@@ -222,37 +260,46 @@ impl Context {
         let Some(view) = view.filter(|view| view.id == self.session) else {
             return;
         };
+        if view.curve.as_ref().is_some_and(|curve| matches!(curve.phase, CurvePhase::Align | CurvePhase::Timing))
+            && !self.curve_game.get().is_null()
+        {
+            if GetForegroundWindow() != self.curve_game.get() {
+                self.curve_focus_lost.set(true);
+            }
+            if self.curve_focus_lost.get() && !self.busy.load(Ordering::Acquire) {
+                self.submit(CalibrationAction::CurveCancel, None);
+            }
+        }
         let panel = Panel::from_view(&view);
         let tr = |value| translated(view.language, value);
-        let output = match view.output {
-            GyroOutput::Mouse => "鼠标",
-            GyroOutput::RightStick => "虚拟右摇杆",
-            GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => return,
+        let output = match (view.curve.is_some(), view.output) {
+            (true, _) | (_, GyroOutput::RightStick) => "虚拟右摇杆",
+            (_, GyroOutput::Mouse) => "鼠标",
+            (_, GyroOutput::Ds4Imu | GyroOutput::DualSenseImu) => return,
         };
         self.profile
             .set_text(&format!("{} · {}", view.profile_name, tr(output)));
         self.heading.set_text(tr(panel.heading));
-        let had_degrees = !self.degrees.value.borrow().is_empty();
+        let readout_was_empty = self.degrees.value.borrow().is_empty();
         let had_shortcuts = !self.shortcuts.value.borrow().is_empty();
-        if let Some(degrees) = panel.degrees {
-            self.degrees.set_text(&format!("{:.1}°", degrees.abs()));
-        } else {
-            self.degrees.set_text("");
-        }
+        self.degrees.set_text(&panel.readout);
         self.detail.set_text(&panel.detail);
         self.shortcuts.set_text(&panel.shortcuts);
         let busy = self.busy.load(Ordering::Acquire);
-        let show_scale = !view.manual && view.measuring.is_none() && view.saved.is_none();
+        let show_scale =
+            view.curve.is_none() && !view.manual && view.measuring.is_none() && view.saved.is_none();
         let scale_changed = self.scale_visible.replace(show_scale) != show_scale;
-        let label = match view.output {
-            GyroOutput::Mouse => "鼠标转角系数（counts/°）",
-            GyroOutput::RightStick => "满杆角速度（°/s）",
-            GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => return,
-        };
-        self.scale_label.set_text(tr(label));
-        if self.last_scale.replace(view.draft_scale) != view.draft_scale {
-            self.scale_edit.value.borrow_mut().clear();
-            self.scale_edit.set_text(&view.draft_scale.to_string());
+        if show_scale {
+            let label = match view.output {
+                GyroOutput::Mouse => "鼠标转角系数（counts/°）",
+                GyroOutput::RightStick => "满杆角速度（°/s）",
+                GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => return,
+            };
+            self.scale_label.set_text(tr(label));
+            if self.last_scale.replace(view.draft_scale) != view.draft_scale {
+                self.scale_edit.value.borrow_mut().clear();
+                self.scale_edit.set_text(&view.draft_scale.to_string());
+            }
         }
         for control in [&self.scale_label, &self.scale_edit] {
             ShowWindow(control.hwnd, if show_scale { SW_SHOWNA } else { SW_HIDE });
@@ -264,12 +311,15 @@ impl Context {
         for (button, action) in self.buttons.iter().zip(panel.actions) {
             let enabled = action.is_some()
                 && !busy
+                && (view.curve.is_none()
+                    || action == Some(CalibrationAction::Close)
+                    || view.pad_actions.contains(&action))
                 && (action != Some(CalibrationAction::Apply) || panel.valid_result)
                 && (action != Some(CalibrationAction::Manual) || view.manual_available);
             button.update(action, enabled, &view);
         }
         let has_shortcuts = !panel.shortcuts.is_empty();
-        if scale_changed || had_degrees != panel.degrees.is_some() || had_shortcuts != has_shortcuts
+        if scale_changed || readout_was_empty != panel.readout.is_empty() || had_shortcuts != has_shortcuts
         {
             self.layout(hwnd);
         }
@@ -385,26 +435,20 @@ impl Context {
         }
     }
 
-    fn submit(&self, input: Input) {
+    fn submit(&self, action: CalibrationAction, button: Option<CalibrationButton>) {
         if self.busy.swap(true, Ordering::AcqRel) {
             return;
         }
         // Only the numeric field activates the overlay. Return focus to the
-        // previous game before a button/hotkey starts emitting a trial.
+        // previous game before a button starts emitting a trial.
         unsafe {
             let parent = GetParent(self.scale_edit.hwnd);
-            let measuring = self.app.try_state::<AppState>().is_some_and(|state| {
-                state
-                    .client
-                    .snapshot
-                    .lock()
-                    .is_ok_and(|snapshot| snapshot.status.motion.measuring.is_some())
-            });
             let starts_output = matches!(
-                &input,
-                Input::Button(CalibrationAction::Trial | CalibrationAction::Start { .. })
-            ) || (matches!(&input, Input::Hotkey(Hotkey::Measure))
-                && !measuring);
+                action,
+                CalibrationAction::Trial
+                    | CalibrationAction::Start { .. }
+                    | CalibrationAction::CurveStart
+            );
             if starts_output {
                 let foreground = GetForegroundWindow();
                 let studio_window = |handle: HWND| {
@@ -429,7 +473,7 @@ impl Context {
                             if let Some(session) = current.as_mut().filter(|s| s.id == self.session)
                             {
                                 session.action_error =
-                                    Some("请切回游戏，再使用 Ctrl + Shift + F8 试转。".into());
+                                    Some("请先切回游戏，再按手柄键开始。".into());
                             }
                         }
                     }
@@ -437,8 +481,20 @@ impl Context {
                     self.updates.request();
                     return;
                 }
+                if matches!(action, CalibrationAction::CurveStart) {
+                    self.curve_game.set(if foreground == parent {
+                        self.game_window.get()
+                    } else {
+                        foreground
+                    });
+                    self.curve_focus_lost.set(false);
+                }
             }
         }
+        let input = match button {
+            Some(button) => Input::Pad(button, action),
+            None => Input::Button(action),
+        };
         let input = if self.scale_visible.get() {
             let mut value = vec![0u16; 128];
             let len = unsafe {
@@ -470,7 +526,7 @@ impl Context {
 #[derive(Default)]
 struct Panel {
     heading: &'static str,
-    degrees: Option<f32>,
+    readout: String,
     detail: String,
     shortcuts: String,
     actions: [Option<CalibrationAction>; 6],
@@ -478,6 +534,65 @@ struct Panel {
 }
 
 impl Panel {
+    fn curve(&mut self, curve: &CurveView, language: Language) {
+        use CalibrationAction::*;
+        let tr = |value| translated(language, value);
+        let sampling = matches!(curve.phase, CurvePhase::Align | CurvePhase::Timing);
+        let (heading, instruction) = match curve.phase {
+            CurvePhase::Idle => (
+                "准备测量游戏转速",
+                "选一个清楚的参照物，松开实体右摇杆。转得很快时，可用「切换圈数」增加本档圈数。",
+            ),
+            CurvePhase::Align => (
+                "等待标记起点",
+                "等镜头转稳，准星经过参照物时标记起点，从 0 开始数圈。",
+            ),
+            CurvePhase::Timing => (
+                "正在计时",
+                "每次回到同一参照物算一圈，第 {0} 次回来时按「完成计时」。中间经过时只数圈。",
+            ),
+            CurvePhase::Complete => (
+                "曲线测量完成",
+                "确认各档转速后保存。用十字键切换可重测，也可加测 10% 和 90%。",
+            ),
+            CurvePhase::Interrupted => (
+                "本档测量已中断",
+                "重新对准参照物后可以重测。已完成的档位会保留。",
+            ),
+        };
+        self.heading = heading;
+        let laps = curve.laps.to_string();
+        self.readout = tr("推杆 {0}% · 测 {1} 圈")
+            .replace("{0}", &curve.percent.to_string())
+            .replace("{1}", &laps);
+        self.detail = tr(instruction).replace("{0}", &laps);
+        if let Some(problem) = curve.problem {
+            self.detail.push_str("\r\n");
+            self.detail.push_str(tr(problem));
+        }
+        if !curve.samples.is_empty() {
+            self.detail.push_str("\r\n\r\n");
+            self.detail.push_str(tr("已测推杆量 → 游戏转速"));
+            for row in curve.samples.chunks(2) {
+                self.detail.push_str("\r\n");
+                let values: Vec<_> = row.iter()
+                    .map(|(travel, speed)| format!("{travel}% → {speed:.1}%"))
+                    .collect();
+                self.detail.push_str(&values.join("     "));
+            }
+        }
+        self.valid_result = curve.can_save && !sampling;
+        self.actions = if sampling {
+            [
+                Some(CurveMark), Some(CurveCancel),
+                (matches!(curve.phase, CurvePhase::Align) && curve.percent < 100).then_some(CurveZero),
+                None, None, None,
+            ]
+        } else {
+            [Some(CurveStart), Some(Apply), Some(CurvePrev), Some(CurveNext), Some(CurveLaps), Some(Close)]
+        };
+    }
+
     fn from_view(view: &CalibrationView) -> Self {
         use CalibrationAction::*;
         let tr = |value| translated(view.language, value);
@@ -495,6 +610,8 @@ impl Panel {
         } else if let Some(blocked) = view.blocked {
             panel.detail = tr(blocked).into();
             panel.actions[0] = Some(Close);
+        } else if let Some(curve) = &view.curve {
+            panel.curve(curve, view.language);
         } else if view.measuring.as_deref() == Some("trial") {
             panel.heading = "正在试转 360°";
             panel.detail = tr("请观察是否完整转一圈。试转结束后自动停止，再对齐参照物并调整数值。F12 可停止映射。开始和结束方向相同，也可能已转过多圈。").into();
@@ -510,7 +627,7 @@ impl Panel {
             } else {
                 "让游戏镜头从最低转到最高，停稳后结束测量。"
             };
-            panel.degrees = Some(view.degrees);
+            panel.readout = format!("{:.1}°", view.degrees.abs());
             panel.detail = format!("{}\r\n\r\n{}", tr("手柄净转角"), tr(instruction));
             panel.actions = [Some(Finish), Some(Cancel), None, None, None, None];
         } else if let Some(result) = &view.result {
@@ -519,7 +636,7 @@ impl Panel {
             } else {
                 "垂直测量已完成"
             };
-            panel.degrees = Some(result.degrees);
+            panel.readout = format!("{:.1}°", result.degrees.abs());
             panel.detail = tr("手柄净转角").into();
             match measured_angles(result) {
                 Ok(_) => panel.valid_result = true,
@@ -528,23 +645,24 @@ impl Panel {
                     panel.detail.push_str(tr(error));
                 }
             }
-            panel.actions = [Some(Cancel), Some(Back), None, None, None, None];
+            panel.actions = [
+                Some(Start { axis: "yaw" }),
+                Some(Start { axis: "pitch" }),
+                Some(Back),
+                Some(Close),
+                None,
+                None,
+            ];
         } else if view.manual {
             panel.heading = "手动转动测量";
             let stick_hint = match view.stick {
                 Stick::Left => "水平测量可沿左摇杆外圈转动，再用体感微调。",
                 Stick::Right => "水平测量可沿右摇杆外圈转动，再用体感微调。",
             };
-            let mode_hint = if view.hotkeys.measure {
-                "请使用窗口或无边框全屏。游戏锁定光标时，可以用上方的校准按键。"
-            } else {
-                "请使用窗口或无边框全屏。游戏锁定光标时，可通过游戏菜单调出光标。"
-            };
             panel.detail = format!(
-                "{}\r\n\r\n{}\r\n\r\n{}",
+                "{}\r\n\r\n{}",
                 tr("先在游戏内选一个清楚的参照点，再开始测量。"),
                 tr(stick_hint),
-                tr(mode_hint),
             );
             panel.actions = [
                 Some(Start { axis: "yaw" }),
@@ -581,32 +699,9 @@ impl Panel {
             }
             panel.detail.push_str(tr(error));
         }
-        if view.hotkeys.measure && view.blocked.is_none() && view.saved.is_none() {
-            let label = if view.measuring.as_deref() == Some("trial") {
-                "停止试转"
-            } else if view.measuring.is_some() {
-                "结束测量"
-            } else if !view.manual {
-                "试转 360°"
-            } else if view.result.is_some() {
-                "重测水平 360°"
-            } else {
-                "开始水平测量"
-            };
-            panel.shortcuts = format!("Ctrl + Shift + F8   {}", tr(label));
-        }
-        if view.hotkeys.apply && (view.saved.is_some() || panel.valid_result) {
-            if !panel.shortcuts.is_empty() {
-                panel.shortcuts.push_str("\r\n");
-            }
-            let label = if view.saved.is_some() {
-                "关闭悬浮窗"
-            } else {
-                "保存并应用校准"
-            };
-            panel
-                .shortcuts
-                .push_str(&format!("Ctrl + Shift + F9   {}", tr(label)));
+        if view.pad_actions.iter().any(Option::is_some) {
+            panel.shortcuts =
+                tr("按按钮标出的手柄键操作。面键按位置标注，下键对应 Xbox A、PS ×、Switch B。").into();
         }
         panel
     }
@@ -678,6 +773,8 @@ unsafe fn install_controls(
         scale_visible: Cell::new(false),
         last_scale: Cell::new(f32::NAN),
         game_window: Cell::new(GetForegroundWindow()),
+        curve_game: Cell::new(null_mut()),
+        curve_focus_lost: Cell::new(false),
         buttons: [
             Button::new(hwnd, 0)?,
             Button::new(hwnd, 1)?,
@@ -710,19 +807,11 @@ unsafe fn install_controls(
         return Err("无法安装校准窗口处理程序".into());
     }
     let context = &*Box::into_raw(context);
-    let modifiers = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
-    let hotkeys = Hotkeys {
-        measure: RegisterHotKey(hwnd, MEASURE_ID, modifiers, u32::from(VK_F8)) != 0,
-        apply: RegisterHotKey(hwnd, APPLY_ID, modifiers, u32::from(VK_F9)) != 0,
-    };
-    if let Ok(mut current) = state.game_calibration.current.lock() {
-        if let Some(current) = current.as_mut().filter(|current| current.id == session) {
-            current.hotkeys = hotkeys;
-        }
-    }
     *updates.0.lock().map_err(text)? = Some(Target {
         hwnd: hwnd as usize,
+        session,
         queued: false,
+        pad_inputs: VecDeque::new(),
     });
     context.refresh(hwnd);
     context.layout(hwnd);
@@ -775,28 +864,37 @@ unsafe extern "system" fn window_proc(
                 .filter(|button| button.control.hwnd as LPARAM == lparam)
             {
                 if let Some(action) = button.action.get() {
-                    context.submit(Input::Button(action));
+                    context.submit(action, None);
                 }
                 return 0;
             }
         }
-        WM_HOTKEY => {
-            let key = match wparam as i32 {
-                MEASURE_ID => Some(Hotkey::Measure),
-                APPLY_ID => Some(Hotkey::Apply),
-                _ => None,
-            };
-            if let Some(key) = key {
-                context.submit(Input::Hotkey(key));
-                return 0;
+        WM_PAD => {
+            let button = context.updates.0.lock().ok().and_then(|mut slot| {
+                slot.as_mut()
+                    .filter(|target| target.session == context.session)?
+                    .pad_inputs.pop_front()
+            });
+            if let (Some(button), Some(state)) = (button, context.app.try_state::<AppState>()) {
+                let action = state.client.snapshot.lock().ok().and_then(|snapshot| {
+                    let session = state.game_calibration.session_for(&snapshot).ok()?;
+                    if session.id != context.session {
+                        return None;
+                    }
+                    session.pad_action(&snapshot, button)
+                });
+                if let Some(action) = action {
+                    context.submit(action, Some(button));
+                }
             }
+            return 0;
         }
         WM_NCDESTROY => {
             if let Ok(mut target) = context.updates.0.lock() {
-                *target = None;
+                if target.as_ref().is_some_and(|target| target.session == context.session) {
+                    *target = None;
+                }
             }
-            UnregisterHotKey(hwnd, MEASURE_ID);
-            UnregisterHotKey(hwnd, APPLY_ID);
             if RemoveWindowSubclass(hwnd, Some(window_proc), subclass) != 0 {
                 drop(Box::from_raw(data as *mut Context));
             }

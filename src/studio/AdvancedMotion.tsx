@@ -370,6 +370,7 @@ export function FlickStickSettings({profile,update}:Props) {
 type GameCalibrationProps = {
   canMeasure: boolean;
   onOpenCalibration: () => void;
+  onMeasureCurve?: () => void;
 };
 
 export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: GameCalibrationProps & {profile:Profile}) {
@@ -385,7 +386,7 @@ export function GameAngleCalibration({profile, canMeasure, onOpenCalibration}: G
     </>;
 }
 
-export function GameStickResponse({profile,update}:Props) {
+export function GameStickResponse({profile,update,onMeasureCurve}:Props & {onMeasureCurve?: () => void}) {
   const gyro=profile.gyro, curve=gyro.right_stick_curve;
   const mode=curve?.enabled ? curve.model??'points' : 'power';
   const settings=['gyro.right_stick_curve.enabled','gyro.right_stick_curve.model','gyro.right_stick_curve.bezier_points'];
@@ -393,6 +394,13 @@ export function GameStickResponse({profile,update}:Props) {
     <Choice label="游戏摇杆响应" settingPath={settings} value={mode}
       options={[['power','单一指数'],['points','分段曲线'],['bezier','贝塞尔曲线']]}
       onChange={v=>update(p=>selectStickResponse(p.gyro,v as typeof mode))}/>
+    <div className="studio-actions">
+      <button type="button" className="secondary-btn" disabled={!onMeasureCurve}
+        onClick={onMeasureCurve}>在游戏中测量曲线</button>
+    </div>
+    <p className={styles.hint}>{onMeasureCurve
+      ? 'Studio 会固定推杆量。准星经过同一参照物时按手柄键计时，测完后可保存为分段曲线。'
+      : '请选择虚拟手柄，保存并应用基础层配置，再启用映射测量曲线。'}</p>
     {mode==='bezier' && curve?.bezier_points?.length ? <SettingField label="游戏贝塞尔曲线" path={settings}>
       <p className={styles.hint}>填入游戏从中心到满杆的原始响应，包含内外死区。转速按满杆转速的百分比填写，软件会反算所需推杆量。</p>
       <BezierCurveEditor domain="game" points={curve.bezier_points} onChange={bezier_points=>update(p=>{
@@ -440,7 +448,7 @@ export function MotionOutputChoice({profile,update,vigemGamepad,disabled}: Props
   </SettingField>;
 }
 
-export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,vigemGamepad,tab}:
+export const MotionOutputSettings = memo(function MotionOutputSettings({profile,update,canMeasure,onOpenCalibration,onMeasureCurve,vigemGamepad,tab}:
   Props&GameCalibrationProps&{vigemGamepad:boolean;tab:'motion'|'sticks'}) {
   useLanguage();
   const gyro=profile.gyro;
@@ -465,7 +473,7 @@ export const MotionOutputSettings = memo(function MotionOutputSettings({profile,
     {showStickScale&&<Range label="游戏满杆角速度" value={gyro.stick_full_scale_dps} min={30} max={1440} step={1} unit=" °/s" slider={false}
       onChange={v=>update(p=>{p.gyro.stick_full_scale_dps=v;})} help="填写游戏实际满杆时的转向速度，用于将目标转角换算成摇杆输出。提高这里的值不会让游戏转得更快。"/>}
     {tab==='motion'&&showStickScale&&!passthrough&&(usesJsmAim(gyro)||gyro.motion.flick.enabled||gyro.motion.flick.stick_aim)&&
-      <GameStickResponse profile={profile} update={update}/>}
+      <GameStickResponse profile={profile} update={update} onMeasureCurve={onMeasureCurve}/>}
     {showMouseScale&&<Range label="基础鼠标计数" value={gyro.counts_per_degree} min={1} max={100} step={0.5} unit=" /°" slider={false}
       onChange={v=>update(p=>{p.gyro.counts_per_degree=v;})} help="每旋转一度产生的基础鼠标计数，再乘以体感灵敏度。"/>}
     {!passthrough&&<GameAngleCalibration profile={profile} canMeasure={canMeasure} onOpenCalibration={onOpenCalibration}/>}

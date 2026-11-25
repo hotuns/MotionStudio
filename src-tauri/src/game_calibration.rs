@@ -5,8 +5,8 @@ use crate::{
 use motion_core::{
     motion::GameAngleMeasurement,
     motion_config::{MotionMode, Stick},
-    profile::{Gyro, GyroOutput},
-    protocol::Command,
+    profile::{GamepadTarget, Gyro, GyroOutput},
+    protocol::{CalibrationButton, Command},
     storage::Language,
 };
 use std::sync::{Arc, Mutex};
@@ -16,10 +16,16 @@ use tauri::{
 use uuid::Uuid;
 
 mod windows;
+mod curve;
+use curve::{CurveDraft, CurvePhase, CurveView};
 
 pub const LABEL: &str = "game-calibration";
 const MAPPING_CHANGED: &str = "校准所用的映射已改变，请重新打开校准悬浮窗。";
 const IMU_CALIBRATION_UNAVAILABLE: &str = "传感器直通由游戏处理，无需校准游戏转角。";
+const PAD_BUTTONS: [CalibrationButton; 6] = [
+    CalibrationButton::Measure, CalibrationButton::Apply, CalibrationButton::Less,
+    CalibrationButton::More, CalibrationButton::Mode, CalibrationButton::Back,
+];
 
 #[derive(Clone, Default)]
 pub struct CalibrationWindow {
@@ -41,25 +47,26 @@ impl CalibrationWindow {
     }
 
     fn view(&self, snapshot: &Snapshot) -> Option<CalibrationView> {
-        let current = self.current.lock().ok()?;
-        Some(current.as_ref()?.view(snapshot))
+        let mut current = self.current.lock().ok()?;
+        let session = current.as_mut()?;
+        session.observe_curve(snapshot);
+        Some(session.view(snapshot))
+    }
+
+    fn session_for(&self, snapshot: &Snapshot) -> Result<Session, String> {
+        let mut current = self.current.lock().map_err(text)?;
+        let session = current.as_mut().ok_or("校准悬浮窗已关闭。")?;
+        session.observe_curve(snapshot);
+        Ok(session.clone())
     }
 
     pub fn refresh(&self) {
         self.updates.request();
     }
-}
 
-#[derive(Clone, Copy, Default)]
-struct Hotkeys {
-    measure: bool,
-    apply: bool,
-}
-
-#[derive(Clone, Copy)]
-enum Hotkey {
-    Measure,
-    Apply,
+    pub fn pad_input(&self, session_id: Uuid, button: CalibrationButton) {
+        self.updates.pad_input(session_id, button);
+    }
 }
 
 #[derive(Clone)]
@@ -75,6 +82,7 @@ struct Session {
     profile_name: String,
     revision: u64,
     restart_count: u32,
+    reconnects: u64,
     output: GyroOutput,
     stick: Stick,
     language: Language,
@@ -84,17 +92,33 @@ struct Session {
     manual_available: bool,
     original_scale: f32,
     draft_scale: f32,
+    curve: Option<CurveDraft>,
     result: Option<GameAngleMeasurement>,
     saved: Option<Saved>,
-    hotkeys: Hotkeys,
     action_error: Option<String>,
 }
 
 impl Session {
+    fn observe_curve(&mut self, snapshot: &Snapshot) {
+        if self.same_mapping(snapshot) {
+            if let Some(curve) = &mut self.curve {
+                curve.observe(self.id, snapshot.status.curve_probe.as_ref());
+            }
+        }
+    }
     fn same_mapping(&self, snapshot: &Snapshot) -> bool {
-        snapshot.restart_count == self.restart_count
-            && snapshot.status.revision == self.revision
+        self.same_controller_session(snapshot) && snapshot.status.revision == self.revision
+    }
+
+    fn same_controller_session(&self, snapshot: &Snapshot) -> bool {
+        snapshot.restart_count == self.restart_count && snapshot.status.reconnects == self.reconnects
             && snapshot.status.profile_id.as_deref() == Some(self.profile_id.as_str())
+    }
+
+    fn reserve_buttons(&self, state: &AppState, revision: u64, active: bool) -> Result<(), String> {
+        state.client.request(Command::SetCalibrationControls {
+            session_id: self.id, expected_revision: revision, active,
+        })
     }
 
     fn ready(&self, snapshot: &Snapshot) -> Result<(), &'static str> {
@@ -141,38 +165,49 @@ impl Session {
             measurement_error,
             result: self.result.clone(),
             saved: self.saved.clone(),
-            hotkeys: self.hotkeys,
+            pad_actions: PAD_BUTTONS.map(|button| self.pad_action(snapshot, button)),
             action_error: self.action_error.clone(),
             manual: self.manual,
             manual_available: self.manual_available,
             draft_scale: self.draft_scale,
+            curve: self.curve.as_ref().map(CurveDraft::view),
         }
     }
 
-    fn hotkey_action(&self, snapshot: &Snapshot, key: Hotkey) -> Option<CalibrationAction> {
-        let registered = match key {
-            Hotkey::Measure => self.hotkeys.measure,
-            Hotkey::Apply => self.hotkeys.apply,
-        };
-        if !registered {
+    fn pad_action(&self, snapshot: &Snapshot, button: CalibrationButton) -> Option<CalibrationAction> {
+        use CalibrationAction as Action;
+        use CalibrationButton as Pad;
+        let status = &snapshot.status;
+        if !self.same_mapping(snapshot) || !snapshot.engine_ready || !status.emitting
+            || status.state != "running" || status.device.is_none() {
             return None;
         }
         if self.saved.is_some() {
-            return matches!(key, Hotkey::Apply).then_some(CalibrationAction::Close);
+            return matches!(button, Pad::Apply | Pad::Back).then_some(Action::Close);
         }
-        self.ready(snapshot).ok()?;
-        match (key, snapshot.status.motion.measuring.is_some()) {
-            (Hotkey::Measure, true) if self.owns_measurement => Some(if self.owns_trial {
-                CalibrationAction::Cancel
-            } else {
-                CalibrationAction::Finish
-            }),
-            (Hotkey::Measure, false) => Some(if self.manual {
-                CalibrationAction::Start { axis: "yaw" }
-            } else {
-                CalibrationAction::Trial
-            }),
-            (Hotkey::Apply, false) if !self.manual => Some(CalibrationAction::Apply),
+        if self.ready(snapshot).is_err() {
+            return matches!(button, Pad::Back).then_some(Action::Close);
+        }
+        if status.motion.measuring.is_some() {
+            return match button {
+                Pad::Measure if self.owns_trial => Some(Action::Cancel),
+                Pad::Measure if self.owns_measurement => Some(Action::Finish),
+                Pad::Back if self.owns_measurement => Some(Action::Cancel),
+                _ => None,
+            };
+        }
+        if let Some(curve) = &self.curve {
+            return curve.pad_action(button);
+        }
+        match button {
+            Pad::Measure if self.manual => Some(Action::Start { axis: "yaw" }),
+            Pad::Measure => Some(Action::Trial),
+            Pad::Back => Some(if self.manual { Action::Back } else { Action::Close }),
+            Pad::Mode if self.manual => Some(Action::Start { axis: "pitch" }),
+            Pad::Mode if self.manual_available => Some(Action::Manual),
+            Pad::Apply if !self.manual => Some(Action::Apply),
+            Pad::Less if !self.manual => Some(Action::Less),
+            Pad::More if !self.manual => Some(Action::More),
             _ => None,
         }
     }
@@ -190,11 +225,12 @@ struct CalibrationView {
     measurement_error: Option<String>,
     result: Option<GameAngleMeasurement>,
     saved: Option<Saved>,
-    hotkeys: Hotkeys,
+    pad_actions: [Option<CalibrationAction>; 6],
     action_error: Option<String>,
     manual: bool,
     manual_available: bool,
     draft_scale: f32,
+    curve: Option<CurveView>,
 }
 
 #[tauri::command]
@@ -203,19 +239,25 @@ pub async fn open_calibration_window(
     state: State<'_, AppState>,
     profile_id: String,
     theme: String,
+    curve_mode: Option<bool>,
 ) -> Result<(), String> {
     if window.label() != "main" {
         return Err("请在 Studio 打开校准悬浮窗。".into());
     }
     if let Some(floating) = window.get_window(LABEL) {
-        if state.game_calibration.session()?.profile_id != profile_id {
+        let session = state.game_calibration.session()?;
+        if session.profile_id != profile_id {
             return Err("请先关闭另一份配置的校准悬浮窗。".into());
+        }
+        if curve_mode.is_some_and(|curve| curve != session.curve.is_some()) {
+            return Err("请先关闭当前校准悬浮窗，再切换测量方式。".into());
         }
         return floating.show().map_err(text);
     }
 
     let state = state.inner().clone();
     let owner = state.clone();
+    let curve_mode = curve_mode.unwrap_or(false);
     let (id, language) = background(move || {
         let _lock = owner.operations.lock().map_err(text)?;
         if owner.game_calibration.is_open() {
@@ -223,14 +265,18 @@ pub async fn open_calibration_window(
         }
         let entry = owner.store.load(&profile_id).map_err(text)?;
         let gyro = &entry.profile.gyro;
-        let scale = scale(gyro)?;
-        if !gyro.enabled
+        let scale = if curve_mode { gyro.stick_full_scale_dps } else { scale(gyro)? };
+        if !curve_mode && !gyro.enabled
             && !(gyro.motion.flick.standalone
                 && (gyro.motion.flick.enabled || gyro.motion.flick.stick_aim))
         {
             return Err("请先启用体感或 Flick，再打开转角校准。".into());
         }
         let snapshot = owner.client.snapshot.lock().map_err(text)?;
+        if curve_mode && (entry.profile.virtual_gamepad == GamepadTarget::None ||
+            !snapshot.status.output_gamepad.as_ref().is_some_and(|pad| pad.connected && pad.target == entry.profile.virtual_gamepad)) {
+            return Err("请先启用虚拟手柄输出并启动映射，再测量游戏曲线。".into());
+        }
         let language = owner.settings.lock().map_err(text)?.language;
         let session = Session {
             id: Uuid::new_v4(),
@@ -238,7 +284,8 @@ pub async fn open_calibration_window(
             profile_name: entry.profile.name,
             revision: snapshot.status.revision,
             restart_count: snapshot.restart_count,
-            output: gyro.output,
+            reconnects: snapshot.status.reconnects,
+            output: if curve_mode { GyroOutput::RightStick } else { gyro.output },
             stick: gyro.motion.flick.stick,
             language,
             owns_measurement: false,
@@ -249,9 +296,9 @@ pub async fn open_calibration_window(
                 && snapshot.status.device.as_ref().is_some_and(|d| d.gyro),
             original_scale: scale,
             draft_scale: scale,
+            curve: curve_mode.then(|| CurveDraft::new(gyro.right_stick_curve.clone())),
             result: None,
             saved: None,
-            hotkeys: Hotkeys::default(),
             action_error: None,
         };
         session.ready(&snapshot)?;
@@ -259,15 +306,23 @@ pub async fn open_calibration_window(
             return Err("请先结束或取消当前转角测量".into());
         }
         let id = session.id;
+        let revision = session.revision;
+        drop(snapshot);
+        if let Err(error) = session.reserve_buttons(&owner, revision, true) {
+            // A timed-out request may already have reserved the buttons.
+            let _ = session.reserve_buttons(&owner, revision, false);
+            return Err(error);
+        }
         *owner.game_calibration.current.lock().map_err(text)? = Some(session);
         Ok((id, language))
     })
     .await?;
 
-    let title = if language == Language::En {
-        "Motion Studio · Game angle calibration"
-    } else {
-        "Motion Studio · 游戏内转角校准"
+    let title = match (language, curve_mode) {
+        (Language::En, true) => "Motion Studio · Game stick curve",
+        (_, true) => "Motion Studio · 游戏摇杆曲线测量",
+        (Language::En, false) => "Motion Studio · Game angle calibration",
+        (_, false) => "Motion Studio · 游戏内转角校准",
     };
     let theme = if theme == "dark" {
         Theme::Dark
@@ -341,6 +396,9 @@ fn close_session(state: &AppState, id: Uuid) {
             }
         }
     }
+    if let Err(error) = session.reserve_buttons(state, session.revision, false) {
+        state.client.log(error);
+    }
     if let Ok(mut current) = state.game_calibration.current.lock() {
         *current = None;
     }
@@ -348,6 +406,13 @@ fn close_session(state: &AppState, id: Uuid) {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CalibrationAction {
+    CurveStart,
+    CurveMark,
+    CurveCancel,
+    CurveZero,
+    CurveLaps,
+    CurvePrev,
+    CurveNext,
     Trial,
     Less,
     More,
@@ -362,7 +427,7 @@ enum CalibrationAction {
 
 enum Input {
     Button(CalibrationAction),
-    Hotkey(Hotkey),
+    Pad(CalibrationButton, CalibrationAction),
     Edited(String, Box<Input>),
 }
 
@@ -374,28 +439,19 @@ fn run_input(app: &AppHandle, id: Uuid, input: Input) -> Result<(), String> {
         Input::Edited(value, input) => (Some(value), *input),
         input => (None, input),
     };
-    let lock = match &input {
-        Input::Button(_) => state.operations.lock().map_err(text)?,
-        Input::Hotkey(_) => match state.operations.try_lock() {
-            Ok(lock) => lock,
-            Err(_) => return Ok(()),
-        },
-        Input::Edited(..) => unreachable!(),
-    };
-    let Ok(session) = state.game_calibration.session() else {
+    let lock = state.operations.lock().map_err(text)?;
+    let snapshot = state.client.snapshot.lock().map_err(text)?.clone();
+    let Ok(session) = state.game_calibration.session_for(&snapshot) else {
         return Ok(());
     };
     if session.id != id {
         return Ok(());
     }
-    let snapshot = state.client.snapshot.lock().map_err(text)?.clone();
     let action = match input {
-        Input::Button(action) => Some(action),
-        Input::Hotkey(key) => session.hotkey_action(&snapshot, key),
+        Input::Button(action) => action,
+        Input::Pad(button, action) if session.pad_action(&snapshot, button) == Some(action) => action,
+        Input::Pad(..) => return Ok(()),
         Input::Edited(..) => unreachable!(),
-    };
-    let Some(action) = action else {
-        return Ok(());
     };
     if matches!(action, CalibrationAction::Close) {
         let window = app.get_window(LABEL);
@@ -414,7 +470,7 @@ fn perform_action(
     value: Option<String>,
 ) -> Result<(), String> {
     let result = (|| {
-        if matches!(
+        if session.curve.is_none() && matches!(
             action,
             CalibrationAction::Trial
                 | CalibrationAction::Apply
@@ -436,6 +492,14 @@ fn perform_action(
             }
         }
         match action {
+            CalibrationAction::CurveStart | CalibrationAction::CurveMark | CalibrationAction::CurveCancel
+            | CalibrationAction::CurveZero | CalibrationAction::CurveLaps
+            | CalibrationAction::CurvePrev | CalibrationAction::CurveNext => {
+                session.ready(snapshot)?;
+                if session.saved.is_some() { return Err(MAPPING_CHANGED.into()); }
+                let curve = session.curve.as_mut().ok_or(MAPPING_CHANGED)?;
+                curve.perform(action, &state.client, session.id, session.revision)?;
+            }
             CalibrationAction::Trial => {
                 if let Err(error) = state.client.request(Command::TrialTurn {
                     scale: session.draft_scale,
@@ -531,27 +595,46 @@ fn perform_action(
             CalibrationAction::Apply => {
                 session.ready(snapshot)?;
                 let mut entry = state.store.load(&session.profile_id).map_err(text)?;
-                if entry.profile.gyro.output != session.output
-                    || scale(&entry.profile.gyro)? != session.original_scale
-                {
-                    return Err(MAPPING_CHANGED.into());
-                }
-                validate_scale(session.output, session.draft_scale)?;
-                match session.output {
-                    GyroOutput::Mouse => entry.profile.gyro.counts_per_degree = session.draft_scale,
-                    GyroOutput::RightStick => {
-                        entry.profile.gyro.stick_full_scale_dps = session.draft_scale
+                if let Some(curve) = &session.curve {
+                    if session.saved.is_some() || entry.profile.gyro.right_stick_curve.as_ref() != curve.original.as_deref() {
+                        return Err(MAPPING_CHANGED.into());
                     }
-                    GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => return Err(IMU_CALIBRATION_UNAVAILABLE.into()),
+                    entry.profile.gyro.right_stick_curve = Some(curve.fitted()?);
+                } else {
+                    if entry.profile.gyro.output != session.output
+                        || scale(&entry.profile.gyro)? != session.original_scale
+                    {
+                        return Err(MAPPING_CHANGED.into());
+                    }
+                    validate_scale(session.output, session.draft_scale)?;
+                    match session.output {
+                        GyroOutput::Mouse => entry.profile.gyro.counts_per_degree = session.draft_scale,
+                        GyroOutput::RightStick => entry.profile.gyro.stick_full_scale_dps = session.draft_scale,
+                        GyroOutput::Ds4Imu | GyroOutput::DualSenseImu => return Err(IMU_CALIBRATION_UNAVAILABLE.into()),
+                    }
                 }
                 let result = save_profile_locked(state, entry)?;
                 session.saved = Some(Saved {
                     applied: result.applied,
                     warning: result.warning.clone(),
                 });
+                session.owns_measurement = false;
+                session.owns_trial = false;
                 session.result = None;
                 if let Err(error) = app.emit_to("main", "game-calibration-saved", &result) {
                     state.client.log(text(error));
+                }
+                // A changed mapping releases its reserved buttons. Reattach only for
+                // this overlay's own successful save, so the player can close it in-game.
+                if result.applied {
+                    let latest = state.client.snapshot.lock().map_err(text)?;
+                    let next = latest.status.revision;
+                    let reattach = session.same_controller_session(&latest) && next != session.revision;
+                    drop(latest);
+                    if reattach {
+                        session.reserve_buttons(state, next, true)?;
+                        session.revision = next;
+                    }
                 }
             }
             CalibrationAction::Close => unreachable!(),
@@ -560,7 +643,6 @@ fn perform_action(
     })();
     let mut guard = state.game_calibration.current.lock().map_err(text)?;
     if let Some(current) = guard.as_mut().filter(|current| current.id == session.id) {
-        session.hotkeys = current.hotkeys;
         session.action_error = result.as_ref().err().cloned();
         *current = session;
     }
@@ -626,7 +708,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_views_follow_engine_state_and_hotkeys_keep_save_separate_from_measurement() {
+    fn live_views_follow_engine_state_and_pad_controls_keep_save_separate_from_measurement() {
         use motion_core::sdl::{Device, InputOrigin};
 
         let mut session = Session {
@@ -635,6 +717,7 @@ mod tests {
             profile_name: "Test".into(),
             revision: 4,
             restart_count: 2,
+            reconnects: 0,
             output: GyroOutput::Mouse,
             stick: Stick::Right,
             language: Language::En,
@@ -644,12 +727,9 @@ mod tests {
             manual_available: true,
             original_scale: 12.,
             draft_scale: 12.,
+            curve: None,
             result: None,
             saved: None,
-            hotkeys: Hotkeys {
-                measure: true,
-                apply: true,
-            },
             action_error: None,
         };
         let mut snapshot = Snapshot {
@@ -680,17 +760,17 @@ mod tests {
             open_error: None,
         });
         assert!(
-            matches!(session.hotkey_action(&snapshot, Hotkey::Measure), Some(CalibrationAction::Start { axis }) if axis == "yaw")
+            matches!(session.pad_action(&snapshot, CalibrationButton::Measure), Some(CalibrationAction::Start { axis }) if axis == "yaw")
         );
-        assert!(session.hotkey_action(&snapshot, Hotkey::Apply).is_none());
+        assert!(session.pad_action(&snapshot, CalibrationButton::Apply).is_none());
 
         session.owns_measurement = true;
         snapshot.status.motion.measuring = Some("yaw".into());
         assert!(matches!(
-            session.hotkey_action(&snapshot, Hotkey::Measure),
+            session.pad_action(&snapshot, CalibrationButton::Measure),
             Some(CalibrationAction::Finish)
         ));
-        assert!(session.hotkey_action(&snapshot, Hotkey::Apply).is_none());
+        assert!(session.pad_action(&snapshot, CalibrationButton::Apply).is_none());
 
         let window = CalibrationWindow::default();
         *window.current.lock().unwrap() = Some(session.clone());
@@ -712,21 +792,24 @@ mod tests {
             scale: 12.,
         });
         assert!(matches!(
-            session.hotkey_action(&snapshot, Hotkey::Measure),
+            session.pad_action(&snapshot, CalibrationButton::Measure),
             Some(CalibrationAction::Trial)
         ));
         assert!(matches!(
-            session.hotkey_action(&snapshot, Hotkey::Apply),
+            session.pad_action(&snapshot, CalibrationButton::Apply),
             Some(CalibrationAction::Apply)
         ));
         snapshot.restart_count += 1;
-        assert!(session.hotkey_action(&snapshot, Hotkey::Apply).is_none());
+        assert!(session.pad_action(&snapshot, CalibrationButton::Apply).is_none());
+        snapshot.restart_count -= 1;
+        snapshot.status.revision += 1;
+        session.revision = snapshot.status.revision;
         session.saved = Some(Saved {
             applied: true,
             warning: None,
         });
         assert!(matches!(
-            session.hotkey_action(&snapshot, Hotkey::Apply),
+            session.pad_action(&snapshot, CalibrationButton::Apply),
             Some(CalibrationAction::Close)
         ));
     }

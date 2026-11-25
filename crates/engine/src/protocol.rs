@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-pub const PROTOCOL_VERSION: u32 = 30;
+pub const PROTOCOL_VERSION: u32 = 32;
 pub const MAX_MESSAGE: usize = 512 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +66,18 @@ pub enum Command {
     SetBindingCapture {
         active: bool,
     },
+    SetCalibrationControls {
+        session_id: CalibrationSessionId,
+        expected_revision: u64,
+        active: bool,
+    },
+    StartCurveProbe {
+        session_id: CalibrationSessionId,
+        expected_revision: u64,
+        percent: u8,
+    },
+    MarkCurveProbe { session_id: CalibrationSessionId },
+    CancelCurveProbe { session_id: CalibrationSessionId },
     SetPadShortcuts {
         bindings: Vec<crate::shortcut::PadShortcut>,
     },
@@ -175,6 +187,8 @@ pub struct Status {
     pub calibration_progress: f32,
     #[serde(default)]
     pub motion: crate::motion::MotionTelemetry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve_probe: Option<CurveProbeStatus>,
     pub input_serial: u64,
     #[serde(default)]
     pub pad_shortcuts: Vec<crate::shortcut::PadShortcut>,
@@ -228,6 +242,7 @@ impl Default for Status {
             gyro: [0.0; 3],
             calibration_progress: 0.0,
             motion: Default::default(),
+            curve_probe: None,
             input_serial: 0,
             pad_shortcuts: vec![],
             pad_shortcut_events: vec![],
@@ -257,6 +272,35 @@ pub struct PadRegionCapture {
     pub serial: u64,
     pub chord: Vec<String>,
 }
+pub type CalibrationSessionId = uuid::Uuid;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct CurveProbeStatus {
+    pub session_id: CalibrationSessionId,
+    pub percent: u8,
+    pub phase: CurveProbePhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum CurveProbePhase {
+    WaitingForMark,
+    Timing,
+    Finished { seconds: f64 },
+    Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalibrationButton {
+    Measure,
+    Apply,
+    Less,
+    More,
+    Mode,
+    Back,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
@@ -276,6 +320,10 @@ pub enum Event {
     },
     Devices {
         devices: Vec<Device>,
+    },
+    CalibrationButton {
+        session_id: CalibrationSessionId,
+        button: CalibrationButton,
     },
     Calibration {
         device_path: String,
